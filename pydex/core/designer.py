@@ -4270,14 +4270,24 @@ class Designer:
         # if atomic is given
         else:
             self.fim = 0
-            self.atomic_fims = self.atomic_fims.reshape((self.n_c, self.n_spt, self.n_mp, self.n_mp))
+            # Use a local 4-D view for the loop so that self.atomic_fims stays
+            # in its flat (n_c*n_spt, n_mp, n_mp) shape.  Overwriting
+            # self.atomic_fims here would cause _d_opt_criterion (and others)
+            # to iterate over only n_c rows when computing the analytic
+            # Jacobian, returning a gradient of length n_c instead of
+            # n_c*n_spt and crashing IPOPT's gradient callback.
+            atomic_fims_4d = self.atomic_fims.reshape(
+                (self.n_c, self.n_spt, self.n_mp, self.n_mp)
+            )
             if self._specified_n_spt:
-                for c, (eff, atom, spt_combs) in enumerate(zip(self.efforts, self.atomic_fims, self.spt_candidates_combs)):
+                for c, (eff, atom, spt_combs) in enumerate(
+                    zip(self.efforts, atomic_fims_4d, self.spt_candidates_combs)
+                ):
                     for comb, (e, spt) in enumerate(zip(eff, spt_combs)):
                         a = np.mean(atom[spt], axis=0)
                         self.fim += e * a
             else:
-                for c, (eff, atom) in enumerate(zip(self.efforts, self.atomic_fims)):
+                for c, (eff, atom) in enumerate(zip(self.efforts, atomic_fims_4d)):
                     for spt, (e, a) in enumerate(zip(eff, atom)):
                         self.fim += e * a
 
