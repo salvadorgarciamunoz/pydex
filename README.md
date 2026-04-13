@@ -1,3 +1,16 @@
+## Fork Notice
+
+This is a fork of [pydex](https://github.com/KennedyKusumo/pydex) 
+by Kennedy Kusumo et al., originally described in:
+
+> Kusumo et al. (2022), *Computers & Chemical Engineering*
+
+### Changes in this fork
+- Added IPOPT solver support via cyipopt (`package="ipopt"`)
+- Supports D/A/E-optimal and CVaR bi-objective designs with IPOPT
+- See `docs/ipopt_setup_guide.docx` for installation instructions
+- See `examples/ipopt/` for usage examples
+
 Python Design of Experiments
 ============================================
 An open-source Python package for optimal experiment design, essential to a modeller's toolbelt. If you are someone who develops a model of any kind, you will relate to the challenges of estimating its model parameters. This tool will help design maximally informative experiments for collecting data to calibrate your model. This package is a simple and powerful toolkit you must have. With an intuitive syntax and helpful documentation, it should take you little time to start designing optimal experiments for estimating the parameters of your model.
