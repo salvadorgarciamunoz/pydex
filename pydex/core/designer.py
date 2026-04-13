@@ -27,6 +27,12 @@ import cvxpy as cp
 import numdifftools as nd
 import numpy as np
 
+try:
+    import cyipopt
+    _CYIPOPT_AVAILABLE = True
+except ImportError:
+    _CYIPOPT_AVAILABLE = False
+
 
 class Designer:
     """
@@ -55,7 +61,7 @@ class Designer:
         The designer comes with various built-in plotting capabilities through
         matplotlib's plotting features.
         """
-        self.__version__ = "0.0.8"
+        self.__version__ = "0.0.9"
 
         """ In Silico Experiments """
         self._bayes_pe_time = None
@@ -664,12 +670,10 @@ class Designer:
 
         return pe_result
 
-    def insilico_bayesian_inference(self, n_walkers, n_steps, burn_in, verbose=True, prior_pdf=None, bounds=None, seed=123456, write=True):
+    def bayesian_inference(self, tic, tvc, spt, data, n_walkers, n_steps, burn_in, verbose=True, prior_pdf=None, bounds=None, seed=123456, write=True):
         if self._verbose >= 1:
             print(f"".center(100, "="))
         np.random.seed(seed)
-        self.insilico_data = self.generate_insilico_data(seed)
-        tic, tvc, spt = self._get_apportioned_candidates()
 
         if prior_pdf is None:
             if bounds is None:
@@ -677,7 +681,6 @@ class Designer:
                     "Please provide either the prior_pdf function or bounds, Pydex "
                     "assumes uniform distribution between the given bounds."
                 )
-                return
             else:
                 prior_pdf = self.uniform_prior_pdf(bounds)
 
@@ -685,7 +688,7 @@ class Designer:
             lkhd = 0
             for c, (ti, tv, sp) in enumerate(zip(tic, tvc, spt)):
                 y_pred = self._simulate_internal(ti, tv, p, sp)
-                delta = y_pred - self.insilico_data[c]
+                delta = y_pred - data[c]
                 for j in range(self._n_spt_spec):
                     lkhd += np.log(1 / np.sqrt((2 * np.pi) ** self.n_mp * np.linalg.det(self.error_cov)) * np.exp(-1/2 * delta[j] @ self.error_fim @ delta[j].T))
             return lkhd
@@ -732,6 +735,11 @@ class Designer:
             dump(self.bayesian_pe_samples, open(fp, 'wb'))
 
         return self.bayesian_pe_samples
+
+    def insilico_bayesian_inference(self, n_walkers, n_steps, burn_in, verbose=True, prior_pdf=None, bounds=None, seed=123456, write=True):
+        self.insilico_data = self.generate_insilico_data(seed)
+        tic, tvc, spt = self._get_apportioned_candidates()
+        return self.bayesian_inference(tic, tvc, spt, self.insilico_data, n_walkers, n_steps, burn_in, verbose, prior_pdf, bounds, seed, write)
 
     def plot_bayesian_inference_samples(self, bounds=None, title=None, contours=True, density=False, reso=201j, plot_fim_confidence=True, figsize=None, write=True, dpi=160):
         fig = corner.corner(
@@ -864,6 +872,11 @@ class Designer:
                            pseudo_bayesian_type=None, regularize_fim=False,
                            reso=5, plot=False, n_bins=20, tol=1e-4, dpi=360,
                            **kwargs):
+        """
+        Solve the bi-objective average-CVaR experimental design problem via the
+        epsilon-constraint method.  Accepts package='cvxpy' (default) or
+        package='ipopt' (requires cyipopt).
+        """
         self._current_criterion = criterion.__name__
 
         if "cvar" not in self._current_criterion:
@@ -1129,6 +1142,390 @@ class Designer:
                     cdf.savefig(fp_cdf, dpi=dpi)
                     pdf.savefig(fp_pdf, dpi=dpi)
 
+    # ------------------------------------------------------------------
+    # IPOPT solver back-ends (cyipopt interface)
+    # ------------------------------------------------------------------
+
+    def _solve_ipopt(self, criterion, e0, fix_effort, opt_options, **kwargs):
+        """
+        Solve a standard (non-CVaR) continuous-effort design problem via IPOPT.
+
+        Decision variable : p  (flattened effort vector, length n_p = n_c * n_spt)
+        Objective         : minimize  criterion(p)   [criterion already returns -info]
+        Constraints       : sum(p) == 1
+        Bounds            : 0 <= p_i <= 1
+
+        Analytic gradients are used for D- and A-optimal criteria (fd_jac=False).
+        For E-optimal or any criterion without an analytic Jacobian, IPOPT falls
+        back to finite-difference gradients supplied by the caller (fd_jac=True).
+        """
+        n_p = e0.size
+        e0_flat = e0.flatten()
+
+        # Detect whether the criterion supports an analytic Jacobian by doing a
+        # trial evaluation.  State is always restored whether or not an exception
+        # is raised so that no designer attributes are left corrupted.
+        old_pkg = self._optimization_package
+        old_fd  = self._fd_jac
+        self._optimization_package = "ipopt"
+        self._fd_jac = False
+        has_analytic_jac = False
+        try:
+            trial = criterion(e0_flat.copy())
+            has_analytic_jac = isinstance(trial, tuple)
+        except Exception:
+            has_analytic_jac = False
+        finally:
+            self._fd_jac = old_fd
+
+        designer_ref = self  # closure reference
+
+        class _IpoptProb:
+            """cyipopt problem object."""
+
+            def objective(self_, x):
+                designer_ref._optimization_package = "ipopt"
+                designer_ref._fd_jac = True          # value only
+                val = criterion(x)
+                if isinstance(val, tuple):
+                    val = val[0]
+                if val is None:
+                    raise RuntimeError(
+                        f"criterion '{criterion.__name__}' returned None inside IPOPT "
+                        f"objective callback.\n"
+                        f"  _pseudo_bayesian      = {designer_ref._pseudo_bayesian}\n"
+                        f"  _pseudo_bayesian_type = {designer_ref._pseudo_bayesian_type}\n"
+                        f"  _fd_jac               = {designer_ref._fd_jac}\n"
+                        f"  _optimization_package = {designer_ref._optimization_package}\n"
+                        f"  n_scr                 = {designer_ref.n_scr}\n"
+                        f"  scr_fims length       = {len(designer_ref.scr_fims) if designer_ref.scr_fims is not None else 'None'}\n"
+                        f"This usually means the pseudo_bayesian_type ({designer_ref._pseudo_bayesian_type!r}) "
+                        f"did not match any known criterion type."
+                    )
+                return float(val)
+
+            def gradient(self_, x):
+                designer_ref._optimization_package = "ipopt"
+                if has_analytic_jac:
+                    designer_ref._fd_jac = False
+                    result = criterion(x)
+                    if isinstance(result, tuple):
+                        return np.asarray(result[1], dtype=float).flatten()
+                # finite-difference fallback (e.g. E-optimal)
+                designer_ref._fd_jac = True
+                h = np.sqrt(np.finfo(float).eps)
+                grad = np.zeros(n_p)
+                f0 = float(criterion(x))
+                for i in range(n_p):
+                    xp = x.copy()
+                    xp[i] += h
+                    fp = criterion(xp)
+                    if isinstance(fp, tuple):
+                        fp = fp[0]
+                    grad[i] = (float(fp) - f0) / h
+                return grad
+
+            def constraints(self_, x):
+                return np.array([np.sum(x) - 1.0])
+
+            def jacobian(self_, x):
+                # d(sum(p)-1)/d(p_i) = 1 for all i
+                return np.ones(n_p)
+
+        # --- bounds and constraint bounds ---
+        lb = np.zeros(n_p)
+        ub = np.ones(n_p)
+        if fix_effort is not None:
+            fixed = (fix_effort / fix_effort.sum()).flatten()
+            lb = fixed.copy()
+            ub = fixed.copy()
+
+        # --- build and configure IPOPT problem ---
+        nlp = cyipopt.Problem(
+            n=n_p,
+            m=1,
+            problem_obj=_IpoptProb(),
+            lb=lb,
+            ub=ub,
+            cl=np.array([0.0]),
+            cu=np.array([0.0]),
+        )
+
+        ipopt_opts = {
+            "max_iter"      : 3000,
+            "print_level"   : 5 if self._verbose >= 2 else 0,
+            "linear_solver" : self._optimizer,
+            "tol"           : 1e-8,
+            "acceptable_tol": 1e-6,
+        }
+        if opt_options is not None:
+            ipopt_opts.update(opt_options)
+        for key, val in ipopt_opts.items():
+            nlp.add_option(key, val)
+
+        x_opt, info = nlp.solve(e0_flat)
+
+        # --- restore state ---
+        self._optimization_package = old_pkg
+        self._fd_jac = old_fd
+
+        # --- unpack solution ---
+        if self._specified_n_spt:
+            self.efforts = x_opt.reshape((self.n_c, self.n_spt_comb))
+        else:
+            self.efforts = x_opt.reshape((self.n_c, self.n_spt))
+        self._efforts_transformed = False
+        self._transform_efforts()
+
+        # IPOPT minimises the objective (which is -criterion), so obj_val is
+        # the *minimum* of (-criterion).  Negate so that _criterion_value has
+        # the same sign convention as the cvxpy/scipy paths (i.e. equals the
+        # *maximum* of the criterion, e.g. log-det for D-optimal).
+        return -info["obj_val"]
+
+    def _solve_cvar_ipopt(self, criterion, beta, e0, min_expected_value,
+                          opt_options, **kwargs):
+        """
+        Solve the CVaR experimental design problem via IPOPT.
+
+        The augmented decision variable vector is:
+            x = [ p (n_p),  V (1),  delta (n_scr) ]
+
+        Objective (minimise):
+            -V + 1/(n_scr*(1-beta)) * sum(delta)
+
+        Constraints:
+            (0)      sum(p) == 1                            [equality]
+            (j+1)    delta_j - V + phi_j(p) >= 0            [inequality, j=0..n_scr-1]
+            optional: sum_j phi_j / n_scr >= min_expected_value  [average lower bound]
+
+        where  phi_j(p) = -criterion(scr_fims_j(p))  is the information content
+        for scenario j.  The gradient of phi_j w.r.t. p uses the closed-form
+        expression: for D-optimal,  dphi_j/dp_i = Tr(M_j^{-1} * A_{j,i}).
+
+        Bounds:
+            0 <= p_i <= 1
+            -inf <= V <= inf
+            0 <= delta_j < inf
+        """
+        # ------------------------------------------------------------------
+        # 1. trigger sensitivity computation and pre-compute pb_atomic_fims
+        # ------------------------------------------------------------------
+        old_pkg = self._optimization_package
+        old_fd  = self._fd_jac
+
+        # pb_atomic_fims is only stored when _large_memory_requirement is False.
+        # For very large problems pydex skips storing them to save RAM; in that
+        # case the IPOPT back-end cannot function (it needs the full atomic array
+        # for gradient computation).  Fail early with a clear message.
+        if self._large_memory_requirement:
+            raise NotImplementedError(
+                "The IPOPT CVaR solver requires pb_atomic_fims to be stored in memory, "
+                "but this designer was initialised with _large_memory_requirement=True. "
+                "Use package='cvxpy' for problems that exceed the memory budget, or "
+                "reduce the number of candidates / scenarios so that "
+                "_large_memory_requirement reverts to False."
+            )
+
+        self._optimization_package = "ipopt"
+        self._fd_jac = True   # only need value for initial FIM evaluation
+
+        # Force computation of pb_atomic_fims via eval_fim
+        self.efforts = e0
+        self.eval_fim(e0)       # populates self.scr_fims and self.pb_atomic_fims
+
+        n_p   = e0.size
+        n_scr = self.n_scr
+        # pb_atomic_fims: shape (n_scr, n_c*n_spt, n_mp, n_mp)
+        pb_atomics = self.pb_atomic_fims   # numpy array, pre-computed
+
+        # ------------------------------------------------------------------
+        # 2. helper: evaluate criterion and gradient for a single scenario
+        # ------------------------------------------------------------------
+        def _phi_and_grad(p_flat, scr_idx):
+            """
+            Returns (phi_j, grad_phi_j) where phi_j = info content (positive scalar)
+            and grad_phi_j is d(phi_j)/d(p_i) for i = 0..n_p-1.
+
+            Analytic gradient formulae (criteria return -phi, so phi = -crit_val):
+              D-optimal:  dphi_j/dp_i =  Tr(M_j^{-1} * A_{j,i})
+              A-optimal:  dphi_j/dp_i = -Tr((M_j^{-1})^2 * A_{j,i})   [minimise Tr(M^{-1})]
+              E-optimal:  no analytic grad implemented -> finite differences
+            Falls back to finite differences on LinAlgError or unknown criterion.
+            """
+            atoms_j = pb_atomics[scr_idx]   # shape (n_p, n_mp, n_mp)
+            M_j = np.einsum('i,imn->mn', p_flat, atoms_j)
+
+            # criterion value (pydex criteria return -phi, so phi = -crit_val)
+            crit_val = criterion(M_j)
+            if isinstance(crit_val, tuple):
+                crit_val = crit_val[0]
+            phi_j = -float(crit_val)
+
+            # choose analytic gradient based on criterion name
+            crit_name = criterion.__name__ if hasattr(criterion, '__name__') else ''
+            use_fd = True
+            try:
+                M_j_inv = np.linalg.inv(M_j)
+                if 'd_opt' in crit_name:
+                    # D-optimal: dphi/dp_i = Tr(M^{-1} A_i)
+                    grad = np.array([
+                        np.sum(M_j_inv.T * atoms_j[i]) for i in range(n_p)
+                    ])
+                    use_fd = False
+                elif 'a_opt' in crit_name:
+                    # A-optimal: dphi/dp_i = Tr(M^{-2} A_i)  (sign: -d(Tr M^{-1})/dp_i)
+                    M_j_inv2 = M_j_inv @ M_j_inv
+                    grad = np.array([
+                        np.sum(M_j_inv2.T * atoms_j[i]) for i in range(n_p)
+                    ])
+                    use_fd = False
+                # E-optimal has no closed-form grad -> falls through to FD
+            except np.linalg.LinAlgError:
+                use_fd = True   # singular M_j: use FD
+
+            if use_fd:
+                h = np.sqrt(np.finfo(float).eps)
+                grad = np.zeros(n_p)
+                for i in range(n_p):
+                    pp = p_flat.copy(); pp[i] += h
+                    M_p = np.einsum('i,imn->mn', pp, atoms_j)
+                    cv = criterion(M_p)
+                    if isinstance(cv, tuple): cv = cv[0]
+                    grad[i] = (-float(cv) - phi_j) / h
+            return phi_j, grad
+
+        # Total size of augmented decision vector
+        # x = [p (n_p), V (1), delta (n_scr)]
+        n_x = n_p + 1 + n_scr
+        idx_V     = n_p
+        idx_delta = n_p + 1   # start index of delta block
+
+        # Number of constraints:
+        #   0      : sum(p) == 1
+        #   1..n_scr : delta_j - V + phi_j >= 0
+        #   n_scr+1  : (optional) average lower bound
+        has_avg_lb = (min_expected_value is not None)
+        n_con = 1 + n_scr + (1 if has_avg_lb else 0)
+
+        designer_ref = self
+
+        class _IpoptCVaRProb:
+
+            def objective(self_, x):
+                p     = x[:n_p]
+                V     = x[idx_V]
+                delta = x[idx_delta:]
+                return float(-V + np.sum(delta) / (n_scr * (1.0 - beta)))
+
+            def gradient(self_, x):
+                g           = np.zeros(n_x)
+                g[idx_V]    = -1.0
+                g[idx_delta:] = 1.0 / (n_scr * (1.0 - beta))
+                return g
+
+            def _eval_scenarios(self_, p):
+                """Evaluate phi and grad for all scenarios; cache by p identity."""
+                if not hasattr(self_, '_cache_p') or not np.array_equal(self_._cache_p, p):
+                    self_._cache_p = p.copy()
+                    self_._cache = [_phi_and_grad(p, j) for j in range(n_scr)]
+                return self_._cache
+
+            def constraints(self_, x):
+                p     = x[:n_p]
+                V     = x[idx_V]
+                delta = x[idx_delta:]
+                results = self_._eval_scenarios(p)
+                c = np.empty(n_con)
+                c[0] = np.sum(p) - 1.0
+                for j in range(n_scr):
+                    phi_j = results[j][0]
+                    c[1 + j] = delta[j] - V + phi_j
+                if has_avg_lb:
+                    avg_phi = np.mean([results[j][0] for j in range(n_scr)])
+                    c[1 + n_scr] = avg_phi - min_expected_value
+                return c
+
+            def jacobian(self_, x):
+                p     = x[:n_p]
+                V     = x[idx_V]
+                delta = x[idx_delta:]
+                results = self_._eval_scenarios(p)
+                J = np.zeros((n_con, n_x))
+                J[0, :n_p] = 1.0
+                for j in range(n_scr):
+                    grad_phi_j = results[j][1]
+                    J[1 + j, :n_p]          = grad_phi_j
+                    J[1 + j, idx_V]         = -1.0
+                    J[1 + j, idx_delta + j] =  1.0
+                if has_avg_lb:
+                    avg_grad = np.mean([results[j][1] for j in range(n_scr)], axis=0)
+                    J[1 + n_scr, :n_p] = avg_grad
+                return J.flatten()
+
+        # --- initial guess for augmented vector ---
+        e0_flat = e0.flatten()
+        # V0: start at the worst phi across scenarios
+        phis0 = [_phi_and_grad(e0_flat, j)[0] for j in range(n_scr)]
+        V0 = np.percentile(phis0, (1 - beta) * 100)
+        delta0 = np.maximum(0.0, V0 - np.array(phis0))
+        x0 = np.concatenate([e0_flat, [V0], delta0])
+
+        # --- bounds ---
+        lb = np.concatenate([np.zeros(n_p), [-1e20], np.zeros(n_scr)])
+        ub = np.concatenate([np.ones(n_p),  [ 1e20], np.full(n_scr, 1e20)])
+
+        # --- constraint bounds ---
+        cl = np.zeros(n_con)
+        cu = np.zeros(n_con)
+        cl[0] = 0.0;  cu[0] = 0.0   # equality for sum(p)
+        cl[1:] = 0.0; cu[1:] = 1e20  # inequalities >= 0
+
+        # --- build IPOPT problem ---
+        nlp = cyipopt.Problem(
+            n=n_x,
+            m=n_con,
+            problem_obj=_IpoptCVaRProb(),
+            lb=lb,
+            ub=ub,
+            cl=cl,
+            cu=cu,
+        )
+
+        ipopt_opts = {
+            "max_iter"      : 3000,
+            "print_level"   : 5 if self._verbose >= 2 else 0,
+            "linear_solver" : self._optimizer,
+            "tol"           : 1e-8,
+            "acceptable_tol": 1e-6,
+        }
+        if opt_options is not None:
+            ipopt_opts.update(opt_options)
+        for key, val in ipopt_opts.items():
+            nlp.add_option(key, val)
+
+        x_opt, info = nlp.solve(x0)
+
+        # --- restore state ---
+        self._optimization_package = old_pkg
+        self._fd_jac = old_fd
+
+        # --- unpack solution ---
+        p_opt = x_opt[:n_p]
+        if self._specified_n_spt:
+            self.efforts = p_opt.reshape((self.n_c, self.n_spt_comb))
+        else:
+            self.efforts = p_opt.reshape((self.n_c, self.n_spt))
+        self._efforts_transformed = False
+        self._transform_efforts()
+
+        # Return the CVaR objective value (negated so it reads as +CVaR)
+        return -info["obj_val"]
+
+    # ------------------------------------------------------------------
+    # end of IPOPT solver back-ends
+    # ------------------------------------------------------------------
+
     def _formulate_cvar_problem(self, criterion, beta, p_cons, min_expected_value=None):
         self.v = cp.Variable()
         self.s = cp.Variable((self.n_scr,), nonneg=True)
@@ -1155,6 +1552,10 @@ class Designer:
                            unconstrained_form=False, trim_fim=False,
                            pseudo_bayesian_type=None, regularize_fim=False,
                            reso=5, plot=False, n_bins=20, tol=1e-4, **kwargs):
+        """
+        Alternative formulation of the bi-objective average-CVaR design problem.
+        Accepts package='cvxpy' (default) or package='ipopt' (requires cyipopt).
+        """
         self._current_criterion = criterion.__name__
 
         if "cvar" not in self._current_criterion:
@@ -1514,6 +1915,9 @@ class Designer:
         if self._optimization_package == "cvxpy":
             if optimizer is None:
                 self._optimizer = "MOSEK"
+        if self._optimization_package == "ipopt":
+            if optimizer is None:
+                self._optimizer = "mumps"  # open-source fallback; use "ma27"/"ma57" if HSL available
 
         """ deal with unconstrained form """
         if self._optimization_package == "scipy":
@@ -1526,6 +1930,11 @@ class Designer:
             if self._unconstrained_form:
                 self._unconstrained_form = False
                 print("Warning: unconstrained form is not supported by cvxpy; "
+                      "continuing normally with constrained form.")
+        if self._optimization_package == "ipopt":
+            if self._unconstrained_form:
+                self._unconstrained_form = False
+                print("Warning: unconstrained form is not supported for ipopt; "
                       "continuing normally with constrained form.")
 
         """ main codes """
@@ -1618,7 +2027,7 @@ class Designer:
                     )
                 opt_result = minimize(
                     fun=criterion,
-                    x0=e0,
+                    x0=e0.flatten(),
                     method=optimizer,
                     options=opt_options,
                     constraints=constraint,
@@ -1673,8 +2082,27 @@ class Designer:
                     **kwargs
                 )
                 self.efforts = self.efforts.value
+        elif self._optimization_package == "ipopt":
+            if not _CYIPOPT_AVAILABLE:
+                raise ImportError(
+                    "cyipopt is not installed. Install it with: pip install cyipopt\n"
+                    "Note: IPOPT itself must also be available on your system."
+                )
+            if self._discrete_design:
+                raise NotImplementedError(
+                    "Discrete (exact) designs are not supported for the ipopt package; "
+                    "use 'cvxpy' instead."
+                )
+            if self._cvar_problem:
+                opt_fun = self._solve_cvar_ipopt(
+                    criterion, beta, e0, min_expected_value, opt_options, **kwargs
+                )
+            else:
+                opt_fun = self._solve_ipopt(
+                    criterion, e0, fix_effort, opt_options, **kwargs
+                )
         else:
-            raise SyntaxError("Unrecognized package; try \"scipy\" or \"cvxpy\".")
+            raise SyntaxError("Unrecognized package; try \"scipy\", \"cvxpy\", or \"ipopt\".")
 
         finish = time()
 
@@ -3486,6 +3914,15 @@ class Designer:
         self._cvar_problem = True
 
         if self._pseudo_bayesian:
+            if self._optimization_package == "ipopt":
+                # fim is a plain numpy array when called from the IPOPT back-end
+                if np.asarray(fim).size == 1:
+                    return -float(np.squeeze(fim))
+                sign, logdet = np.linalg.slogdet(np.asarray(fim))
+                if sign != 1:
+                    return np.inf
+                return -logdet
+            # cvxpy path (original behaviour)
             # old behaviour
             if False:
                 self._eval_fim(efforts, mp)
@@ -3800,7 +4237,7 @@ class Designer:
         """ evaluate fim """
         start = time()
 
-        if self._optimization_package == "scipy":
+        if self._optimization_package in ("scipy", "ipopt"):
             if self._specified_n_spt:
                 self.efforts = self.efforts.reshape((self.n_c, self.n_spt_comb))
             else:
@@ -4151,7 +4588,7 @@ class Designer:
         self.eval_fim(efforts)
 
         if self.fim.size == 1:
-            if self._optimization_package == "scipy":
+            if self._optimization_package in ("scipy", "ipopt"):
                 d_opt = -self.fim
                 if self._fd_jac:
                     return np.squeeze(d_opt)
@@ -4164,7 +4601,7 @@ class Designer:
             elif self._optimization_package == 'cvxpy':
                 return -self.fim
 
-        if self._optimization_package == "scipy":
+        if self._optimization_package in ("scipy", "ipopt"):
             sign, d_opt = np.linalg.slogdet(self.fim)
             if self._fd_jac:
                 if sign == 1:
@@ -4190,7 +4627,7 @@ class Designer:
         self.eval_fim(efforts)
 
         if self.fim.size == 1:
-            if self._optimization_package == "scipy":
+            if self._optimization_package in ("scipy", "ipopt"):
                 if self._fd_jac:
                     return -self.fim
                 else:
@@ -4201,7 +4638,7 @@ class Designer:
             elif self._optimization_package == "cvxpy":
                 return -self.fim
 
-        if self._optimization_package == "scipy":
+        if self._optimization_package in ("scipy", "ipopt"):
             if self._fd_jac:
                 eigvals = np.linalg.eigvalsh(self.fim)
                 if np.all(eigvals > 0):
@@ -4235,7 +4672,7 @@ class Designer:
         if self.fim.size == 1:
             return -self.fim
 
-        if self._optimization_package == "scipy":
+        if self._optimization_package in ("scipy", "ipopt"):
             if self._fd_jac:
                 return -np.linalg.eigvalsh(self.fim).min()
             else:
@@ -4363,7 +4800,7 @@ class Designer:
         """ it is a PSD criterion, with exponential cone """
         self.eval_fim(efforts)
 
-        if self._optimization_package == "scipy":
+        if self._optimization_package in ("scipy", "ipopt"):
             if self._fd_jac:
                 if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
                     avg_fim = np.mean([fim for fim in self.scr_fims], axis=0)
@@ -4403,14 +4840,14 @@ class Designer:
         """ it is a PSD criterion """
         self.eval_fim(efforts)
 
-        if self._optimization_package == "scipy":
+        if self._optimization_package in ("scipy", "ipopt"):
             if self._fd_jac:
                 if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
                     a_opt = np.linalg.inv(
                         np.mean([fim for fim in self.scr_fims], axis=0)
                     ).trace()
                 elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
-                    np.mean([
+                    return np.mean([
                         np.linalg.inv(fim).trace()
                         for fim in self.scr_fims
                     ])
@@ -4436,7 +4873,7 @@ class Designer:
         """ it is a PSD criterion """
         self.eval_fim(efforts)
 
-        if self._optimization_package == "scipy":
+        if self._optimization_package in ("scipy", "ipopt"):
             if self._fd_jac:
                 if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
                     avg_fim = np.sum([fim for fim in self.scr_fims], axis=0) / self.n_scr
