@@ -39,14 +39,180 @@ class Designer:
     An experiment designer with capabilities to do parameter estimation, parameter
     estimability study, and computes both continuous and exact experimental designs.
 
-    Interfaces to optimization solvers via scipy, and cvxpy. Supports virtually any Python
-    functions as long as one can specify the model within the required general syntax.
-    Special support for ODE models solved via Pyomo.DAE: allow model, and simulator to
-    be passed to the designer to prevent re-build of model and simulator each time a
-    the model is simulated, optimizing computational time.
+    Interfaces to optimization solvers via scipy, cvxpy, and IPOPT (via cyipopt).
+    Supports virtually any Python function as the model simulator as long as it
+    follows one of the supported signatures (see ``simulate`` below).  Special
+    support for ODE models solved via Pyomo.DAE: the model and simulator objects
+    can be passed to the designer to prevent re-building them on every sensitivity
+    evaluation, significantly reducing computation time.
 
-    Designer comes equipped with convenient built-in visualization capabilities, using
-    matplotlib.
+    Designer comes equipped with convenient built-in visualization capabilities
+    using matplotlib, and supports the following design criteria:
+
+        Calibration-oriented (minimise parameter uncertainty):
+            D-optimal  — maximises det(FIM),  minimises joint confidence volume
+            A-optimal  — minimises trace(FIM^{-1}), minimises total param variance
+            E-optimal  — minimises lambda_max(FIM^{-1}), minimises worst direction
+
+        Prediction-oriented (minimise prediction uncertainty at target conditions):
+            V-optimal  — minimises trace(W FIM^{-1} W^T) at user-specified dw
+            G-optimal  — minimises max prediction variance over a region
+
+        Risk-averse:
+            CVaR-D/A/E — conditional value-at-risk variants for robust design
+
+    Quick-start
+    -----------
+    A minimal example for a static model (no time-varying controls):
+
+    >>> import numpy as np
+    >>> from pydex.core.designer import Designer
+    >>>
+    >>> # 1. Define the simulate function (signature type 1)
+    >>> def simulate(ti_controls, model_parameters):
+    ...     x   = ti_controls[0]        # single input
+    ...     a, b = model_parameters     # two parameters to estimate
+    ...     return np.array([a * x + b])
+    >>>
+    >>> # 2. Build the designer
+    >>> d = Designer()
+    >>> d.simulate            = simulate
+    >>> d.model_parameters    = np.array([2.0, 1.0])   # initial guess
+    >>> d.ti_controls_candidates = np.linspace(0, 10, 21).reshape(-1, 1)
+    >>> d.initialize()
+    >>>
+    >>> # 3. Run D-optimal design
+    >>> d.design_experiment(d.d_opt_criterion, package="cvxpy")
+    >>> d.print_optimal_candidates()
+
+    Simulate function signatures
+    ----------------------------
+    Pydex recognises five signatures based on the argument names.  Use
+    exactly these names — pydex inspects them with ``inspect.signature``:
+
+    Type 1 — static model, time-invariant controls only:
+        simulate(ti_controls, model_parameters)
+
+    Type 2 — dynamic model, time-invariant controls + sampling times:
+        simulate(ti_controls, sampling_times, model_parameters)
+
+    Type 3 — dynamic model, time-varying controls + sampling times:
+        simulate(tv_controls, sampling_times, model_parameters)
+
+    Type 4 — dynamic model, both control types + sampling times:
+        simulate(ti_controls, tv_controls, sampling_times, model_parameters)
+
+    Type 5 — dynamic model, sampling times only (no explicit controls):
+        simulate(sampling_times, model_parameters)
+
+    In all cases ``model_parameters`` must be present.  The function must
+    return a numpy array:
+        - Static (types 1): shape (n_responses,)
+        - Dynamic (types 2-5): shape (n_spt, n_responses)
+
+    Control variables
+    -----------------
+    ``ti_controls`` — time-invariant controls
+        Settings fixed for the entire duration of an experiment.
+        Examples: initial concentration, reactor pressure, feed ratio.
+        Set as ``designer.ti_controls_candidates``, shape (n_c, n_tic).
+
+    ``tv_controls`` — time-varying controls
+        Settings that vary during an experiment, represented as a flat
+        parameter vector whose interpretation (ramp, step, spline, etc.)
+        is defined inside the user's simulate function.
+        Examples: temperature ramp rate, feed profile knots.
+        Set as ``designer.tv_controls_candidates``, shape (n_c, n_tvc).
+
+    ``sampling_times`` — measurement time points
+        The times within a dynamic experiment at which measurements are
+        taken.  Set as ``designer.sampling_times_candidates``, shape (n_c, n_spt).
+        When ``optimize_sampling_times=True`` is passed to design_experiment,
+        pydex optimises the effort allocation over both candidates and
+        sampling times simultaneously.
+
+    V-optimal design workflow (two-stage)
+    --------------------------------------
+    V-optimal design targets prediction accuracy at a specific operating
+    condition ``dw`` rather than minimising global parameter uncertainty.
+    It requires two stages.
+
+    *Stage 1 — Process optimisation (find dw):*
+    Solve a user-defined constrained optimisation to find the operating
+    condition that maximises (or minimises) a process objective subject
+    to process constraints.  This is the condition at which the model
+    needs to be most accurate — typically the economically optimal point.
+
+    Set the following attributes before calling
+    ``find_optimal_operating_point()``::
+
+            designer.process_objective   = my_objective
+            designer.process_constraints = my_constraints   # optional
+            designer.dw_sense            = "maximize"       # or "minimize"
+            designer.dw_bounds_tic       = [(lb, ub), ...]  # one per ti_control
+            designer.dw_bounds_tvc       = [(lb, ub), ...]  # one per tv_control
+
+    ``process_objective`` signature: ``callable(tic, tvc, mp) -> float``
+        ``tic`` is a 1-D array of ti_controls, ``tvc`` a 1-D array of
+        tv_control parameters, ``mp`` the current model_parameters array.
+        Returns the scalar value to minimise or maximise.
+
+    ``process_constraints`` signature:
+    ``callable(tic, tvc, mp) -> list of dicts``
+        Each dict: ``{"type": "ineq" | "eq", "fun": callable(tic, tvc, mp)}``.
+        For ``"ineq"``: ``fun(tic, tvc, mp) >= 0`` means feasible.
+        For ``"eq"``: ``fun(tic, tvc, mp) == 0``.
+        The constraint structure must be fixed; only values change with x.
+
+    Example Stage 1 setup::
+
+            def my_objective(tic, tvc, mp):
+                sol = _solve(tic[0], tic[1], tic[2], mp, np.array([T_FINAL]))
+                return float(sol.y[1, 0])   # maximise CB at end of batch
+
+            def my_constraints(tic, tvc, mp):
+                def ci_con(tic, tvc, mp):
+                    sol = _solve(tic[0], tic[1], tic[2], mp, np.array([T_FINAL]))
+                    return CI_MAX - float(sol.y[2, 0])   # CI_final <= CI_MAX
+                def jacket_con(tic, tvc, mp):
+                    return tic[1] - tic[0]               # Tjacket >= T0
+                return [
+                    {"type": "ineq", "fun": ci_con},
+                    {"type": "ineq", "fun": jacket_con},
+                ]
+
+            designer.process_objective   = my_objective
+            designer.process_constraints = my_constraints
+            designer.dw_sense            = "maximize"
+            designer.dw_bounds_tic       = [(45, 75), (50, 85), (0.5, 2.0)]
+            designer.dw_bounds_tvc       = []
+
+            dw_tic, dw_tvc = designer.find_optimal_operating_point(
+                init_guess = np.array([[60.0, 70.0, 1.0]]),
+                optimizer  = "mumps",
+            )
+
+    *Stage 2 — V-optimal MBDoE (design experiments):*
+    After Stage 1, set ``dw_spt`` — the time point(s) within the optimal
+    operating profile at which prediction accuracy is required — then call
+    ``design_v_optimal()``.  Note that ``dw_spt`` is a user specification
+    (e.g. end of batch), not a degree of freedom; it is distinct from
+    ``sampling_times_candidates``, which pydex optimises over::
+
+            designer.dw_spt = np.array([t_final])
+
+            designer.design_v_optimal(
+                package               = "ipopt",
+                optimizer             = "mumps",
+                optimize_sampling_times = True,
+            )
+
+    References
+    ----------
+    Shahmohammadi, A. & McAuley, K.B. (2019). Sequential model-based A- and
+    V-optimal design of experiments for building fundamental models of
+    pharmaceutical production processes. Computers & Chemical Engineering,
+    129, 106504. https://doi.org/10.1016/j.compchemeng.2019.06.029
     """
     def __init__(self):
         """
@@ -282,6 +448,84 @@ class Designer:
         self._save_txt_nc = 0
         self._save_txt_fmt = '% 7.3e'
         self._save_atomics = False
+
+        """ V-optimal design: operating point and W matrix
+        =====================================================
+        These attributes support the two-stage V-optimal MBDoE workflow.
+
+        Stage 1 — Process optimisation (user sets before calling
+        find_optimal_operating_point):
+
+            process_objective   : callable(tic, tvc, mp) -> float
+                The scalar process objective to optimise.  Returns a value
+                to be minimised or maximised depending on dw_sense.
+                Example: return predicted CB at end of batch.
+
+            process_constraints : callable(tic, tvc, mp) -> list of dicts
+                Returns process constraints in scipy/IPOPT format.
+                Each dict: {"type": "ineq"|"eq", "fun": f(tic, tvc, mp)}
+                For "ineq": fun >= 0 means feasible.
+                Set to None if no constraints beyond box bounds.
+
+            dw_bounds_tic : list of (lb, ub) tuples, length n_tic
+                Box bounds on the ti_controls at the operating point.
+                Must be provided before calling find_optimal_operating_point.
+
+            dw_bounds_tvc : list of (lb, ub) tuples, length n_tvc
+                Box bounds on the tv_controls at the operating point.
+                Set to [] if the model has no tv_controls.
+
+            dw_sense : str, "minimize" or "maximize"
+                Direction of the process objective optimisation.
+
+        Stage 1 results (set automatically by find_optimal_operating_point,
+        fixed thereafter — do not overwrite manually):
+
+            dw_tic : np.ndarray, shape (r_w, n_tic)
+                Optimal ti_controls at the operating point(s) of interest.
+                r_w > 1 when multiple starting points find distinct optima.
+
+            dw_tvc : np.ndarray, shape (r_w, n_tvc)
+                Optimal tv_controls at the operating point(s) of interest.
+
+            _dw_fixed : bool
+                Set to True by find_optimal_operating_point. Guards against
+                calling design_v_optimal before Stage 1 has been run.
+
+        Stage 2 — V-optimal MBDoE (user sets before calling design_v_optimal):
+
+            dw_spt : np.ndarray, shape (n_spt_dw,)
+                Time point(s) within the optimal operating profile at which
+                prediction accuracy is required.  This is a user specification
+                (e.g. end of batch, critical process transition) — it is NOT
+                a degree of freedom for the MBDoE optimisation.
+                For non-dynamic models, this attribute is ignored.
+                Example: designer.dw_spt = np.array([t_final])
+
+            W : np.ndarray, shape (r_w * n_spt_dw * n_m_r, n_mp)
+                Scaled sensitivity matrix evaluated at dw, used in the
+                V-optimality criterion J_V = trace(W @ FIM^{-1} @ W^T).
+                Computed automatically by _eval_W_matrix() on first call
+                to design_v_optimal(). Cached thereafter; set to None or
+                pass recompute_W=True to force recomputation (e.g. after
+                updating model_parameters in a sequential design loop).
+        """
+        # user-defined process optimization (Stage 1)
+        self.process_objective = None       # callable(tic, tvc, mp) -> scalar
+        self.process_constraints = None     # callable(tic, tvc, mp) -> list of
+                                            #   {"type": "eq"/"ineq", "fun": f(tic,tvc,mp)}
+        self.dw_bounds_tic = None           # list of (lb, ub), length n_tic
+        self.dw_bounds_tvc = None           # list of (lb, ub), length n_tvc
+        self.dw_sense = "minimize"          # "minimize" or "maximize"
+
+        # results of Stage 1 (fixed once computed)
+        self.dw_tic = None                  # shape (r_w, n_tic)
+        self.dw_tvc = None                  # shape (r_w, n_tvc)
+        self._dw_fixed = False
+
+        # W matrix and associated spt for sensitivity evaluation at dw
+        self.dw_spt = None                  # shape (n_spt_dw,) — time points for W eval
+        self.W = None                       # shape (r_w * n_spt_dw * n_m_r, n_mp)
 
     @property
     def model_parameters(self):
@@ -1282,6 +1526,343 @@ class Designer:
         # the same sign convention as the cvxpy/scipy paths (i.e. equals the
         # *maximum* of the criterion, e.g. log-det for D-optimal).
         return -info["obj_val"]
+
+    def _solve_ipopt_operating_point(self, x0, lb_arr, ub_arr, opt_options):
+        """
+        Solve a single operating-point optimization via IPOPT.
+
+        Decision variables : x = [tic | tvc]  concatenated, length n_x = n_tic + n_tvc
+        Objective          : process_objective(tic, tvc, mp), sign-flipped if "maximize"
+        Constraints        : process_constraints(tic, tvc, mp) parsed into cyipopt format
+        Bounds             : lb_arr[i] <= x[i] <= ub_arr[i]
+
+        All gradients and constraint Jacobians are computed by forward finite differences,
+        consistent with fd_jac=True elsewhere in the designer.
+
+        Returns
+        -------
+        x_opt : np.ndarray, shape (n_x,)
+        obj_val : float  (in the user's original sense, sign restored)
+        info : dict  (raw cyipopt output)
+        """
+        if not _CYIPOPT_AVAILABLE:
+            raise RuntimeError(
+                "cyipopt is not installed. Cannot use package='ipopt' for "
+                "find_optimal_operating_point()."
+            )
+
+        n_tic = self.n_tic if self._invariant_controls else 0
+        n_tvc = self.n_tvc if self._dynamic_controls else 0
+        n_x   = n_tic + n_tvc
+
+        sign = -1.0 if self.dw_sense == "maximize" else 1.0
+
+        designer_ref = self
+
+        # --- parse user constraints ---
+        # process_constraints is called once at x0 to obtain the constraint
+        # structure (number of constraints, types, callables). This follows
+        # scipy's convention — the structure must be fixed; only the values
+        # change with x. Each entry must be:
+        #   {"type": "eq" | "ineq", "fun": callable(tic, tvc, mp) -> scalar}
+        # "ineq" means fun(tic, tvc, mp) >= 0  (IPOPT convention via cl=0, cu=inf)
+        # "eq"   means fun(tic, tvc, mp) == 0  (IPOPT convention via cl=cu=0)
+        raw_constraints = []
+        if designer_ref.process_constraints is not None:
+            raw_constraints = designer_ref.process_constraints(
+                x0[:n_tic], x0[n_tic:], designer_ref.model_parameters
+            )
+
+        # wrap each constraint's "fun" so it accepts the flat x vector
+        # and re-splits into (tic, tvc, mp) at call time.
+        # model_parameters is read from designer_ref at evaluation time so that
+        # sequential updates to mp are automatically reflected.
+        wrapped = []
+        for con in raw_constraints:
+            f = con["fun"]   # capture per-iteration via default arg below
+            wrapped.append({
+                "type": con["type"],
+                "fun" : lambda x, _f=f: float(
+                    _f(x[:n_tic], x[n_tic:], designer_ref.model_parameters)
+                ),
+            })
+
+        m  = len(wrapped)
+        # IPOPT constraint bounds:
+        #   equality   cl = cu = 0      →  fun(x) == 0
+        #   inequality cl = 0, cu = inf →  fun(x) >= 0
+        cl = np.array([0.0  if c["type"] == "ineq" else 0.0 for c in wrapped])
+        cu = np.array([2e19 if c["type"] == "ineq" else 0.0 for c in wrapped])
+
+        h_fd = np.sqrt(np.finfo(float).eps)
+
+        class _IpoptOpPoint:
+
+            def objective(self_, x):
+                tic = x[:n_tic]
+                tvc = x[n_tic:]
+                return sign * float(
+                    designer_ref.process_objective(tic, tvc, designer_ref.model_parameters)
+                )
+
+            def gradient(self_, x):
+                f0   = self_.objective(x)
+                grad = np.zeros(n_x)
+                for i in range(n_x):
+                    xp    = x.copy()
+                    xp[i] += h_fd
+                    grad[i] = (self_.objective(xp) - f0) / h_fd
+                return grad
+
+            def constraints(self_, x):
+                if m == 0:
+                    return np.empty(0)
+                return np.array([c["fun"](x) for c in wrapped])
+
+            def jacobian(self_, x):
+                if m == 0:
+                    return np.empty(0)
+                c0  = self_.constraints(x)
+                jac = np.zeros((m, n_x))
+                for i in range(n_x):
+                    xp       = x.copy()
+                    xp[i]   += h_fd
+                    jac[:, i] = (self_.constraints(xp) - c0) / h_fd
+                return jac.flatten()
+
+        nlp = cyipopt.Problem(
+            n=n_x,
+            m=m,
+            problem_obj=_IpoptOpPoint(),
+            lb=lb_arr,
+            ub=ub_arr,
+            cl=cl,
+            cu=cu,
+        )
+
+        ipopt_opts = {
+            "max_iter"      : 3000,
+            "print_level"   : 5 if self._verbose >= 2 else 0,
+            "linear_solver" : self._optimizer if self._optimizer else "mumps",
+            "tol"           : 1e-8,
+            "acceptable_tol": 1e-6,
+        }
+        if opt_options is not None:
+            ipopt_opts.update(opt_options)
+        for key, val in ipopt_opts.items():
+            nlp.add_option(key, val)
+
+        x_opt, info = nlp.solve(x0)
+
+        # restore objective to user's original sense
+        obj_val = sign * info["obj_val"]
+
+        return x_opt, obj_val, info
+
+    def find_optimal_operating_point(self, init_guess, optimizer="mumps",
+                                      opt_options=None, n_starts=1):
+        """
+        Stage 1 of V-optimal MBDoE: find the process operating condition(s)
+        dw at which the model needs to be most accurate.
+
+        Solves a nonlinear constrained optimisation over the ti_controls and
+        tv_controls space using IPOPT.  The objective and constraints are
+        user-defined via ``process_objective`` and ``process_constraints``.
+        The result is stored in ``dw_tic`` and ``dw_tvc`` and fixed for the
+        remainder of the workflow — Stage 2 (design_v_optimal) will use these
+        to build the W matrix and target the FIM inversion accordingly.
+
+        This function must be called before ``design_v_optimal()``.
+
+        Note
+        ----
+        ``find_optimal_operating_point()`` must be called before this method
+        (``_dw_fixed`` must be True).  Also set ``dw_spt`` before calling::
+
+            designer.dw_spt = np.array([t_final])
+
+        For end-of-batch prediction use ``np.array([T_FINAL])``.  For multiple
+        critical time points use e.g. ``np.array([t_early, t_mid, t_final])``.
+        For non-dynamic models ``dw_spt`` is not used (set automatically).
+
+        Parameters
+        ----------
+        n_exp : int or None
+            Number of experiments for a discrete (exact) design.
+            ``None`` (default) gives a continuous design (effort fractions).
+
+        package : str
+            Optimisation package: ``"ipopt"`` (default) or ``"scipy"``.
+            CVXPY is not supported for ``v_opt_criterion``.
+
+        optimizer : str
+            Solver within the package.
+            For ipopt: ``"mumps"`` (default, open-source) or ``"ma57"`` (HSL).
+            For scipy: ``"SLSQP"`` (default).
+
+        opt_options : dict, optional
+            Solver options passed directly to the optimiser.
+
+        e0 : array-like or None
+            Initial effort allocation.  If ``None``, equal efforts are used.
+
+        regularize_fim : bool
+            If ``True``, adds ``eps * I`` to the FIM before inversion (Tikhonov
+            regularization).  Useful when the FIM is near-singular.
+            ``eps`` is controlled by ``designer._eps``.
+
+        recompute_W : bool
+            Force recomputation of the W matrix even if already cached.
+            Set ``True`` after updating ``model_parameters`` in a sequential
+            estimation-design loop.  W is also automatically recomputed
+            when the ``_model_parameters_changed`` flag is set.
+
+        **kwargs
+            Additional keyword arguments forwarded to ``design_experiment()``.
+            Notably: ``optimize_sampling_times=True`` to jointly optimise over
+            candidate experiments and measurement timing.
+
+        Returns
+        -------
+        dict
+            OED result dictionary (same format as ``design_experiment``).
+
+        Examples
+        --------
+        Single-shot V-optimal design:
+
+        >>> designer.dw_spt = np.array([T_FINAL])
+        >>> designer.design_v_optimal(
+        ...     package               = "ipopt",
+        ...     optimizer             = "mumps",
+        ...     optimize_sampling_times = True,
+        ...     opt_options           = {"tol": 1e-8, "max_iter": 1000},
+        ... )
+        >>> designer.print_optimal_candidates(tol=1e-3)
+
+        Sequential design loop — recompute W after parameter re-estimation:
+
+        >>> designer.data = new_experimental_data
+        >>> designer.estimate_parameters(bounds=param_bounds,
+        ...                              update_parameters=True)
+        >>> designer.design_v_optimal(recompute_W=True)
+
+        See Also
+        --------
+        find_optimal_operating_point : Stage 1 — find the target operating point dw.
+        v_opt_criterion : The V-optimality criterion callable.
+        _eval_W_matrix : Builds the W matrix from dw.
+        """
+        # --- guards ---
+        if self._status != 'ready':
+            raise SyntaxError(
+                "Designer must be initialized before calling "
+                "find_optimal_operating_point(). Call designer.initialize() first."
+            )
+        if self.process_objective is None:
+            raise SyntaxError(
+                "process_objective must be set before calling "
+                "find_optimal_operating_point()."
+            )
+
+        n_tic = self.n_tic if self._invariant_controls else 0
+        n_tvc = self.n_tvc if self._dynamic_controls   else 0
+        n_x   = n_tic + n_tvc
+
+        if n_x == 0:
+            raise SyntaxError(
+                "No decision variables found. Ensure ti_controls_candidates and/or "
+                "tv_controls_candidates are set and designer is initialized."
+            )
+
+        # --- build bound arrays ---
+        bounds_tic = self.dw_bounds_tic if self.dw_bounds_tic is not None \
+            else [(-np.inf, np.inf)] * n_tic
+        bounds_tvc = self.dw_bounds_tvc if self.dw_bounds_tvc is not None \
+            else [(-np.inf, np.inf)] * n_tvc
+        all_bounds = list(bounds_tic) + list(bounds_tvc)
+        lb_arr = np.array([b[0] for b in all_bounds], dtype=float)
+        ub_arr = np.array([b[1] for b in all_bounds], dtype=float)
+
+        # --- normalise init_guess to 2-D ---
+        init_guess = np.atleast_2d(init_guess)   # shape (r_w, n_x)
+        r_w = init_guess.shape[0]
+
+        if init_guess.shape[1] != n_x:
+            raise SyntaxError(
+                f"init_guess has {init_guess.shape[1]} columns but "
+                f"n_tic + n_tvc = {n_x}. Each row must be [tic | tvc]."
+            )
+
+        # store optimizer choice for _solve_ipopt_operating_point
+        old_optimizer   = self._optimizer
+        self._optimizer = optimizer
+
+        results_tic = []
+        results_tvc = []
+
+        try:
+          for w in range(r_w):
+            best_x   = None
+            best_obj = np.inf
+
+            for start in range(n_starts):
+                if start == 0:
+                    x0 = init_guess[w].copy()
+                else:
+                    # random restart uniformly within bounds
+                    # replace infinite bounds with ±1e6 for sampling
+                    lo = np.where(np.isfinite(lb_arr), lb_arr, -1e6)
+                    hi = np.where(np.isfinite(ub_arr), ub_arr,  1e6)
+                    x0 = np.random.uniform(lo, hi)
+
+                if self._verbose >= 1:
+                    tag = f"point {w+1}/{r_w}, start {start+1}/{n_starts}"
+                    print(f"[find_optimal_operating_point] Solving {tag} ...")
+
+                try:
+                    x_opt, obj_val, _ = self._solve_ipopt_operating_point(
+                        x0, lb_arr, ub_arr, opt_options
+                    )
+                except Exception as exc:
+                    if self._verbose >= 1:
+                        print(f"  Warning: IPOPT failed ({exc}), skipping this start.")
+                    continue
+
+                # keep best across restarts (always compare minimization value)
+                cmp = obj_val if self.dw_sense == "minimize" else -obj_val
+                if cmp < best_obj:
+                    best_obj = cmp
+                    best_x   = x_opt
+
+                if self._verbose >= 1:
+                    print(f"  Objective ({self.dw_sense}): {obj_val:.6g}")
+
+            if best_x is None:
+                raise RuntimeError(
+                    f"All {n_starts} IPOPT start(s) failed for operating point "
+                    f"{w+1}/{r_w}. Check bounds, initial guess, and constraints."
+                )
+
+            results_tic.append(best_x[:n_tic])
+            results_tvc.append(best_x[n_tic:])
+
+            if self._verbose >= 1:
+                print(f"  dw_tic[{w}] = {best_x[:n_tic]}")
+                print(f"  dw_tvc[{w}] = {best_x[n_tic:]}")
+
+          self.dw_tic    = np.array(results_tic)   # (r_w, n_tic)
+          self.dw_tvc    = np.array(results_tvc)   # (r_w, n_tvc)
+          self._dw_fixed = True
+
+        finally:
+            self._optimizer = old_optimizer
+
+        if self._verbose >= 1:
+            print(f"[find_optimal_operating_point] Done. "
+                  f"{r_w} operating point(s) fixed.")
+
+        return self.dw_tic, self.dw_tvc
 
     def _solve_cvar_ipopt(self, criterion, beta, e0, min_expected_value,
                           opt_options, **kwargs):
@@ -3817,6 +4398,342 @@ class Designer:
             return self._pb_ei_opt_criterion(efforts)
         else:
             return self._ei_opt_criterion(efforts)
+
+    # V-optimal (McAuley): prediction variance at user-specified operating conditions
+    def v_opt_criterion(self, efforts):
+        """
+        V-optimality criterion (Shahmohammadi & McAuley, 2019).
+
+        Minimises the total prediction variance at the operating conditions of
+        interest encoded in the W matrix:
+
+            J_V = trace( W @ FIM^{-1} @ W^T )
+
+        W is the scaled sensitivity matrix evaluated at dw (the optimal operating
+        point found by find_optimal_operating_point). FIM is built from the
+        experimental candidates in the usual way.
+
+        FIM inversion uses np.linalg.inv with a fallback to the Moore-Penrose
+        pseudoinverse when the FIM is singular. Tikhonov regularization is also
+        applied when regularize_fim=True is passed to design_experiment().
+        """
+        return self._v_opt_criterion(efforts)
+
+    def _v_opt_criterion(self, efforts):
+        if self._optimization_package == "cvxpy":
+            raise NotImplementedError(
+                "CVXPY is not supported for v_opt_criterion. "
+                "Use package='ipopt' or package='scipy'."
+            )
+
+        if not self._dw_fixed:
+            raise SyntaxError(
+                "dw has not been fixed. Call find_optimal_operating_point() "
+                "before running V-optimal design."
+            )
+
+        # build W once per design call (cached in self.W)
+        if self.W is None:
+            self._eval_W_matrix()
+
+        # build FIM from experimental candidates (standard path)
+        self.eval_fim(efforts)
+
+        if self.fim.size == 1:
+            return float(self.fim)
+
+        # --- invert FIM with regularization / pseudoinverse fallback ---
+        if self._regularize_fim:
+            fim_reg = self.fim + self._eps * np.eye(self.n_mp)
+            try:
+                fim_inv = np.linalg.inv(fim_reg)
+            except np.linalg.LinAlgError:
+                fim_inv = np.linalg.pinv(fim_reg)
+        else:
+            try:
+                fim_inv = np.linalg.inv(self.fim)
+            except np.linalg.LinAlgError:
+                if self._verbose >= 1:
+                    print(
+                        "[v_opt_criterion] FIM is singular — falling back to "
+                        "Moore-Penrose pseudoinverse."
+                    )
+                fim_inv = np.linalg.pinv(self.fim)
+
+        J_V = np.trace(self.W @ fim_inv @ self.W.T)
+
+        if self._fd_jac:
+            return J_V
+        else:
+            raise NotImplementedError(
+                "Analytic Jacobian for v_opt_criterion is not yet implemented. "
+                "Use fd_jac=True (the default)."
+            )
+
+    def _eval_W_matrix(self):
+        """
+        Compute the W matrix: scaled model sensitivities at the optimal
+        operating point dw.  This is the bridge between Stage 1 (process
+        optimisation) and Stage 2 (V-optimal MBDoE).
+
+        W encodes the prediction directions at dw that the experimental
+        design must target.  The V-optimality criterion
+
+            J_V = trace( W @ FIM^{-1} @ W^T )
+
+        measures the total prediction variance at dw.  Minimising J_V over
+        the effort allocation selects experiments whose sensitivity structure
+        aligns with the prediction directions in W.
+
+        Mathematical definition (McAuley eq. 6)
+        -----------------------------------------
+        For each operating point dw and each response i and parameter j:
+
+            W_ij = (dg(dw, theta) / d_theta_j) * (s_yi / s_theta_j)
+
+        where:
+            dg/d_theta_j  sensitivity of response i to parameter j at dw
+            s_yi          measurement std dev of response i = sqrt(error_cov[i,i])
+            s_theta_j     nominal parameter uncertainty = abs(model_parameters[j])
+
+        The scaling makes W dimensionless and ensures that parameters of
+        very different magnitudes contribute proportionally to J_V.
+
+        Shape
+        -----
+        W has shape (r_w * n_spt_dw * n_m_r, n_mp), where:
+            r_w      : number of operating points in dw_tic
+            n_spt_dw : number of time points in dw_spt (1 for end-of-batch)
+            n_m_r    : number of measurable responses
+            n_mp     : number of model parameters
+
+        Each block of (n_spt_dw * n_m_r) rows corresponds to one operating
+        point.  For non-dynamic models, n_spt_dw is forced to 1.
+
+        Caching
+        -------
+        W is computed once and cached in self.W.  It is automatically
+        recomputed by design_v_optimal() when model_parameters have changed
+        (the _model_parameters_changed flag is checked).  To force
+        recomputation manually, set self.W = None or pass recompute_W=True
+        to design_v_optimal().
+
+        Numerical method
+        ----------------
+        Uses the same numdifftools forward finite-difference Jacobian as
+        eval_sensitivities(), with identical step generator settings
+        (base_step, step_ratio, num_steps from _num_steps).
+
+        Notes
+        -----
+        dw_spt specifies when during the optimal operating profile prediction
+        accuracy is required.  It is a user specification, not a degree of
+        freedom — it is distinct from sampling_times_candidates (which the
+        MBDoE optimises over as decision variables).
+
+        Attributes
+        ----------
+        W : np.ndarray, shape (r_w * n_spt_dw * n_m_r, n_mp)
+            Scaled sensitivity matrix at dw.  Set by this method.
+        """
+        if self.dw_tic is None or self.dw_tvc is None:
+            raise SyntaxError(
+                "dw_tic / dw_tvc are not set. Call find_optimal_operating_point() first."
+            )
+        if self.dw_spt is None:
+            raise SyntaxError(
+                "dw_spt must be set before calling _eval_W_matrix(). "
+                "Specify the sampling times at which prediction accuracy matters, "
+                "e.g. designer.dw_spt = np.array([t_final])."
+            )
+
+        dw_spt = np.atleast_1d(self.dw_spt)
+        r_w    = self.dw_tic.shape[0]
+
+        # for non-dynamic systems sampling times are irrelevant — force a single
+        # dummy spt so the loop runs once and shape arithmetic stays consistent
+        if not self._dynamic_system:
+            dw_spt = np.array([0.0])
+
+        # scaling vectors
+        s_y     = np.sqrt(np.diag(self.error_cov))          # length n_m_r
+        s_theta = np.abs(self.model_parameters)              # length n_mp
+        # avoid division by zero for parameters that are exactly 0
+        s_theta = np.where(s_theta == 0, 1.0, s_theta)
+
+        step_gen = nd.step_generators.MaxStepGenerator(
+            base_step=2,
+            step_ratio=2,
+            num_steps=self._num_steps,
+        )
+
+        W_blocks = []
+
+        for w in range(r_w):
+            tic_w = self.dw_tic[w]
+            tvc_w = self.dw_tvc[w]
+
+            def model_at_dw(mp, _tic=tic_w, _tvc=tvc_w, _spt=dw_spt):
+                """
+                Returns measurable responses at dw_spt for given mp.
+                Shape: (n_spt_dw * n_m_r,)  — flattened for Jacobian computation.
+                """
+                res = self._simulate_internal(_tic, _tvc, mp, _spt)
+                # res shape: (n_spt_dw, n_r) for dynamic, (n_r,) for static
+                if self._dynamic_system:
+                    res_m = res[:, self.measurable_responses]   # (n_spt_dw, n_m_r)
+                else:
+                    res_m = res[self.measurable_responses]       # (n_m_r,)
+                return res_m.flatten()
+
+            jac_func = nd.Jacobian(model_at_dw, step=step_gen, method='forward')
+            S_w = jac_func(self.model_parameters)
+            # S_w shape: (n_spt_dw * n_m_r, n_mp)
+
+            # apply McAuley scaling: W_ij = S_ij * s_yi / s_theta_j
+            # s_y tiles over spt dimension: [s_y0, s_y1, ..., s_y0, s_y1, ...]
+            n_spt_dw = len(dw_spt)
+            s_y_tiled = np.tile(s_y, n_spt_dw)                  # (n_spt_dw * n_m_r,)
+            W_w = S_w * (s_y_tiled[:, None] / s_theta[None, :]) # (n_spt_dw * n_m_r, n_mp)
+
+            W_blocks.append(W_w)
+
+            if self._verbose >= 2:
+                print(f"[_eval_W_matrix] dw point {w+1}/{r_w}: "
+                      f"W block shape = {W_w.shape}")
+
+        self.W = np.vstack(W_blocks)   # (r_w * n_spt_dw * n_m_r, n_mp)
+
+        if self._verbose >= 1:
+            print(f"[_eval_W_matrix] W matrix computed: shape = {self.W.shape}")
+
+        return self.W
+
+    def design_v_optimal(self, n_exp=None, package="ipopt", optimizer="mumps",
+                          opt_options=None, e0=None, regularize_fim=False,
+                          recompute_W=False, **kwargs):
+        """
+        Stage 2 of V-optimal MBDoE: design experiments that minimise prediction
+        variance at the optimal operating point ``dw`` found in Stage 1.
+
+        This is a convenience wrapper around ``design_experiment()`` that:
+
+        1. Verifies Stage 1 has been completed (``_dw_fixed`` is ``True``).
+        2. Verifies ``dw_spt`` has been set.
+        3. Computes (or recomputes) the W matrix via ``_eval_W_matrix()``.
+        4. Calls ``design_experiment(criterion=v_opt_criterion, ...)``.
+
+        The V-optimality criterion minimised is:
+
+        .. math::
+
+            J_V = \\mathrm{trace}\\left( W \\, \\mathrm{FIM}^{-1} W^T \\right)
+
+        where ``W`` encodes the model prediction directions at ``dw`` and
+        ``FIM`` is built from the experimental candidate grid as usual.
+
+        Note
+        ----
+        ``find_optimal_operating_point()`` must be called before this method
+        (``_dw_fixed`` must be ``True``).  Also set ``dw_spt`` before calling::
+
+            designer.dw_spt = np.array([t_final])
+
+        ``dw_spt`` is the time point(s) at which prediction accuracy is
+        required — e.g. ``np.array([T_FINAL])`` for end-of-batch prediction.
+        For non-dynamic models it is not used (set automatically).
+        It is a user specification, not a degree of freedom; it is distinct
+        from ``sampling_times_candidates``, which pydex optimises over.
+
+        Parameters
+        ----------
+        n_exp : int or None
+            Number of experiments for a discrete (exact) design.
+            ``None`` (default) gives a continuous design (effort fractions).
+        package : str
+            Optimisation package: ``"ipopt"`` (default) or ``"scipy"``.
+            CVXPY is not supported for ``v_opt_criterion``.
+        optimizer : str
+            Solver within the package.
+            For ipopt: ``"mumps"`` (default, open-source) or ``"ma57"`` (HSL).
+            For scipy: ``"SLSQP"`` (default).
+        opt_options : dict, optional
+            Solver options passed directly to the optimiser.
+        e0 : array-like or None
+            Initial effort allocation.  ``None`` uses equal efforts.
+        regularize_fim : bool
+            If ``True``, adds ``eps * I`` to the FIM before inversion
+            (Tikhonov regularization).  ``eps`` is ``designer._eps``.
+        recompute_W : bool
+            Force recomputation of W even if already cached.  Set ``True``
+            after updating ``model_parameters`` in a sequential design loop.
+            W is also recomputed automatically when ``_model_parameters_changed``
+            is set by the ``model_parameters`` setter.
+        **kwargs
+            Forwarded to ``design_experiment()``.  Notably:
+            ``optimize_sampling_times=True`` to jointly optimise over
+            candidate experiments and measurement timing.
+
+        Returns
+        -------
+        dict
+            OED result dictionary (same format as ``design_experiment``).
+
+        Examples
+        --------
+        Single-shot V-optimal design:
+
+        >>> designer.dw_spt = np.array([T_FINAL])
+        >>> designer.design_v_optimal(
+        ...     package                 = "ipopt",
+        ...     optimizer               = "mumps",
+        ...     optimize_sampling_times = True,
+        ...     opt_options             = {"tol": 1e-8, "max_iter": 1000},
+        ... )
+        >>> designer.print_optimal_candidates(tol=1e-3)
+
+        Sequential design loop — recompute W after parameter re-estimation:
+
+        >>> designer.data = new_experimental_data
+        >>> designer.estimate_parameters(bounds=param_bounds,
+        ...                              update_parameters=True)
+        >>> designer.design_v_optimal(recompute_W=True)
+
+        See Also
+        --------
+        find_optimal_operating_point : Stage 1 — find the target operating point dw.
+        v_opt_criterion : The V-optimality criterion callable.
+        _eval_W_matrix : Builds the W matrix from dw.
+        """
+        if not self._dw_fixed:
+            raise SyntaxError(
+                "dw has not been fixed. Call find_optimal_operating_point() first."
+            )
+
+        if self.dw_spt is None:
+            raise SyntaxError(
+                "dw_spt must be set before calling design_v_optimal(). "
+                "e.g. designer.dw_spt = np.array([t_final])"
+            )
+
+        # also recompute W if model_parameters have changed since last computation,
+        # even if recompute_W was not explicitly requested
+        if self._model_parameters_changed:
+            recompute_W = True
+
+        if self.W is None or recompute_W:
+            self._eval_W_matrix()
+
+        return self.design_experiment(
+            criterion=self.v_opt_criterion,
+            n_exp=n_exp,
+            package=package,
+            optimizer=optimizer,
+            opt_options=opt_options,
+            e0=e0,
+            regularize_fim=regularize_fim,
+            **kwargs,
+        )
 
     # goal-oriented for design space
     def vdi_criterion(self, efforts):
