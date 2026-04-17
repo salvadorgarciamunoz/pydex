@@ -6,6 +6,8 @@ by Kennedy Kusumo et al., originally described in:
 > Kusumo et al. (2022), *Computers & Chemical Engineering*
 
 ### Changes in this fork
+- Added V-Optimal design
+- Added process optimiztion routine
 - Added IPOPT solver support via cyipopt (`package="ipopt"`)
 - Supports D/A/E-optimal and CVaR bi-objective designs with IPOPT
 - See `docs/ipopt_setup_guide.docx` for installation instructions
