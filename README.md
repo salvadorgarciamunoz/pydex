@@ -1,53 +1,151 @@
 ## Fork Notice
 
-This is a fork of [pydex](https://github.com/KennedyKusumo/pydex) 
-by Kennedy Kusumo et al., originally described in:
+This is a fork of [pydex](https://github.com/KennedyPutraKusumo/pydex)
+by Kennedy Putra Kusumo et al., originally described in:
 
-> Kusumo et al. (2022), *Computers & Chemical Engineering*
+> Kusumo, K.P., Kuriyan, K., Vaidyanathan, R., Shadbahr, T., Khan, F.I.,
+> Harun, N., Sin, G. & Braatz, R.D. (2022). Explicit-Constraint-Based
+> Optimal Experiment Design for Differential Equation Models.
+> *Computers & Chemical Engineering*, 107940.
 
 ### Changes in this fork
-- Added V-Optimal design
-- Added process optimiztion routine
-- Added IPOPT solver support via cyipopt (`package="ipopt"`)
-- Supports D/A/E-optimal and CVaR bi-objective designs with IPOPT
-- See `docs/ipopt_setup_guide.docx` for installation instructions
-- See `examples/ipopt/` for usage examples
 
-Python Design of Experiments
-============================================
-An open-source Python package for optimal experiment design, essential to a modeller's toolbelt. If you are someone who develops a model of any kind, you will relate to the challenges of estimating its model parameters. This tool will help design maximally informative experiments for collecting data to calibrate your model. This package is a simple and powerful toolkit you must have. With an intuitive syntax and helpful documentation, it should take you little time to start designing optimal experiments for estimating the parameters of your model.
+- **V-optimal MBDoE**: two-stage workflow targeting prediction accuracy
+  at a user-specified operating condition (`find_optimal_operating_point()`
+  \+ `design_v_optimal()`)
+- **Process optimisation**: constrained nonlinear optimisation via IPOPT
+  to find the optimal operating point (Stage 1) before designing experiments
+- **IPOPT solver support**: all design criteria (D/A/E-optimal, CVaR,
+  V-optimal) can now use IPOPT via `cyipopt` (`package="ipopt"`)
+- **Improved documentation**: Sphinx/NumPy-compliant docstrings throughout
+  `designer.py`, including full usage guides for the simulate function,
+  control variable setup, and the V-optimal two-stage workflow
+
+---
+
+# Python Design of Experiments
+
+An open-source Python package for optimal experiment design, essential to
+a modeller's toolbelt. If you develop a model of any kind, you will relate
+to the challenges of estimating its parameters. This tool helps design
+maximally informative experiments for collecting data to calibrate your
+model.
 
 ## Installation
-   pip install git+https://github.com/salvadorgarciamunoz/pydex.git
+
+Install directly from this fork:
+
+```bash
+pip install git+https://github.com/salvadorgarciamunoz/pydex.git
+```
+
+Or install the original release from PyPI:
+
+```bash
+pip install pydex
+```
 
 ## Quick Start
-  * [Demo](
-  https://github.com/KennedyPutraKusumo/pydex/blob/master/examples/pydex_quickstart.ipynb
-  ) of basic features.
-  * [Example](
-  https://github.com/KennedyPutraKusumo/pydex/blob/master/examples/pydex_ode_model.ipynb
-  ) of experimental design for differential equation models.
 
-## Features:
-1. Strive to be as simple as possible to use, but not simpler.
-2. Designs continuous experimental designs.
-3. Interfaces to optimization solvers through scipy, and cvxpy.
-4. Convenient built-in visualization capabilities.
-5. Supports virtually any model, as long as it can be written as a Python function.
+- [Demo](https://github.com/KennedyPutraKusumo/pydex/blob/master/examples/pydex_quickstart.ipynb)
+  of basic features.
+- [Example](https://github.com/KennedyPutraKusumo/pydex/blob/master/examples/pydex_ode_model.ipynb)
+  of experimental design for ODE models.
+- [V-optimal example](examples/v_optimal_test_case.py): two-stage
+  prediction-oriented MBDoE for a batch reactor with competing reactions.
 
-## Dependencies:
-1. matplotlib: used for visualization.
-2. numdifftools: used for numerical estimation of parameter sensitivities.
-3. scipy: used for interfacing with numerical optimizers.
-4. cvxpy: used for interfacing with numerical optimizers.
-5. pickle: for saving objects (results, data, etc.).
-6. dill: for saving objects with weak-references.
-7. python 3.x: a core package.
-8. numpy: a core package for basic array manipulations.
-9. corner: a package for visualizing high-dimensional data points in a corner plot
-10. emcee: a package for Bayesian Inference using a Markov Chain Monte Carlo (MCMC) method
+## Features
+
+1. Simple, intuitive syntax — easy to get started, powerful enough for
+   complex problems.
+2. Continuous and exact (discrete) experimental designs.
+3. Design criteria: D-optimal, A-optimal, E-optimal, V-optimal, CVaR
+   variants.
+4. Interfaces to scipy, cvxpy, and IPOPT (via cyipopt) for optimisation.
+5. Convenient built-in visualisation via matplotlib.
+6. Supports virtually any model written as a Python function, including
+   ODE models solved via scipy or Pyomo.DAE.
+
+## Dependencies
+
+### Core (installed automatically)
+
+| Package        | Purpose                                              |
+|----------------|------------------------------------------------------|
+| numpy          | Array operations                                     |
+| scipy          | ODE integration, optimisation interface              |
+| matplotlib     | Visualisation                                        |
+| numdifftools   | Numerical finite-difference sensitivities            |
+| cvxpy          | Convex optimisation interface (D/A/E-optimal)        |
+| dill           | Saving objects with weak references                  |
+| corner         | Corner plots for high-dimensional parameter spaces   |
+| emcee          | Bayesian MCMC inference                              |
+
+### Optional: IPOPT support
+
+IPOPT enables faster, more robust optimisation for large or ill-conditioned
+designs, and is required for V-optimal and process optimisation (Stage 1).
+
+```bash
+pip install cyipopt
+```
+
+> **Note:** `cyipopt` requires a working IPOPT installation with a
+> compatible linear solver. The open-source solver `MUMPS` is bundled
+> with most binary distributions. For best performance, HSL solvers
+> (`MA27`, `MA57`) are recommended — see
+> `docs/ipopt_setup_guide.docx` for installation instructions.
+
+## V-optimal MBDoE
+
+V-optimal design minimises model prediction variance at a specific
+operating condition `dw` (e.g. the economically optimal process point),
+rather than minimising global parameter uncertainty as D/A-optimal designs
+do. It follows a two-stage workflow:
+
+**Stage 1 — Process optimisation:** find `dw` by solving a constrained
+nonlinear programme over the operating space via IPOPT.
+
+**Stage 2 — V-optimal MBDoE:** design experiments that minimise
+`J_V = trace(W FIM⁻¹ Wᵀ)` where `W` is the scaled sensitivity matrix
+evaluated at `dw`.
+
+```python
+# Stage 1
+designer.process_objective   = my_objective    # callable(tic, tvc, mp) -> float
+designer.process_constraints = my_constraints  # callable(tic, tvc, mp) -> list
+designer.dw_sense            = "maximize"
+designer.dw_bounds_tic       = [(lb, ub), ...]
+
+dw_tic, dw_tvc = designer.find_optimal_operating_point(
+    init_guess = np.array([[60.0, 70.0, 1.0]]),
+    optimizer  = "mumps",
+)
+
+# Stage 2
+designer.dw_spt = np.array([t_final])
+designer.design_v_optimal(package="ipopt", optimizer="mumps",
+                           optimize_sampling_times=True)
+```
+
+See `examples/v_optimal_test_case.py` for a complete worked example with
+a batch reactor system featuring three competing reactions.
+
+> Shahmohammadi, A. & McAuley, K.B. (2019). Sequential model-based A- and
+> V-optimal design of experiments for building fundamental models of
+> pharmaceutical production processes. *Computers & Chemical Engineering*,
+> 129, 106504. https://doi.org/10.1016/j.compchemeng.2019.06.029
 
 ## Examples
-In this repository, you will find examples of designing optimal experiments for a wide range of models, defined explicitly, and implicitly through the solution of a system of ordinary differential equations. Currently, there are examples for using scipy and pyomo for integrating the ODE models. Syntax for solution, visualization, and saving & loading progress are shown in the examples.
 
-Do you feel something is confusing? Something can be improved? Interested to contribute? Have a feature to request? Feel free to drop a line at: kennedy.putra.kusumo@gmail.com.
+The `examples/` folder contains worked examples covering a range of model
+types and design criteria:
+
+- `examples/v_optimal_test_case.py` — V-optimal MBDoE, batch reactor,
+  three competing reactions, two-stage workflow
+- `examples/ipopt/` — D/A/E-optimal designs using IPOPT
+- Jupyter notebooks (original): scipy and Pyomo ODE model examples
+
+Do you have a question, suggestion, or feature request? Feel free to open
+an issue or contact the original author at
+[kennedy.putra.kusumo@gmail.com](mailto:kennedy.putra.kusumo@gmail.com).
