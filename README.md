@@ -16,9 +16,7 @@ Python Design of Experiments
 An open-source Python package for optimal experiment design, essential to a modeller's toolbelt. If you are someone who develops a model of any kind, you will relate to the challenges of estimating its model parameters. This tool will help design maximally informative experiments for collecting data to calibrate your model. This package is a simple and powerful toolkit you must have. With an intuitive syntax and helpful documentation, it should take you little time to start designing optimal experiments for estimating the parameters of your model.
 
 ## Installation
-  * PyPI
-  
-        $ pip install pydex
+   pip install git+https://github.com/salvadorgarciamunoz/pydex.git
 
 ## Quick Start
   * [Demo](
