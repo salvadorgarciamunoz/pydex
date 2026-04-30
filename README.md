@@ -57,12 +57,10 @@ pip install git+https://github.com/salvadorgarciamunoz/pydex.git
 
 ## Quick Start
 
-- [Demo](https://github.com/KennedyPutraKusumo/pydex/blob/master/examples/pydex_quickstart.ipynb)
-  of basic features.
-- [Example](https://github.com/KennedyPutraKusumo/pydex/blob/master/examples/pydex_ode_model.ipynb)
-  of experimental design for ODE models.
-- [V-optimal example](examples/v_optimal_test_case.py): two-stage
-  prediction-oriented MBDoE for a batch reactor with competing reactions.
+See the `examples/` folder for worked examples using the current API.
+A good starting point is `examples/first_order_reaction_ipopt.py` for a
+simple D-optimal design, or `examples/v_optimal_test_case.py` for a
+full two-stage V-optimal workflow.
 
 ---
 
@@ -338,7 +336,7 @@ pip install pydex
 
 ---
 
-## Quick Start
+## REPLACE_ME
 
 - [Demo](https://github.com/KennedyPutraKusumo/pydex/blob/master/examples/pydex_quickstart.ipynb)
   of basic features.
