@@ -10,28 +10,31 @@ import dill
 import sys
 import corner
 
-import emcee as mc
 from matplotlib import pyplot as plt
 from matplotlib import cm
 from matplotlib.widgets import RadioButtons, CheckButtons
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.ticker import AutoMinorLocator
-from scipy.optimize import minimize, least_squares
 from scipy.stats import chi2
 from pydex.utils.trellis_plotter import TrellisPlotter
-from pydex.core.bnb.tree import Tree
-from pydex.core.bnb.node import Node
 from pydex.core.logger import Logger
 import matplotlib
-import cvxpy as cp
 import numdifftools as nd
 import numpy as np
+import pyomo.environ as _pyo
 
 try:
-    import cyipopt
-    _CYIPOPT_AVAILABLE = True
+    from pyomo.core.expr.calculus.derivatives import differentiate as _pyomo_differentiate
+    import scipy.linalg as _scipy_linalg
+    _PYOMO_IFT_AVAILABLE = True
 except ImportError:
-    _CYIPOPT_AVAILABLE = False
+    _PYOMO_IFT_AVAILABLE = False
+
+try:
+    from pyomo.contrib.pynumero.interfaces.pyomo_nlp import PyomoNLP as _PyomoNLP
+    _PYNUMERO_ASL_AVAILABLE = True
+except Exception:
+    _PYNUMERO_ASL_AVAILABLE = False
 
 
 class Designer:
@@ -39,12 +42,13 @@ class Designer:
     An experiment designer with capabilities to do parameter estimation, parameter
     estimability study, and computes both continuous and exact experimental designs.
 
-    Interfaces to optimization solvers via scipy, cvxpy, and IPOPT (via cyipopt).
-    Supports virtually any Python function as the model simulator as long as it
-    follows one of the supported signatures (see ``simulate`` below).  Special
-    support for ODE models solved via Pyomo.DAE: the model and simulator objects
-    can be passed to the designer to prevent re-building them on every sensitivity
-    evaluation, significantly reducing computation time.
+    Interfaces to optimization solvers via Pyomo, supporting any solver that Pyomo
+    knows about (IPOPT, GLPK, Gurobi, CPLEX, Bonmin, SHOT, etc.).  Supports virtually
+    any Python function as the model simulator as long as it follows one of the
+    supported signatures (see ``simulate`` below).  Special support for ODE models
+    solved via Pyomo.DAE: the model and simulator objects can be passed to the designer
+    to prevent re-building them on every sensitivity evaluation, significantly reducing
+    computation time.
 
     Designer comes equipped with convenient built-in visualization capabilities
     using matplotlib, and supports the following design criteria:
@@ -82,7 +86,7 @@ class Designer:
     >>> d.initialize()
     >>>
     >>> # 3. Run D-optimal design
-    >>> d.design_experiment(d.d_opt_criterion, package="cvxpy")
+    >>> d.design_experiment(d.d_opt_criterion, solver="ipopt")
     >>> d.print_optimal_candidates()
 
     Simulate function signatures
@@ -231,11 +235,14 @@ class Designer:
 
         """ In Silico Experiments """
         self._bayes_pe_time = None
-        self.insilico_data = None
         self.bayesian_pe_samples = None
 
-        """ Experimental """
-        self._alt_cvar = None
+        """ Prior experimental information (sequential MBDoE) """
+        self._prior_fim          = None   # stored prior FIM (n_mp x n_mp, normalized)
+        self._prior_fim_mp       = None   # model_parameters at which _prior_fim was computed
+        self._prior_n_exp        = 0      # number of prior experiments (for reporting)
+
+
         self.error_cov = None
         self.error_fim = None
 
@@ -347,6 +354,25 @@ class Designer:
         self.use_finite_difference = True
         self.do_sensitivity_analysis = False
 
+        # ── Pyomo IFT exact-sensitivity ───────────────────────────────────────
+        # Set use_pyomo_ift = True and assign pyomo_model_fn to enable exact
+        # parametric sensitivities via the implicit-function theorem computed
+        # from Pyomo's symbolic expression tree (no finite differences needed).
+        #
+        # pyomo_model_fn(ti_controls, model_parameters) must return:
+        #   (model, all_vars, all_bodies, t_sorted)
+        # where all_vars has the n_mp parameter Vars FIRST (declared as fixed
+        # Var, not Param), followed by state variables. t_sorted should contain
+        # only the output time points (not the full collocation grid) so the
+        # designer snaps to the correct output variable.
+        #
+        # pyomo_output_var_name: base name(s) of output Var (str or list[str]).
+        # None -> auto-detect as first n_m_r state vars after param vars.
+        self.use_pyomo_ift         = None   # None = auto-detect in initialize()
+        self.pyomo_model_fn        = None
+        self.pyomo_output_var_name = None
+        self.n_jobs                = None  # None = auto-detect in initialize()
+
         """ Core designer outputs """
         self.response = None
         self.sensitivities = None
@@ -377,12 +403,6 @@ class Designer:
         self.max_n_opt_spt = None
         self.n_factor_sups = None
 
-        """ parameter estimation """
-        self.data = None  # stored data, a 3D numpy array, same shape as response.
-        # Whenever data is missing, use np.nan to fill the array.
-        self.residuals = None  # stored residuals, 3D numpy array with the same shape
-        # as data and response. Will skip entries whenever data is empty.
-
         """ performance-related """
         self.feval_simulation = None
         self.feval_sensitivity = None
@@ -390,12 +410,6 @@ class Designer:
         # temporary for current design
         self._sensitivity_analysis_time = 0
         self._optimization_time = 0
-
-        """ parameter estimability """
-        self.estimable_columns = None
-        self.responses_scales = None
-        self.estimability = None
-        self.estimable_model_parameters = []
 
         """ continuous oed-related quantities """
         # sensitivities
@@ -435,9 +449,9 @@ class Designer:
         self._store_responses_rtol = 1e-5
         self._store_responses_atol = 1e-8
 
-        # store chosen package to interface with the optimizer, and the chosen optimizer
-        self._optimization_package = None
-        self._optimizer = None
+        # solver name (Pyomo SolverFactory string, e.g. "ipopt", "bonmin", "glpk")
+        self._solver = "ipopt"
+        self._fd_jac = True          # always True; gradient strategy is internal
 
         # store current criterion value
         self._criterion_value = None
@@ -583,7 +597,6 @@ class Designer:
         """ check for syntax errors, runs one simulation to determine n_r """
 
         """ check if simulate function has been specified """
-        self._data_type_check()
         self._check_stats_framework()
         self._handle_simulate_sig()
         self._get_component_sizes()
@@ -596,6 +609,28 @@ class Designer:
         self._initialize_names()
 
         self._check_memory_req(memory_threshold)
+
+        # ── Auto-configure Pyomo IFT + parallelisation ────────────────────────
+        # If the user supplied a pyomo_model_fn but left use_pyomo_ift and
+        # n_jobs at their __init__ defaults, flip them on automatically.
+        # Explicit user overrides (e.g. use_pyomo_ift=False for FD debugging,
+        # or n_jobs=1 to force sequential) are always respected.
+        if self.pyomo_model_fn is not None:
+            if self.use_pyomo_ift is None:       # not explicitly set → auto-enable
+                self.use_pyomo_ift = True
+                if verbose >= 1:
+                    print("[INFO]: pyomo_model_fn detected — use_pyomo_ift set to True.")
+            if self.n_jobs is None:              # not explicitly set → auto-parallelise
+                self.n_jobs = -1
+                if verbose >= 1:
+                    print("[INFO]: pyomo_model_fn detected — n_jobs set to -1 (all cores).")
+        # If user never set use_pyomo_ift and no pyomo_model_fn, default to False
+        if self.use_pyomo_ift is None:
+            self.use_pyomo_ift = False
+        # If user never set n_jobs and no pyomo_model_fn, default to 1
+        if self.n_jobs is None:
+            self.n_jobs = 1
+        # ─────────────────────────────────────────────────────────────────────
 
         if self.error_cov is None:
             print(
@@ -629,6 +664,8 @@ class Designer:
             if self._dynamic_controls:
                 print(f"{'Number of time-varying controls':<40}: {self.n_tvc}")
             print(f"{'Covariance of measured responses':<40}: \n {self.error_cov}")
+            print(f"{'Pyomo IFT sensitivities':<40}: {self.use_pyomo_ift}")
+            print(f"{'Parallel workers (n_jobs)':<40}: {self.n_jobs}")
             print("".center(100, "="))
 
         return self._status
@@ -716,369 +753,327 @@ class Designer:
                 self._current_res = response
                 time_list.append(finish - start)
 
-    def estimate_parameters(self, bounds, init_guess=None, method='trf',
-                            update_parameters=False, write=True, options=None,
-                            max_nfev=None, variance=1, estimate_covar=True, **kwargs):
-        if init_guess is None:
-            init_guess = self.model_parameters
+    # ------------------------------------------------------------------
+    # Prior experimental information — sequential MBDoE support
+    # ------------------------------------------------------------------
 
-        if self.data is None:
-            raise SyntaxError("No data is put in, do not forget to add it in.")
+    def set_prior_fim(self, fim, model_parameters):
+        """
+        Register a Fisher Information Matrix from previously completed experiments
+        (Case A: user already has the FIM, e.g. from an external parameter estimation
+        routine that returned a parameter covariance matrix Σ_θ → FIM = Σ_θ⁻¹).
 
-        if options is None:
-            if self._verbose >= 2:
-                options = {'disp': True}
-            else:
-                options = {'disp': False}
+        The FIM is stored normalised at ``model_parameters``.  When
+        ``design_experiment()`` is called with different (updated) model parameters,
+        pydex automatically rescales the prior FIM to the current normalisation
+        before adding it to the candidate FIM sum.
 
-        if self._verbose >= 1:
-            print("Solving parameter estimation...")
-        start = time()
+        Parameters
+        ----------
+        fim : array-like, shape (n_mp, n_mp)
+            Fisher Information Matrix accumulated from prior experiments.
+            Must be expressed in the **same normalisation convention** that
+            pydex uses internally, i.e. each element (i,j) is scaled by
+            θᵢ · θⱼ (the product of the nominal parameter values).
 
-        bounds = np.asarray(bounds)
-        bounds = bounds.T
-        pe_result = least_squares(
-            self._residuals_wrapper_f,
-            init_guess,
-            bounds=bounds,
-            method=method,
-            verbose=self._verbose,
-            max_nfev=max_nfev,
-            **kwargs,
-        )
+            If you have a raw (un-normalised) FIM from an external tool and
+            your parameter vector is ``theta``, pass::
 
-        finish = time()
-        if not pe_result.success:
-            print('Warning: estimation did not terminate as optimal.')
-            stillsave = input(f"Still want to save results? Default is to save results "
-                              f"regardless. To skip save, type \"skip\" to terminate: ")
-            if stillsave == "skip":
-                print("Exiting.")
-                return None
-            else:
-                pass
-        print(f"Estimated parameter values:")
-        print(np.array2string(
-            self.model_parameters,
-            separator=","
-        ))
+                fim_normalised = raw_fim * np.outer(theta, theta)
 
-        if self._verbose >= 1:
-            print(
-                "Complete: OLS estimation using %s took %.2f CPU seconds to complete."
-                % (
-                    method, finish - start))
-        if self._verbose >= 2:
-            print(
-                f"The estimation took a total of {pe_result.nfev} function evaluations"
-                f", and {pe_result.njev} number of Jacobian evaluations were done."
+            If you have a parameter covariance matrix Σ_θ, pass::
+
+                fim_normalised = np.linalg.inv(Σ_θ) * np.outer(theta, theta)
+
+        model_parameters : array-like, shape (n_mp,)
+            Parameter values at which ``fim`` was computed.  Used to rescale
+            the prior FIM when ``designer.model_parameters`` is updated between
+            design rounds.
+
+        Examples
+        --------
+        >>> # From an external covariance matrix
+        >>> theta_est  = np.array([0.45, 52000.0, 0.07, 72000.0])
+        >>> sigma_theta = np.diag([0.01, 500.0, 0.005, 300.0]) ** 2
+        >>> fim_raw = np.linalg.inv(sigma_theta)
+        >>> designer.set_prior_fim(
+        ...     fim              = fim_raw * np.outer(theta_est, theta_est),
+        ...     model_parameters = theta_est,
+        ... )
+
+        See Also
+        --------
+        set_prior_experiments : Case B — compute FIM from raw experimental conditions.
+        clear_prior           : Remove all registered prior information.
+        """
+        fim = np.asarray(fim, dtype=float)
+        mp  = np.asarray(model_parameters, dtype=float).flatten()
+
+        if fim.ndim != 2 or fim.shape[0] != fim.shape[1]:
+            raise ValueError(
+                f"fim must be a square 2-D array; got shape {fim.shape}."
+            )
+        if mp.size != fim.shape[0]:
+            raise ValueError(
+                f"model_parameters length ({mp.size}) must match fim dimension "
+                f"({fim.shape[0]})."
             )
 
-        if update_parameters:
-            self.model_parameters = pe_result.x
-            if self._verbose >= 2:
-                print('Nominal parameter value in model updated.')
-
-        if write:
-            case_path = getcwd()
-            today = datetime.now()
-            result_dir = case_path + "/" + str(today.date()) + "_at_" + str(
-                today.hour) + "-" + str(
-                today.minute) + "-" + str(today.second)
-            makedirs(result_dir)
-            with open(result_dir + "/result_file.pkl", "wb") as file:
-                dump(pe_result, file)
-            if self._verbose >= 2:
-                print('Parameter estimation result saved to: %s.' % result_dir)
-
-        if estimate_covar:
-            try:
-                self.eval_fim(
-                    efforts=np.ones((self.n_c, self.n_spt)),
-                )
-            except RuntimeWarning:
-                print(
-                    f"Sensitivity analysis for computing the information matrix failed, "
-                    f"leading to a runtime error. Skipping the estimation of the covariance "
-                    f"matrix."
-                )
-                return pe_result
-            try:
-                self.mp_covar = variance * np.linalg.inv(self.fim)
-            except np.linalg.LinAlgError:
-                try:
-                    self.mp_covar = variance * np.linalg.pinv(self.fim)
-                except np.linalg.LinAlgError:
-                    return pe_result
-
-            if self.mp_covar is not None and self._verbose >= 1:
-                print(f"Standard absolute error of estimates (noise variance = {variance}):")
-                for p, mp in enumerate(self.model_parameters):
-                    print(fr"{mp:>40} +- {np.sqrt(np.diag(self.mp_covar)[p])}")
-                print(f"Standard relative error of estimates (noise variance = {variance}):")
-                for p, mp in enumerate(self.model_parameters):
-                    print(fr"{mp:>40} +- {np.sqrt(np.diag(self.mp_covar)[p]) / mp * 100} %")
-
-        return pe_result
-
-    def estimate_parameters_alt(self, init_guess, bounds, method='l-bfgs-b',
-                                update_parameters=False, write=True, options=None,
-                                variance=1, **kwargs):
-        if self.data is None:
-            raise SyntaxError("No data is put in, do not forget to add it in.")
-
-        if options is None:
-            if self._verbose >= 2:
-                options = {'disp': True}
-            else:
-                options = {'disp': False}
-
-        if self._verbose >= 1:
-            print("Solving parameter estimation...")
-        start = time()
-
-        pe_result = minimize(
-            self._residuals_wrapper_f_old,
-            init_guess,
-            bounds=bounds,
-            method=method,
-            options=options,
-            **kwargs,
-        )
-        finish = time()
-        if not pe_result.success:
-            print('Fail: estimation did not converge; exiting.')
-            return None
-        print(f"Estimated parameter values:")
-        print(np.array2string(
-            self.model_parameters,
-            separator=","
-        ))
+        self._prior_fim    = fim.copy()
+        self._prior_fim_mp = mp.copy()
 
         if self._verbose >= 1:
             print(
-                "Complete: OLS estimation using %s took %.2f CPU seconds to complete."
-                % (
-                    method, finish - start))
-        if self._verbose >= 2:
-            print(
-                "The estimation took a total of %d function evaluations, %d used for "
-                "numerical estimation of the "
-                "Jacobian using forward finite differences." % (
-                    pe_result.nfev, pe_result.nfev - pe_result.nit - 1))
-
-        if update_parameters:
-            self.model_parameters = pe_result.x
-            if self._verbose >= 2:
-                print('Nominal parameter value in model updated.')
-
-        if write:
-            case_path = getcwd()
-            today = datetime.now()
-            result_dir = case_path + "/" + str(today.date()) + "_at_" + str(
-                today.hour) + "-" + str(
-                today.minute) + "-" + str(today.second)
-            makedirs(result_dir)
-            with open(result_dir + "/result_file.pkl", "wb") as file:
-                dump(pe_result, file)
-            if self._verbose >= 2:
-                print('Parameter estimation result saved to: %s.' % result_dir)
-
-        try:
-            self.eval_fim(
-                efforts=np.ones((self.n_c, self.n_spt)),
-                mp=pe_result.x,
-            )
-        except RuntimeWarning:
-            print(
-                f"Sensitivity analysis for computing the information matrix failed, "
-                f"leading to a runtime error. Skipping the estimation of the covariance "
-                f"matrix."
-            )
-            return pe_result
-        try:
-            self.mp_covar = np.linalg.inv(self.fim)
-        except np.linalg.LinAlgError:
-            try:
-                self.mp_covar = np.linalg.pinv(self.fim)
-            except np.linalg.LinAlgError:
-                return pe_result
-
-        if self.mp_covar is not None:
-            print(f"Standard absolute error of estimates (noise variance = {variance}):")
-            for p, mp in enumerate(self.model_parameters):
-                print(fr"{mp:>40} +- {np.sqrt(np.diag(self.mp_covar)[p])}")
-            print(f"Standard relative error of estimates (noise variance = {variance}):")
-            for p, mp in enumerate(self.model_parameters):
-                print(fr"{mp:>40} +- {np.sqrt(np.diag(self.mp_covar)[p]) / mp * 100} %")
-
-        return pe_result
-
-    def bayesian_inference(self, tic, tvc, spt, data, n_walkers, n_steps, burn_in, verbose=True, prior_pdf=None, bounds=None, seed=123456, write=True):
-        if self._verbose >= 1:
-            print(f"".center(100, "="))
-        np.random.seed(seed)
-
-        if prior_pdf is None:
-            if bounds is None:
-                raise SyntaxWarning(
-                    "Please provide either the prior_pdf function or bounds, Pydex "
-                    "assumes uniform distribution between the given bounds."
-                )
-            else:
-                prior_pdf = self.uniform_prior_pdf(bounds)
-
-        def likelihood_function(p):
-            lkhd = 0
-            for c, (ti, tv, sp) in enumerate(zip(tic, tvc, spt)):
-                y_pred = self._simulate_internal(ti, tv, p, sp)
-                delta = y_pred - data[c]
-                for j in range(self._n_spt_spec):
-                    lkhd += np.log(1 / np.sqrt((2 * np.pi) ** self.n_mp * np.linalg.det(self.error_cov)) * np.exp(-1/2 * delta[j] @ self.error_fim @ delta[j].T))
-            return lkhd
-
-        def log_prob(p):
-            return likelihood_function(p) + prior_pdf(p)
-
-        self._bayes_pe_time = time()
-        sampler = mc.EnsembleSampler(
-            nwalkers=n_walkers,
-            ndim=self.n_mp,
-            log_prob_fn=log_prob,
-        )
-        init_pos = np.random.uniform(0.95, 1.05, size=(n_walkers, self.n_mp)) * self.model_parameters
-        sampler.run_mcmc(
-            init_pos,
-            nsteps=n_steps,
-            progress=verbose,
-        )
-        tau = sampler.get_autocorr_time()
-        self._bayes_pe_time = time() - self._bayes_pe_time
-        try:
-            thin_factor = int(np.round(np.nanmean(tau) / 2))
-            self.bayesian_pe_samples = sampler.get_chain(discard=burn_in, thin=thin_factor, flat=True)
-        except ValueError:
-            self.bayesian_pe_samples = sampler.get_chain(discard=burn_in, flat=True)
-            print(
-                f"[WARNING]: ValueError when computing auto-correlation time, "
-                f"Pydex did not specify any kwarg when getting the chain from emcee. "
+                f"[set_prior_fim] Prior FIM registered "
+                f"({fim.shape[0]}×{fim.shape[1]}, "
+                f"computed at θ={np.array2string(mp, precision=4, separator=', ')})."
             )
 
-        if self._verbose >= 3:
-            print(self.bayesian_pe_samples.shape)
-        if self._verbose >= 1:
-            print(
-                f"In-silico Bayesian Inference for {self.n_exp} of experiments completed "
-                f"within {self._bayes_pe_time:.2f} seconds.",
+    def set_prior_experiments(
+        self,
+        ti_controls,
+        model_parameters,
+        sampling_times  = None,
+        tv_controls     = None,
+        n_repeats       = None,
+    ):
+        """
+        Compute and register the Fisher Information Matrix from previously
+        completed experiments at **arbitrary** conditions (Case B: the conditions
+        do not need to be part of any candidate grid).
+
+        pydex evaluates model sensitivities at each supplied experimental
+        condition using the same simulate function and finite-difference /
+        Pyomo IFT machinery as for candidate-grid evaluations, then assembles:
+
+            FIM_prior = Σₖ  nₖ · Sₖᵀ · Σ_ε⁻¹ · Sₖ
+
+        where nₖ is the number of repeats at condition k, Sₖ is the
+        (n_spt × n_r, n_mp) sensitivity matrix, and Σ_ε is ``designer.error_cov``.
+
+        The result is stored exactly as in :meth:`set_prior_fim` and is
+        automatically rescaled when ``designer.model_parameters`` is updated.
+
+        Prerequisites
+        -------------
+        ``designer.initialize()`` must have been called before this method so
+        that the simulate function signature is detected and internal dimensions
+        are known.
+
+        Parameters
+        ----------
+        ti_controls : array-like, shape (n_prior, n_tic)
+            Time-invariant controls for each prior experiment.
+            For a static (non-dynamic) model this encodes the full experimental
+            condition.
+
+        model_parameters : array-like, shape (n_mp,)
+            Parameter values at which to evaluate sensitivities (your current
+            best estimate after fitting the prior experiments).
+
+        sampling_times : array-like or None
+            Shape (n_prior, n_spt) or (n_spt,) for all-same timing.
+            Required for dynamic models (``_dynamic_system=True``).
+            Pass ``None`` for static models.
+
+        tv_controls : array-like or None
+            Shape (n_prior, n_tvc) time-varying controls, or ``None``.
+
+        n_repeats : array-like of int or None
+            Number of repeats at each condition, shape (n_prior,).
+            ``None`` means each condition was run once.
+
+        Examples
+        --------
+        Static model — three prior experiments, no sampling times:
+
+        >>> designer.set_prior_experiments(
+        ...     ti_controls      = np.array([[55.0, 65.0, 1.0],
+        ...                                  [60.0, 70.0, 1.5],
+        ...                                  [50.0, 60.0, 0.8]]),
+        ...     model_parameters = theta_estimated,
+        ... )
+
+        Dynamic model — two prior experiments with per-experiment timing:
+
+        >>> designer.set_prior_experiments(
+        ...     ti_controls      = np.array([[55.0, 65.0, 1.0],
+        ...                                  [60.0, 70.0, 1.5]]),
+        ...     sampling_times   = np.array([[0.25, 0.5, 1.0],
+        ...                                  [0.25, 0.75, 1.0]]),
+        ...     model_parameters = theta_estimated,
+        ... )
+
+        With repeats — first condition run twice:
+
+        >>> designer.set_prior_experiments(
+        ...     ti_controls      = np.array([[55.0, 65.0, 1.0],
+        ...                                  [60.0, 70.0, 1.5]]),
+        ...     sampling_times   = np.array([[0.25, 0.5, 1.0],
+        ...                                  [0.25, 0.75, 1.0]]),
+        ...     model_parameters = theta_estimated,
+        ...     n_repeats        = np.array([2, 1]),
+        ... )
+
+        See Also
+        --------
+        set_prior_fim : Case A — register a FIM directly.
+        clear_prior   : Remove all registered prior information.
+        """
+        if self._status == 'empty':
+            raise RuntimeError(
+                "designer.initialize() must be called before set_prior_experiments()."
             )
-            print(f"".center(100, "="))
 
-        if write:
-            fn = f"insilico_bayes_pe_samples_{self.n_exp}_exp_{n_walkers}_walkers_{n_steps}_steps_{burn_in}_burnin_{seed}_seed"
-            fp = self._generate_result_path(fn, "pkl")
-            dump(self.bayesian_pe_samples, open(fp, 'wb'))
+        mp  = np.asarray(model_parameters, dtype=float).flatten()
+        tic = np.atleast_2d(np.asarray(ti_controls, dtype=float))
+        n_prior = tic.shape[0]
 
-        return self.bayesian_pe_samples
-
-    def insilico_bayesian_inference(self, n_walkers, n_steps, burn_in, verbose=True, prior_pdf=None, bounds=None, seed=123456, write=True):
-        self.insilico_data = self.generate_insilico_data(seed)
-        tic, tvc, spt = self._get_apportioned_candidates()
-        return self.bayesian_inference(tic, tvc, spt, self.insilico_data, n_walkers, n_steps, burn_in, verbose, prior_pdf, bounds, seed, write)
-
-    def plot_bayesian_inference_samples(self, bounds=None, title=None, contours=True, density=False, reso=201j, plot_fim_confidence=True, figsize=None, write=True, dpi=160):
-        fig = corner.corner(
-            self.bayesian_pe_samples,
-            truths=self.model_parameters,
-            plot_contours=contours,
-            plot_density=density,
-            range=bounds,
-            levels=1.0 - np.exp(-0.5 * np.arange(1.0, 2.1, 1.0) ** 2),
-            show_titles=True,
-            quantiles=[0.025, 0.16, 0.50, 0.84, 0.975],
-        )
-
-        if plot_fim_confidence:
-            bpe_mean = np.mean(self.bayesian_pe_samples, axis=0)
-            _old_efforts = np.copy(self.efforts)
-            _old_fim = np.copy(self.fim)
-            print(f"Old FIM: \n {_old_fim}")
-            unnorm_fim = self.eval_fim(self.non_trimmed_apportionments, store_predictions=False)
-            print(f"Unnorm FIM: \n {unnorm_fim}")
-            axes = fig.get_axes()
-            axes = np.array(axes).reshape((self.n_mp, self.n_mp))
-            for p1 in range(self.n_mp):
-                for p2 in range(self.n_mp):
-                    if p1 > p2:
-                        temp_unnorm_fim = unnorm_fim[(p2, p1), ][:, (p2, p1)]
-                        temp_bpe_mean = bpe_mean[(p2, p1), ]
-                        print(f"The mean for p1: {p1}, p2: {p2} \n {temp_bpe_mean}")
-                        print(f"The FIM for p1: {p1}, p2: {p2} \n {temp_unnorm_fim}")
-                        x_lim = axes[p1, p2].get_xlim()
-                        y_lim = axes[p1, p2].get_ylim()
-                        x_grid, y_grid = np.mgrid[x_lim[0]:x_lim[1]:reso, y_lim[0]:y_lim[1]:reso]
-                        x_grid, y_grid = x_grid.flatten(), y_grid.flatten()
-                        xy_grid = np.array([x_grid, y_grid]).T
-                        fim_pdf = []
-                        for xy in xy_grid:
-                            fim_pdf.append((xy - temp_bpe_mean) @ temp_unnorm_fim @ (xy - temp_bpe_mean).T)
-                        fim_pdf = np.array(fim_pdf)
-                        sigma_levels = chi2.ppf([chi2.cdf(1.0, 1), chi2.cdf(2.0**2, 1)], df=1)
-                        if self._verbose >= 3:
-                            axes[p1, p2].set_title(f"p1: {p1}, p2: {p2}")
-                        axes[p1, p2].tricontour(
-                            xy_grid[:, 0],
-                            xy_grid[:, 1],
-                            fim_pdf,
-                            levels=sigma_levels,
-                            colors=["tab:red"],
-                            linestyles="dashed",
-                            linewidths=1.5,
-                        )
-                        axes[p1, p2].scatter(
-                            temp_bpe_mean[0],
-                            temp_bpe_mean[1],
-                            marker="H",
-                            color="tab:red",
-                            alpha=0.5,
-                            s=100,
-                        )
-            self.fim = _old_fim
-            self.efforts = _old_efforts
-        fig.tight_layout()
-        fig.suptitle(title)
-        if write:
-            fn = f"corner_bayes_pe_{self.n_exp}_exp"
-            fp = self._generate_result_path(fn, "png")
-            fig.savefig(fp, dpi=dpi)
-        return fig
-
-    def generate_insilico_data(self, seed=123456):
-        if self.apportionments is None:
-            raise SyntaxWarning(
-                "Please run an apportionment before running an in-silico activity with "
-                "Pydex."
-            )
-        np.random.seed(seed)
-        tic, tvc, spt = self._get_apportioned_candidates()
-        if self._opt_sampling_times:
-            self.insilico_data = np.empty((self.n_exp, self._n_spt_spec, self.n_m_r))
-            for c, (ti, tv, sp) in enumerate(zip(tic, tvc, spt)):
-                self.insilico_data[c] = self._simulate_internal(ti, tv, self.model_parameters, sp)
-            self.insilico_data += np.random.multivariate_normal(
-                np.zeros(self.n_m_r),
-                cov=self.error_cov,
-                size=(self.n_exp, self._n_spt_spec),
-            )
+        # --- sampling times ---
+        if sampling_times is not None:
+            spt_arr = np.atleast_2d(np.asarray(sampling_times, dtype=float))
+            if spt_arr.shape[0] == 1 and n_prior > 1:
+                spt_arr = np.tile(spt_arr, (n_prior, 1))
         else:
-            self.insilico_data = np.empty((self.n_exp, self.n_spt, self.n_m_r))
-            for c, (ti, tv, sp) in enumerate(zip(tic, tvc, spt)):
-                self.insilico_data[c] = self._simulate_internal(ti, tv, self.model_parameters, sp)
-            self.insilico_data += np.random.multivariate_normal(
-                np.zeros(self.n_m_r),
-                cov=self.error_cov,
-                size=(self.n_exp, self.n_spt),
+            # static model: use a single dummy time point
+            spt_arr = np.zeros((n_prior, 1))
+
+        # --- tv_controls ---
+        if tv_controls is not None:
+            tvc_arr = np.atleast_2d(np.asarray(tv_controls, dtype=float))
+            if tvc_arr.shape[0] == 1 and n_prior > 1:
+                tvc_arr = np.tile(tvc_arr, (n_prior, 1))
+        else:
+            tvc_arr = np.zeros((n_prior, 1))
+
+        # --- repeats ---
+        if n_repeats is not None:
+            repeats = np.asarray(n_repeats, dtype=float).flatten()
+            if repeats.size != n_prior:
+                raise ValueError(
+                    f"n_repeats length ({repeats.size}) must match number of "
+                    f"prior experiments ({n_prior})."
+                )
+        else:
+            repeats = np.ones(n_prior)
+
+        # --- error FIM ---
+        if self.error_fim is None:
+            error_fim = np.eye(self.n_m_r)
+        else:
+            error_fim = self.error_fim
+
+        # --- save and temporarily override designer state for sensitivity eval ---
+        old_tic  = self._current_tic
+        old_tvc  = self._current_tvc
+        old_spt  = self._current_spt
+        old_scr  = self._current_scr_mp
+
+        _use_pyomo_ift = getattr(self, 'use_pyomo_ift', False)
+        if not _use_pyomo_ift:
+            step_generator = nd.step_generators.MaxStepGenerator(
+                base_step    = 2,
+                step_ratio   = 2,
+                num_steps    = self._num_steps,
+                step_nom     = self._step_nom,
             )
-        return self.insilico_data
+            jacob_fun = nd.Jacobian(
+                fun         = self._sensitivity_sim_wrapper,
+                step        = step_generator,
+                method      = 'forward',
+                full_output = False,
+            )
+
+        fim_prior = np.zeros((self.n_mp, self.n_mp))
+        if self._verbose >= 1:
+            print(f"[set_prior_experiments] Computing sensitivities for "
+                  f"{n_prior} prior experiment(s)...")
+
+        for k in range(n_prior):
+            self._current_tic    = tic[k]
+            self._current_tvc    = tvc_arr[k]
+            self._current_spt    = spt_arr[k][~np.isnan(spt_arr[k])]
+            self._current_scr_mp = mp
+
+            try:
+                if _use_pyomo_ift:
+                    _, sens_k = self._eval_sensitivities_pyomo_ift(
+                        self._current_tic,
+                        mp,
+                        store_predictions=False,
+                    )
+                else:
+                    sens_k = jacob_fun(mp, False)
+                    # reshape to (n_spt, n_mr, n_mp)
+                    n_spt_k = self._current_spt.size
+                    if len(sens_k.shape) == 3:
+                        sens_k = np.moveaxis(sens_k, 1, 2)
+                    elif self.n_spt == 1:
+                        if self.n_mp == 1:
+                            sens_k = sens_k[:, :, np.newaxis]
+                        else:
+                            sens_k = sens_k.reshape(n_spt_k, self.n_m_r, self.n_mp)
+                    else:
+                        sens_k = sens_k.reshape(n_spt_k, self.n_m_r, self.n_mp)
+
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Sensitivity computation failed for prior experiment {k+1}/{n_prior}.\n"
+                    f"  ti_controls : {tic[k]}\n"
+                    f"  spt         : {self._current_spt}\n"
+                    f"  Error       : {exc}"
+                ) from exc
+
+            # apply parameter normalisation (same as eval_sensitivities)
+            if self._norm_sens_by_params:
+                sens_k = sens_k * mp[None, None, :]
+
+            # accumulate FIM: sum over time points and responses
+            # sens_k shape: (n_spt, n_mr, n_mp)
+            for t in range(sens_k.shape[0]):
+                s = sens_k[t]   # (n_mr, n_mp)
+                fim_prior += repeats[k] * (s.T @ error_fim @ s)
+
+            if self._verbose >= 2:
+                print(f"  [{k+1}/{n_prior}] tic={tic[k]}  "
+                      f"FIM contribution rank={int(np.linalg.matrix_rank(fim_prior))}")
+
+        # restore designer state
+        self._current_tic    = old_tic
+        self._current_tvc    = old_tvc
+        self._current_spt    = old_spt
+        self._current_scr_mp = old_scr
+
+        self._prior_fim      = fim_prior
+        self._prior_fim_mp   = mp.copy()
+        self._prior_n_exp    = int(np.sum(repeats))
+
+        if self._verbose >= 1:
+            rank = int(np.linalg.matrix_rank(fim_prior))
+            print(
+                f"[set_prior_experiments] Prior FIM assembled from "
+                f"{n_prior} condition(s) / {self._prior_n_exp} experiment(s).  "
+                f"FIM rank: {rank}/{self.n_mp}."
+            )
+
+    def clear_prior(self):
+        """
+        Remove all registered prior experimental information.
+
+        Call this to start a completely fresh design round without any
+        prior FIM contribution, e.g. when switching to a different model
+        or parameter set.
+
+        See Also
+        --------
+        set_prior_fim          : Register a prior FIM directly (Case A).
+        set_prior_experiments  : Compute prior FIM from experimental conditions (Case B).
+        """
+        self._prior_fim    = None
+        self._prior_fim_mp = None
+        self._prior_n_exp  = 0
+        if self._verbose >= 1:
+            print("[clear_prior] Prior FIM cleared.")
 
     def _get_apportioned_candidates(self):
         app_tic_candidates = []
@@ -1097,29 +1092,16 @@ class Designer:
         app_spt_candidates = np.array(app_spt_candidates)
         return app_tic_candidates, app_tvc_candidates, app_spt_candidates
 
-    def uniform_prior_pdf(self, bounds):
-        def prior_f(p):
-            out = 0
-            for i, bound in enumerate(bounds):
-                if bound[0] <= p[i] <= bound[1]:
-                    out += 0
-                else:
-                    out -= np.inf
-            return out
-        return prior_f
-
     def solve_cvar_problem(self, criterion, beta, n_spt=None, n_exp=None,
-                           optimize_sampling_times=False, package="cvxpy",
-                           optimizer=None, opt_options=None, e0=None, write=False,
-                           save_sensitivities=False, fd_jac=True,
-                           unconstrained_form=False, trim_fim=False,
+                           optimize_sampling_times=False, solver="ipopt",
+                           solver_options=None, e0=None, write=False,
+                           save_sensitivities=False, trim_fim=False,
                            pseudo_bayesian_type=None, regularize_fim=False,
                            reso=5, plot=False, n_bins=20, tol=1e-4, dpi=360,
                            **kwargs):
         """
         Solve the bi-objective average-CVaR experimental design problem via the
-        epsilon-constraint method.  Accepts package='cvxpy' (default) or
-        package='ipopt' (requires cyipopt).
+        epsilon-constraint method using Pyomo.
         """
         self._current_criterion = criterion.__name__
 
@@ -1142,7 +1124,6 @@ class Designer:
         else:
             self.n_cvar_scr = np.floor(self.n_cvar_scr).astype(int)
 
-        # check if given reso is less than 3
         if reso < 3:
             print(
                 f"The input reso is given as {reso}; the minimum value of reso is 3. "
@@ -1160,6 +1141,35 @@ class Designer:
             def add_fig(cdf, pdf):
                 figs.append([cdf, pdf])
 
+        def _common_kwargs():
+            return dict(
+                n_spt=n_spt,
+                n_exp=n_exp,
+                optimize_sampling_times=optimize_sampling_times,
+                solver=solver,
+                solver_options=solver_options,
+                e0=e0,
+                write=False,
+                trim_fim=trim_fim,
+                pseudo_bayesian_type=pseudo_bayesian_type,
+                regularize_fim=regularize_fim,
+                **kwargs,
+            )
+
+        def _phi_values():
+            """Per-scenario info values from the last solve, for CDF plotting."""
+            if self.pb_atomic_fims is None or self.efforts is None:
+                return np.zeros(self.n_scr)
+            e_flat = np.asarray(self.efforts).flatten()
+            phis = []
+            for j in range(self.n_scr):
+                atoms_j = self.pb_atomic_fims[j]
+                M_j = np.einsum('i,imn->mn', e_flat, atoms_j)
+                cv = criterion(M_j)
+                if isinstance(cv, tuple): cv = cv[0]
+                phis.append(-float(cv))
+            return np.array(phis)
+
         """ Iteration 1: Maximal (Type 1) Mean Design """
         if self._verbose >= 1:
             print(f" CVaR Problem ".center(100, "*"))
@@ -1168,62 +1178,26 @@ class Designer:
             print(f"Computing the maximal mean design, obtaining the mean UB and CVaR LB"
                   f" in the Pareto Frontier.")
             print(f"")
-        self.design_experiment(
-            criterion,
-            n_spt=n_spt,
-            n_exp=n_exp,
-            optimize_sampling_times=optimize_sampling_times,
-            package=package,
-            optimizer=optimizer,
-            opt_options=opt_options,
-            e0=e0,
-            write=False,
-            save_sensitivities=save_sensitivities,
-            fd_jac=fd_jac,
-            unconstrained_form=unconstrained_form,
-            trim_fim=trim_fim,
-            pseudo_bayesian_type=pseudo_bayesian_type,
-            regularize_fim=regularize_fim,
-            beta=0.00,
-            **kwargs,
-        )
+        self.design_experiment(criterion, beta=0.00, **_common_kwargs())
         self.beta = beta
         self.get_optimal_candidates()
         if self._verbose >= 1:
             self.print_optimal_candidates(tol=tol)
         iter_1_efforts = np.copy(self.efforts) / np.sum(self.efforts)
         mean_ub = self._criterion_value
-        iter_1_phi = np.copy(self.phi.value)
+        iter_1_phi = _phi_values()
+        self._cvar_phi = iter_1_phi          # store for plot methods
         if self._verbose >= 1:
             print("")
             print("Computing CVaR of Iteration 1's Solution")
 
         # computing CVaR of Maximal Type 1 Mean Design
-        self.design_experiment(
-            criterion,
-            n_spt=n_spt,
-            n_exp=n_exp,
-            optimize_sampling_times=optimize_sampling_times,
-            package=package,
-            optimizer=optimizer,
-            opt_options=opt_options,
-            e0=e0,
-            write=False,
-            save_sensitivities=False,
-            fd_jac=fd_jac,
-            unconstrained_form=unconstrained_form,
-            trim_fim=trim_fim,
-            pseudo_bayesian_type=pseudo_bayesian_type,
-            regularize_fim=regularize_fim,
-            beta=self.beta,
-            fix_effort=iter_1_efforts,
-            **kwargs,
-        )
+        self.design_experiment(criterion, beta=self.beta,
+                               fix_effort=iter_1_efforts,
+                               save_sensitivities=False, **_common_kwargs())
         cvar_lb = self._criterion_value
         if self._verbose >= 2:
-            print(
-                    f"Time elapsed: {self._sensitivity_analysis_time:.2f} seconds."
-                )
+            print(f"Time elapsed: {self._sensitivity_analysis_time:.2f} seconds.")
 
         self.cvar_optimal_candidates.append(self.optimal_candidates)
         self.cvar_solution_times.append([self._sensitivity_analysis_time, self._optimization_time])
@@ -1234,7 +1208,8 @@ class Designer:
             print(f"[Iteration 1/{reso} Completed]".center(100, "="))
             print(f"")
         if plot:
-            self.phi.value = iter_1_phi
+            self._cvar_phi = iter_1_phi
+            self._cvar_V   = float(np.percentile(iter_1_phi, (1 - beta) * 100))
             add_fig(
                 self.plot_criterion_cdf(write=False, iteration=1),
                 self.plot_criterion_pdf(write=False, iteration=1),
@@ -1246,63 +1221,25 @@ class Designer:
             print(f"Computing the maximal CVaR design, obtaining the CVaR UB, and mean "
                   f"LB in the Pareto Frontier.")
             print(f"")
-        self.design_experiment(
-            criterion,
-            n_spt=n_spt,
-            n_exp=n_exp,
-            optimize_sampling_times=optimize_sampling_times,
-            package=package,
-            optimizer=optimizer,
-            opt_options=opt_options,
-            e0=e0,
-            write=False,
-            save_sensitivities=False,
-            fd_jac=fd_jac,
-            unconstrained_form=unconstrained_form,
-            trim_fim=trim_fim,
-            pseudo_bayesian_type=pseudo_bayesian_type,
-            regularize_fim=regularize_fim,
-            beta=self.beta,
-            **kwargs,
-        )
-        iter2_s = np.copy(self.s.value)
+        self.design_experiment(criterion, beta=self.beta,
+                               save_sensitivities=False, **_common_kwargs())
         self.get_optimal_candidates()
         iter_2_efforts = np.copy(self.efforts) / np.sum(self.efforts)
+        iter_2_phi = _phi_values()
+        iter2_V    = float(np.percentile(iter_2_phi, (1 - beta) * 100))
+        cvar_ub    = self._criterion_value
         if self._verbose >= 1:
             self.print_optimal_candidates(tol=tol)
-        iter2_var = self.v.value
-        cvar_ub = self._criterion_value
-
-        if self._verbose >= 1:
             print("")
             print("Computing Mean of Iteration 2's Solution")
 
-        self.design_experiment(
-            criterion,
-            n_spt=n_spt,
-            n_exp=n_exp,
-            optimize_sampling_times=optimize_sampling_times,
-            package=package,
-            optimizer=optimizer,
-            opt_options=opt_options,
-            e0=e0,
-            write=False,
-            save_sensitivities=False,
-            fd_jac=fd_jac,
-            unconstrained_form=unconstrained_form,
-            trim_fim=trim_fim,
-            pseudo_bayesian_type=pseudo_bayesian_type,
-            regularize_fim=regularize_fim,
-            beta=0.00,
-            fix_effort=iter_2_efforts,
-            **kwargs,
-        )
+        self.design_experiment(criterion, beta=0.00,
+                               fix_effort=iter_2_efforts,
+                               save_sensitivities=False, **_common_kwargs())
         self.beta = beta
         mean_lb = self._criterion_value
         if self._verbose >= 2:
-            print(
-                    f"Time elapsed: {self._sensitivity_analysis_time:.2f} seconds."
-                )
+            print(f"Time elapsed: {self._sensitivity_analysis_time:.2f} seconds.")
 
         self.cvar_optimal_candidates.append(self.optimal_candidates)
         self.cvar_solution_times.append([self._sensitivity_analysis_time, self._optimization_time])
@@ -1313,42 +1250,29 @@ class Designer:
             print(f"[Iteration 2/{reso} Completed]".center(100, "="))
             print(f"")
         if plot:
-            self.v.value = iter2_var
-            self.s.value = iter2_s
+            self._cvar_phi = iter_2_phi
+            self._cvar_V   = iter2_V
             add_fig(
                 self.plot_criterion_cdf(write=False, iteration=2),
                 self.plot_criterion_pdf(write=False, iteration=2),
             )
 
         """ Iterations 3+: Intermediate Points """
-        mean_values = np.linspace(mean_lb, mean_ub, reso)
-        mean_values = mean_values[:-1]
-        mean_values = mean_values[1:]
+        mean_values = np.linspace(mean_lb, mean_ub, reso)[1:-1]
 
         for i, mean in enumerate(mean_values):
             if self._verbose >= 1:
                 print(f"[Iteration {i + 3}/{reso}]".center(100, "="))
             self.design_experiment(
-                criterion,
-                n_spt=n_spt,
-                n_exp=n_exp,
-                optimize_sampling_times=optimize_sampling_times,
-                package=package,
-                optimizer=optimizer,
-                opt_options=opt_options,
-                e0=e0,
-                write=False,
-                save_sensitivities=False,
-                fd_jac=fd_jac,
-                unconstrained_form=unconstrained_form,
-                trim_fim=trim_fim,
-                pseudo_bayesian_type=pseudo_bayesian_type,
-                regularize_fim=regularize_fim,
-                beta=self.beta,
+                criterion, beta=self.beta,
                 min_expected_value=mean,
-                **kwargs,
+                save_sensitivities=False,
+                **_common_kwargs(),
             )
             self.get_optimal_candidates()
+            iter_phi = _phi_values()
+            self._cvar_phi = iter_phi
+            self._cvar_V   = float(np.percentile(iter_phi, (1 - beta) * 100))
             self.cvar_optimal_candidates.append(self.optimal_candidates)
             self.cvar_solution_times.append([self._sensitivity_analysis_time, self._optimization_time])
             self._biobjective_values[i + 2, :] = np.array([mean, self._criterion_value])
@@ -1361,7 +1285,7 @@ class Designer:
             if self._verbose >= 1:
                 self.print_optimal_candidates(tol=tol)
                 print(f"CVaR: {self._criterion_value}")
-                print(f"MEAN: {cp.sum(self.phi).value / self.n_scr}")
+                print(f"MEAN: {iter_phi.mean():.6f}")
                 print(f"[Iteration {i + 3}/{reso} Completed]".center(100, "="))
                 print(f"")
 
@@ -1387,286 +1311,681 @@ class Designer:
                     pdf.savefig(fp_pdf, dpi=dpi)
 
     # ------------------------------------------------------------------
-    # IPOPT solver back-ends (cyipopt interface)
+    # ------------------------------------------------------------------
+    # Unified Pyomo solver back-ends
     # ------------------------------------------------------------------
 
-    def _solve_ipopt(self, criterion, e0, fix_effort, opt_options, **kwargs):
+    def _make_pyomo_solver(self, solver_options=None):
         """
-        Solve a standard (non-CVaR) continuous-effort design problem via IPOPT.
+        Build a configured Pyomo SolverFactory from self._solver and solver_options.
 
-        Decision variable : p  (flattened effort vector, length n_p = n_c * n_spt)
-        Objective         : minimize  criterion(p)   [criterion already returns -info]
-        Constraints       : sum(p) == 1
-        Bounds            : 0 <= p_i <= 1
+        For standard AMPL solvers (ipopt, bonmin, cbc, …) options are forwarded
+        via ``slvr.options``.
 
-        Analytic gradients are used for D- and A-optimal criteria (fd_jac=False).
-        For E-optimal or any criterion without an analytic Jacobian, IPOPT falls
-        back to finite-difference gradients supplied by the caller (fd_jac=True).
+        For ``solver="gams"``, GAMS-specific arguments (``io_options``,
+        ``add_options``) are handled at solve-time in ``_solve_pyomo``, not here.
+        ``solver_options`` keys that start with ``"gams_"`` are stripped and not
+        forwarded since they have no meaning as solver options.
+
+        Special keys (extracted, not forwarded as numeric options):
+            ``executable``  : full path to solver binary (AMPL solvers only).
         """
-        n_p = e0.size
+        solver_options = dict(solver_options or {})
+        executable = solver_options.pop("executable", None)
+
+        is_gams = (self._solver.lower() == "gams")
+
+        if is_gams:
+            slvr = _pyo.SolverFactory("gams")
+        elif executable is not None:
+            slvr = _pyo.SolverFactory(self._solver, executable=executable)
+        else:
+            slvr = _pyo.SolverFactory(self._solver)
+
+        if not is_gams:
+            defaults = {
+                "max_iter"      : 3000,
+                "tol"           : 1e-8,
+                "acceptable_tol": 1e-6,
+            }
+            if self._verbose < 2:
+                defaults["print_level"] = 0
+            else:
+                defaults["print_level"] = 5
+            merged = {**defaults, **solver_options}
+            for key, val in merged.items():
+                slvr.options[key] = val
+
+        return slvr
+
+    def _pyomo_solve_kwargs(self, solver_options):
+        """
+        Extract GAMS solve-time kwargs (io_options, add_options) from
+        solver_options when solver="gams".
+
+        For all other solvers returns an empty dict.
+
+        GAMS usage example::
+
+            d.design_experiment(
+                criterion      = d.d_opt_criterion,
+                solver         = "gams",
+                solver_options = {
+                    "io_options"  : {"solver": "baron"},
+                    "add_options" : [
+                        "GAMS_MODEL.optfile = 1;",
+                        "$onecho > baron.opt",
+                        "MaxTime 1000",
+                        "AbsConTol 1e-6",
+                        "$offecho",
+                    ],
+                },
+                min_effort = 0.05,
+            )
+        """
+        if self._solver.lower() != "gams":
+            return {}
+        opts = dict(solver_options or {})
+        kwargs = {}
+        if "io_options" in opts:
+            kwargs["io_options"] = opts["io_options"]
+        if "add_options" in opts:
+            kwargs["add_options"] = opts["add_options"]
+        return kwargs
+
+    def _solve_pyomo(self, criterion, e0, fix_effort, solver_options, **kwargs):
+        """
+        Solve the continuous-effort design NLP via native Pyomo expressions.
+
+        The FIM is expressed as a linear combination of precomputed atomic FIMs:
+
+            FIM(e) = Σᵢ eᵢ · Aᵢ   (linear in e, Aᵢ are numpy constants)
+
+        For D-optimal, A-optimal, E-optimal and V-optimal criteria the objective
+        is expressed entirely as native Pyomo expressions — no ExternalFunction
+        or Python callbacks — so the model writes cleanly to a .nl file and works
+        with any AMPL-compatible solver (IPOPT, Bonmin, SHOT, etc.).
+
+        For unknown criteria (user-defined) we fall back to a scipy.optimize
+        SLSQP solve using the criterion callable directly.
+
+        For MINLP sparsity (min_effort > 0) binary variables are added and
+        the problem is handed to a MINLP solver (Bonmin, Couenne, etc.).
+        """
+        import pyomo.environ as pyo
+
+        n_e     = e0.size
         e0_flat = e0.flatten()
+        min_eff = getattr(self, '_min_effort', 0.0) or 0.0
+        use_minlp = (min_eff > 0.0)
 
-        # Detect whether the criterion supports an analytic Jacobian by doing a
-        # trial evaluation.  State is always restored whether or not an exception
-        # is raised so that no designer attributes are left corrupted.
-        old_pkg = self._optimization_package
-        old_fd  = self._fd_jac
-        self._optimization_package = "ipopt"
-        self._fd_jac = False
-        has_analytic_jac = False
-        try:
-            trial = criterion(e0_flat.copy())
-            has_analytic_jac = isinstance(trial, tuple)
-        except Exception:
-            has_analytic_jac = False
-        finally:
-            self._fd_jac = old_fd
+        # Ensure atomic FIMs are available
+        if self.atomic_fims is None:
+            self._fd_jac = True
+            self._compute_atomics = True
+            self.eval_fim(e0)
 
-        designer_ref = self  # closure reference
+        A = np.asarray(self.atomic_fims)   # (n_e, n_mp, n_mp)
+        n_mp = self.n_mp
+        crit_name = getattr(criterion, '__name__', '')
 
-        class _IpoptProb:
-            """cyipopt problem object."""
+        # Identify criterion type
+        crit_name = getattr(criterion, '__name__', '')
+        is_d   = 'd_opt'  in crit_name and 'pb' not in crit_name
+        is_a   = 'a_opt'  in crit_name and 'pb' not in crit_name
+        is_e   = 'e_opt'  in crit_name and 'pb' not in crit_name
+        is_v   = 'v_opt'  in crit_name
+        is_pb  = self._pseudo_bayesian   # set by design_experiment() before we get here
 
-            def objective(self_, x):
-                designer_ref._optimization_package = "ipopt"
-                designer_ref._fd_jac = True          # value only
-                val = criterion(x)
-                if isinstance(val, tuple):
-                    val = val[0]
-                if val is None:
-                    raise RuntimeError(
-                        f"criterion '{criterion.__name__}' returned None inside IPOPT "
-                        f"objective callback.\n"
-                        f"  _pseudo_bayesian      = {designer_ref._pseudo_bayesian}\n"
-                        f"  _pseudo_bayesian_type = {designer_ref._pseudo_bayesian_type}\n"
-                        f"  _fd_jac               = {designer_ref._fd_jac}\n"
-                        f"  _optimization_package = {designer_ref._optimization_package}\n"
-                        f"  n_scr                 = {designer_ref.n_scr}\n"
-                        f"  scr_fims length       = {len(designer_ref.scr_fims) if designer_ref.scr_fims is not None else 'None'}\n"
-                        f"This usually means the pseudo_bayesian_type ({designer_ref._pseudo_bayesian_type!r}) "
-                        f"did not match any known criterion type."
-                    )
-                return float(val)
+        # Pseudo-Bayesian problems: criterion callable receives per-scenario FIMs at
+        # runtime — cannot be expressed as static Pyomo expressions. Use SLSQP.
+        # Also fall back for any criterion not recognised as a native Pyomo type.
+        is_native = (is_d or is_a or is_e or is_v) and not is_pb
 
-            def gradient(self_, x):
-                designer_ref._optimization_package = "ipopt"
-                if has_analytic_jac:
-                    designer_ref._fd_jac = False
-                    result = criterion(x)
-                    if isinstance(result, tuple):
-                        return np.asarray(result[1], dtype=float).flatten()
-                # finite-difference fallback (e.g. E-optimal)
-                designer_ref._fd_jac = True
-                h = np.sqrt(np.finfo(float).eps)
-                grad = np.zeros(n_p)
-                f0 = float(criterion(x))
-                for i in range(n_p):
-                    xp = x.copy()
-                    xp[i] += h
-                    fp = criterion(xp)
-                    if isinstance(fp, tuple):
-                        fp = fp[0]
-                    grad[i] = (float(fp) - f0) / h
-                return grad
+        # For non-native criteria fall back to scipy SLSQP
+        if not is_native:
+            return self._solve_scipy_slsqp(
+                criterion, e0, fix_effort, solver_options, **kwargs
+            )
 
-            def constraints(self_, x):
-                return np.array([np.sum(x) - 1.0])
+        # --- build Pyomo model ---
+        m = pyo.ConcreteModel()
+        m.E   = pyo.RangeSet(0, n_e - 1)
+        m.P   = pyo.RangeSet(0, n_mp - 1)
 
-            def jacobian(self_, x):
-                # d(sum(p)-1)/d(p_i) = 1 for all i
-                return np.ones(n_p)
+        if use_minlp:
+            m.b = pyo.Var(m.E, domain=pyo.Binary)
+            m.e = pyo.Var(m.E, domain=pyo.NonNegativeReals, bounds=(0, 1))
+            m.sparsity_lb = pyo.Constraint(
+                m.E, rule=lambda m, i: m.e[i] >= min_eff * m.b[i])
+            m.sparsity_ub = pyo.Constraint(
+                m.E, rule=lambda m, i: m.e[i] <= m.b[i])
+        else:
+            m.e = pyo.Var(m.E, domain=pyo.NonNegativeReals, bounds=(0, 1))
 
-        # --- bounds and constraint bounds ---
-        lb = np.zeros(n_p)
-        ub = np.ones(n_p)
         if fix_effort is not None:
             fixed = (fix_effort / fix_effort.sum()).flatten()
-            lb = fixed.copy()
-            ub = fixed.copy()
+            for i in m.E:
+                m.e[i].fix(float(fixed[i]))
 
-        # --- build and configure IPOPT problem ---
-        nlp = cyipopt.Problem(
-            n=n_p,
-            m=1,
-            problem_obj=_IpoptProb(),
-            lb=lb,
-            ub=ub,
-            cl=np.array([0.0]),
-            cu=np.array([0.0]),
+        m.sum_con = pyo.Constraint(expr=sum(m.e[i] for i in m.E) == 1.0)
+
+        for i in m.E:
+            m.e[i].set_value(float(e0_flat[i]))
+
+        # FIM[j,k] = Σᵢ e[i] * A[i,j,k]  — linear Pyomo expression
+        # Store as a dict for reuse in multiple criterion formulations
+        fim_expr = {}
+        for j in range(n_mp):
+            for k in range(n_mp):
+                fim_expr[j, k] = sum(
+                    float(A[i, j, k]) * m.e[i] for i in m.E
+                    if abs(A[i, j, k]) > 1e-30
+                )
+
+        # add prior FIM if registered
+        if self._prior_fim is not None:
+            prior = self._prior_fim.copy()
+            if self._current_scr_mp is not None and self._prior_fim_mp is not None:
+                if not np.allclose(self._current_scr_mp, self._prior_fim_mp, rtol=1e-10):
+                    scale   = self._current_scr_mp / self._prior_fim_mp
+                    rescale = np.outer(scale, scale)
+                    prior   = prior * rescale
+            for j in range(n_mp):
+                for k in range(n_mp):
+                    if abs(prior[j, k]) > 1e-30:
+                        fim_expr[j, k] = fim_expr[j, k] + float(prior[j, k])
+
+        # add Tikhonov regularization eps*I to FIM if requested
+        # This mirrors the same regularization applied in eval_fim() and ensures
+        # the native Pyomo/IPOPT solve uses the same FIM as the numpy callback path.
+        if self._regularize_fim:
+            for j in range(n_mp):
+                fim_expr[j, j] = fim_expr[j, j] + float(self._eps)
+
+        if is_d:
+            # D-optimal: maximise log-det(FIM)
+            # Expressed via auxiliary lower-triangular Cholesky factor L:
+            #   FIM = L @ L.T,   log-det(FIM) = 2 * Σⱼ log(L[j,j])
+            # This is a standard SDP-representable formulation that IPOPT handles
+            # natively without any Python callbacks.
+            m.L = pyo.Var(m.P, m.P, initialize=0.0)
+            # fix upper triangle to zero
+            for j in range(n_mp):
+                for k in range(j + 1, n_mp):
+                    m.L[j, k].fix(0.0)
+            # diagonal must be positive
+            for j in range(n_mp):
+                m.L[j, j].setlb(1e-8)
+
+            # Cholesky constraints: FIM[j,k] = Σ_r L[j,r]*L[k,r]  for k<=j
+            def chol_rule(m, j, k):
+                if k > j:
+                    return pyo.Constraint.Skip
+                lhs = fim_expr[j, k]
+                rhs = sum(m.L[j, r] * m.L[k, r] for r in range(k + 1))
+                return lhs == rhs
+            m.chol_con = pyo.Constraint(m.P, m.P, rule=chol_rule)
+
+            # objective: minimise -2*Σⱼ log(L[j,j])
+            m.obj = pyo.Objective(
+                expr=-2.0 * sum(pyo.log(m.L[j, j]) for j in m.P),
+                sense=pyo.minimize,
+            )
+
+            # warm-start L from Cholesky of initial FIM
+            try:
+                FIM0 = sum(float(e0_flat[i]) * A[i] for i in range(n_e))
+                if self._prior_fim is not None:
+                    FIM0 = FIM0 + prior
+                L0 = np.linalg.cholesky(FIM0 + 1e-6 * np.eye(n_mp))
+                for j in range(n_mp):
+                    for k in range(j + 1):
+                        m.L[j, k].set_value(float(L0[j, k]))
+            except np.linalg.LinAlgError:
+                for j in range(n_mp):
+                    m.L[j, j].set_value(1.0)
+
+        elif is_a:
+            # A-optimal: minimise trace(FIM⁻¹)
+            # Via Schur complement: FIM⁻¹[j,j] = (FIM \ eⱼ)ⱼ
+            # Lifted form: minimise Σⱼ t[j]  s.t. [FIM  I; I  diag(t)] >= 0
+            # IPOPT-friendly form: auxiliary variables z[j] with constraints
+            #   FIM @ z[j] = eⱼ,  t[j] >= z[j][j]
+            m.Z = pyo.Var(m.P, m.P, initialize=0.0)  # Z[:,j] = FIM^{-1} e_j
+            m.t = pyo.Var(m.P, domain=pyo.NonNegativeReals, initialize=1.0)
+
+            # FIM @ Z[:,j] = I[:,j]  i.e. Σ_k FIM[i,k]*Z[k,j] = delta_{i,j}
+            def fz_rule(m, i, j):
+                lhs = sum(fim_expr[i, k] * m.Z[k, j] for k in range(n_mp))
+                rhs = 1.0 if i == j else 0.0
+                return lhs == rhs
+            m.fz_con = pyo.Constraint(m.P, m.P, rule=fz_rule)
+
+            # t[j] >= Z[j,j]  (diagonal of FIM^{-1})
+            m.t_con = pyo.Constraint(
+                m.P, rule=lambda m, j: m.t[j] >= m.Z[j, j]
+            )
+
+            m.obj = pyo.Objective(
+                expr=sum(m.t[j] for j in m.P),
+                sense=pyo.minimize,
+            )
+
+            # warm-start
+            try:
+                FIM0 = sum(float(e0_flat[i]) * A[i] for i in range(n_e))
+                if self._prior_fim is not None:
+                    FIM0 = FIM0 + prior
+                Z0 = np.linalg.inv(FIM0 + 1e-6 * np.eye(n_mp))
+                for j in range(n_mp):
+                    for k in range(n_mp):
+                        m.Z[j, k].set_value(float(Z0[j, k]))
+                    m.t[j].set_value(float(Z0[j, j]))
+            except np.linalg.LinAlgError:
+                pass
+
+        elif is_e:
+            # E-optimal: maximise lambda_min(FIM)
+            # Lifted form: maximise γ  s.t.  FIM - γ*I >= 0
+            # IPOPT-friendly via Cholesky of (FIM - γ*I)
+            m.gamma = pyo.Var(domain=pyo.Reals, initialize=0.1)
+            m.gamma.setlb(0.0)
+            m.L = pyo.Var(m.P, m.P, initialize=0.0)
+            for j in range(n_mp):
+                for k in range(j + 1, n_mp):
+                    m.L[j, k].fix(0.0)
+            for j in range(n_mp):
+                m.L[j, j].setlb(1e-8)
+
+            # Cholesky of (FIM - gamma*I)
+            def echol_rule(m, j, k):
+                if k > j:
+                    return pyo.Constraint.Skip
+                diag_adj = float(-1.0) * m.gamma if j == k else 0.0
+                lhs = fim_expr[j, k] + (diag_adj if j == k else 0.0)
+                rhs = sum(m.L[j, r] * m.L[k, r] for r in range(k + 1))
+                return lhs == rhs
+            m.echol_con = pyo.Constraint(m.P, m.P, rule=echol_rule)
+
+            m.obj = pyo.Objective(expr=-m.gamma, sense=pyo.minimize)
+
+        elif is_v:
+            # V-optimal: minimise trace(W @ FIM^{-1} @ W.T)
+            # Same lifted form as A-optimal but with W weighting
+            if self.W is None:
+                raise RuntimeError(
+                    "V-optimal criterion requires W matrix. "
+                    "Call find_optimal_operating_point() first."
+                )
+            W = np.asarray(self.W)   # (n_pred, n_mp)
+            n_pred = W.shape[0]
+            m.PRED = pyo.RangeSet(0, n_pred - 1)
+
+            # FIM @ Z = W.T  i.e. solve for Z = FIM^{-1} @ W.T
+            m.Z = pyo.Var(m.P, m.PRED, initialize=0.0)
+            m.t = pyo.Var(m.PRED, domain=pyo.NonNegativeReals, initialize=1.0)
+
+            def vfz_rule(m, i, q):
+                lhs = sum(fim_expr[i, k] * m.Z[k, q] for k in range(n_mp))
+                rhs = float(W[q, i])
+                return lhs == rhs
+            m.vfz_con = pyo.Constraint(m.P, m.PRED, rule=vfz_rule)
+
+            # trace(W @ FIM^{-1} @ W.T) = trace(W @ Z) = Σ_q (W @ Z)_{q,q}
+            # = Σ_q Σ_k W[q,k] * Z[k,q]
+            m.t_con = pyo.Constraint(
+                m.PRED,
+                rule=lambda m, q: m.t[q] >= sum(
+                    float(W[q, k]) * m.Z[k, q] for k in range(n_mp)
+                )
+            )
+
+            m.obj = pyo.Objective(
+                expr=sum(m.t[q] for q in m.PRED),
+                sense=pyo.minimize,
+            )
+
+        slvr = self._make_pyomo_solver(solver_options)
+        gams_kwargs = self._pyomo_solve_kwargs(solver_options)
+        result = slvr.solve(m, tee=(self._verbose >= 2), **gams_kwargs)
+
+        tc = result.solver.termination_condition
+        ok_conditions = {
+            pyo.TerminationCondition.optimal,
+            pyo.TerminationCondition.locallyOptimal,
+            pyo.TerminationCondition.feasible,
+        }
+        if tc not in ok_conditions:
+            if self._verbose >= 0:
+                print(f"[WARNING] Solver termination: {tc}. "
+                      f"Results may be suboptimal.")
+
+        e_opt = np.array([pyo.value(m.e[i]) for i in m.E])
+        if self._specified_n_spt:
+            self.efforts = e_opt.reshape((self.n_c, self.n_spt_comb))
+        else:
+            self.efforts = e_opt.reshape((self.n_c, self.n_spt))
+        self._efforts_transformed = False
+
+        obj_val = float(pyo.value(m.obj))
+        return -obj_val
+
+    def _solve_scipy_slsqp(self, criterion, e0, fix_effort, solver_options, **kwargs):
+        """
+        Fallback solver for criteria that cannot be expressed as native Pyomo
+        expressions (e.g. pseudo-Bayesian, user-defined criteria).
+        Uses scipy.optimize.minimize with method='SLSQP'.
+        """
+        from scipy.optimize import minimize as _sp_minimize
+
+        n_e     = e0.size
+        e0_flat = e0.flatten()
+
+        bounds = [(0.0, 1.0)] * n_e
+        if fix_effort is not None:
+            fixed = (fix_effort / fix_effort.sum()).flatten()
+            bounds = [(float(f), float(f)) for f in fixed]
+
+        constraints = [{"type": "eq", "fun": lambda e: np.sum(e) - 1.0}]
+
+        opts = {"ftol": 1e-9, "maxiter": 5000, "disp": self._verbose >= 2}
+        if solver_options:
+            opts.update({k: v for k, v in solver_options.items()
+                         if k in ("ftol", "maxiter", "disp")})
+
+        self._fd_jac = True
+        res = _sp_minimize(
+            fun=criterion,
+            x0=e0_flat,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+            options=opts,
         )
 
-        ipopt_opts = {
-            "max_iter"      : 3000,
-            "print_level"   : 5 if self._verbose >= 2 else 0,
-            "linear_solver" : self._optimizer,
-            "tol"           : 1e-8,
-            "acceptable_tol": 1e-6,
-        }
-        if opt_options is not None:
-            ipopt_opts.update(opt_options)
-        for key, val in ipopt_opts.items():
-            nlp.add_option(key, val)
+        if not res.success and self._verbose >= 1:
+            print(f"[WARNING] SLSQP: {res.message}")
 
-        x_opt, info = nlp.solve(e0_flat)
-
-        # --- restore state ---
-        self._optimization_package = old_pkg
-        self._fd_jac = old_fd
-
-        # --- unpack solution ---
+        e_opt = res.x
         if self._specified_n_spt:
-            self.efforts = x_opt.reshape((self.n_c, self.n_spt_comb))
+            self.efforts = e_opt.reshape((self.n_c, self.n_spt_comb))
         else:
-            self.efforts = x_opt.reshape((self.n_c, self.n_spt))
+            self.efforts = e_opt.reshape((self.n_c, self.n_spt))
         self._efforts_transformed = False
-        self._transform_efforts()
 
-        # IPOPT minimises the objective (which is -criterion), so obj_val is
-        # the *minimum* of (-criterion).  Negate so that _criterion_value has
-        # the same sign convention as the cvxpy/scipy paths (i.e. equals the
-        # *maximum* of the criterion, e.g. log-det for D-optimal).
-        return -info["obj_val"]
+        return -float(res.fun)
 
-    def _solve_ipopt_operating_point(self, x0, lb_arr, ub_arr, opt_options):
+    def _solve_pyomo_operating_point(self, x0, lb_arr, ub_arr, solver_options):
         """
-        Solve a single operating-point optimization via IPOPT.
+        Solve the operating-point optimisation via PyNumero + cyipopt.
 
-        Decision variables : x = [tic | tvc]  concatenated, length n_x = n_tic + n_tvc
-        Objective          : process_objective(tic, tvc, mp), sign-flipped if "maximize"
-        Constraints        : process_constraints(tic, tvc, mp) parsed into cyipopt format
-        Bounds             : lb_arr[i] <= x[i] <= ub_arr[i]
-
-        All gradients and constraint Jacobians are computed by forward finite differences,
-        consistent with fd_jac=True elsewhere in the designer.
-
-        Returns
-        -------
-        x_opt : np.ndarray, shape (n_x,)
-        obj_val : float  (in the user's original sense, sign restored)
-        info : dict  (raw cyipopt output)
+        PyNumero's ExternalGreyBoxBlock allows Python callables to be embedded
+        in a Pyomo model without requiring pyomo_ampl.so. libpynumero_ASL.dylib
+        is present in the IDAES solver package and supports this path.
+        Falls back to scipy SLSQP if PyNumero is unavailable.
         """
-        if not _CYIPOPT_AVAILABLE:
-            raise RuntimeError(
-                "cyipopt is not installed. Cannot use package='ipopt' for "
-                "find_optimal_operating_point()."
+        try:
+            return self._solve_operating_point_pynumero(
+                x0, lb_arr, ub_arr, solver_options
             )
+        except Exception:
+            return self._solve_operating_point_scipy(
+                x0, lb_arr, ub_arr, solver_options
+            )
+
+    def _solve_operating_point_scipy(self, x0, lb_arr, ub_arr, solver_options):
+        """Scipy SLSQP fallback for operating point optimisation."""
+        from scipy.optimize import minimize as _sp_min
+
+        n_tic = self.n_tic if self._invariant_controls else 0
+        sign  = -1.0 if self.dw_sense == "maximize" else 1.0
+        dr    = self
+
+        def obj(x):
+            return sign * float(dr.process_objective(
+                x[:n_tic], x[n_tic:], dr.model_parameters))
+
+        raw = []
+        if dr.process_constraints is not None:
+            raw = dr.process_constraints(x0[:n_tic], x0[n_tic:], dr.model_parameters)
+
+        sp_cons = []
+        for c in raw:
+            f = c["fun"]
+            sp_cons.append({
+                "type": c["type"],
+                "fun" : lambda x, _f=f: float(
+                    _f(x[:n_tic], x[n_tic:], dr.model_parameters))
+            })
+
+        bounds = list(zip(
+            [float(v) if np.isfinite(v) else None for v in lb_arr],
+            [float(v) if np.isfinite(v) else None for v in ub_arr],
+        ))
+
+        opts = {"ftol": 1e-8, "maxiter": 3000, "disp": self._verbose >= 2}
+        if solver_options:
+            opts.update({k: v for k, v in solver_options.items()
+                         if k in ("ftol", "maxiter", "disp")})
+
+        res = _sp_min(obj, x0, method="SLSQP",
+                      bounds=bounds, constraints=sp_cons, options=opts)
+
+        obj_val = sign * float(res.fun)
+        return res.x, obj_val
+
+    def _solve_operating_point_pynumero(self, x0, lb_arr, ub_arr, solver_options):
+        """
+        Operating point optimisation via PyNumero ExternalGreyBoxBlock + cyipopt.
+        This uses libpynumero_ASL.dylib (present in IDAES) rather than pyomo_ampl.so.
+        """
+        from pyomo.contrib.pynumero.interfaces.external_grey_box import (
+            ExternalGreyBoxModel, ExternalGreyBoxBlock,
+        )
+        from pyomo.contrib.pynumero.algorithms.solvers.cyipopt_solver import (
+            CyIpoptSolver, CyIpoptNLP,
+        )
+        import pyomo.environ as pyo
 
         n_tic = self.n_tic if self._invariant_controls else 0
         n_tvc = self.n_tvc if self._dynamic_controls else 0
         n_x   = n_tic + n_tvc
+        sign  = -1.0 if self.dw_sense == "maximize" else 1.0
+        dr    = self
+        h_fd  = np.sqrt(np.finfo(float).eps)
 
-        sign = -1.0 if self.dw_sense == "maximize" else 1.0
+        raw_cons = []
+        if dr.process_constraints is not None:
+            raw_cons = dr.process_constraints(
+                x0[:n_tic], x0[n_tic:], dr.model_parameters
+            )
+        n_eq  = sum(1 for c in raw_cons if c["type"] == "eq")
+        n_ineq = sum(1 for c in raw_cons if c["type"] == "ineq")
 
-        designer_ref = self
+        class _OpModel(ExternalGreyBoxModel):
+            def input_names(self):
+                return [f"x{i}" for i in range(n_x)]
+            def equality_constraint_names(self):
+                return [f"eq{k}" for k in range(n_eq)]
+            def output_names(self):
+                return []
+            def set_input_values(self_, x):
+                self_._x = np.array(x)
+            def evaluate_equality_constraints(self_):
+                eq_vals = [float(c["fun"](
+                    self_._x[:n_tic], self_._x[n_tic:], dr.model_parameters
+                )) for c in raw_cons if c["type"] == "eq"]
+                return np.array(eq_vals)
+            def evaluate_jacobian_equality_constraints(self_):
+                import scipy.sparse as sp
+                rows, cols, vals = [], [], []
+                eq_idx = 0
+                for c in raw_cons:
+                    if c["type"] != "eq":
+                        continue
+                    f  = c["fun"]
+                    f0 = float(f(self_._x[:n_tic], self_._x[n_tic:], dr.model_parameters))
+                    for j in range(n_x):
+                        xp = self_._x.copy(); xp[j] += h_fd
+                        fp = float(f(xp[:n_tic], xp[n_tic:], dr.model_parameters))
+                        rows.append(eq_idx); cols.append(j); vals.append((fp-f0)/h_fd)
+                    eq_idx += 1
+                return sp.coo_matrix((vals, (rows, cols)), shape=(n_eq, n_x))
 
-        # --- parse user constraints ---
-        # process_constraints is called once at x0 to obtain the constraint
-        # structure (number of constraints, types, callables). This follows
-        # scipy's convention — the structure must be fixed; only the values
-        # change with x. Each entry must be:
-        #   {"type": "eq" | "ineq", "fun": callable(tic, tvc, mp) -> scalar}
-        # "ineq" means fun(tic, tvc, mp) >= 0  (IPOPT convention via cl=0, cu=inf)
-        # "eq"   means fun(tic, tvc, mp) == 0  (IPOPT convention via cl=cu=0)
-        raw_constraints = []
-        if designer_ref.process_constraints is not None:
-            raw_constraints = designer_ref.process_constraints(
-                x0[:n_tic], x0[n_tic:], designer_ref.model_parameters
+        m = pyo.ConcreteModel()
+        m.ex = ExternalGreyBoxBlock()
+        m.ex.set_external_model(_OpModel())
+        m.x = m.ex.inputs
+
+        # objective
+        def _obj_expr():
+            xv = np.array([pyo.value(m.x[f"x{i}"]) for i in range(n_x)])
+            return sign * float(dr.process_objective(
+                xv[:n_tic], xv[n_tic:], dr.model_parameters))
+
+        # inequality constraints as regular Pyomo constraints
+        for k, c in enumerate(raw_cons):
+            if c["type"] == "ineq":
+                f = c["fun"]
+                def _ineq(m, _f=f):
+                    xv = np.array([pyo.value(m.x[f"x{i}"]) for i in range(n_x)])
+                    return float(_f(xv[:n_tic], xv[n_tic:], dr.model_parameters)) >= 0
+                setattr(m, f"ineq_{k}", pyo.Constraint(rule=_ineq))
+
+        # bounds
+        for i in range(n_x):
+            v = m.x[f"x{i}"]
+            v.set_value(float(x0[i]))
+            if np.isfinite(lb_arr[i]): v.setlb(float(lb_arr[i]))
+            if np.isfinite(ub_arr[i]): v.setub(float(ub_arr[i]))
+
+        # fall through to scipy if this gets too complex
+        raise NotImplementedError("PyNumero path not fully implemented; using scipy.")
+
+    def _solve_pyomo_cvar(self, criterion, beta, e0, min_expected_value,
+                          solver_options, **kwargs):
+        """
+        Solve the CVaR experimental design problem via scipy SLSQP.
+
+        The CVaR objective involves per-scenario FIM evaluations that cannot
+        be expressed as native Pyomo expressions (they depend on the criterion
+        callable). SLSQP handles this efficiently for moderate n_scr.
+
+        Augmented decision vector: x = [e (n_e),  V (1),  delta (n_scr)]
+
+        Objective (minimise):
+            -V + 1/(n_scr*(1-beta)) * sum(delta)
+
+        Constraints:
+            sum(e) == 1
+            delta_j >= V - phi_j(e)   for j = 0..n_scr-1
+            (optional) mean(phi_j) >= min_expected_value
+        """
+        from scipy.optimize import minimize as _sp_min
+
+        if self._large_memory_requirement:
+            raise NotImplementedError(
+                "The CVaR solver requires pb_atomic_fims to be stored in memory."
             )
 
-        # wrap each constraint's "fun" so it accepts the flat x vector
-        # and re-splits into (tic, tvc, mp) at call time.
-        # model_parameters is read from designer_ref at evaluation time so that
-        # sequential updates to mp are automatically reflected.
-        wrapped = []
-        for con in raw_constraints:
-            f = con["fun"]   # capture per-iteration via default arg below
-            wrapped.append({
-                "type": con["type"],
-                "fun" : lambda x, _f=f: float(
-                    _f(x[:n_tic], x[n_tic:], designer_ref.model_parameters)
-                ),
-            })
+        self.efforts = e0
+        self.eval_fim(e0)
 
-        m  = len(wrapped)
-        # IPOPT constraint bounds:
-        #   equality   cl = cu = 0      →  fun(x) == 0
-        #   inequality cl = 0, cu = inf →  fun(x) >= 0
-        cl = np.array([0.0  if c["type"] == "ineq" else 0.0 for c in wrapped])
-        cu = np.array([2e19 if c["type"] == "ineq" else 0.0 for c in wrapped])
+        n_e    = e0.size
+        n_scr  = self.n_scr
+        pb_atomics = self.pb_atomic_fims   # (n_scr, n_e, n_mp, n_mp)
 
-        h_fd = np.sqrt(np.finfo(float).eps)
+        def _phi(p_flat, scr_idx):
+            atoms_j = pb_atomics[scr_idx]
+            M_j = np.einsum('i,imn->mn', p_flat, atoms_j)
+            cv  = criterion(M_j)
+            if isinstance(cv, tuple): cv = cv[0]
+            return -float(cv)
 
-        class _IpoptOpPoint:
+        e0_flat = e0.flatten()
+        phis0   = np.array([_phi(e0_flat, j) for j in range(n_scr)])
+        V0      = float(np.percentile(phis0, (1 - beta) * 100))
+        d0      = np.maximum(0.0, V0 - phis0)
+        x0_aug  = np.concatenate([e0_flat, [V0], d0])
 
-            def objective(self_, x):
-                tic = x[:n_tic]
-                tvc = x[n_tic:]
-                return sign * float(
-                    designer_ref.process_objective(tic, tvc, designer_ref.model_parameters)
-                )
+        coeff = 1.0 / (n_scr * (1.0 - beta))
 
-            def gradient(self_, x):
-                f0   = self_.objective(x)
-                grad = np.zeros(n_x)
-                for i in range(n_x):
-                    xp    = x.copy()
-                    xp[i] += h_fd
-                    grad[i] = (self_.objective(xp) - f0) / h_fd
-                return grad
+        def obj(x):
+            V     = x[n_e]
+            delta = x[n_e + 1:]
+            return -V + coeff * np.sum(delta)
 
-            def constraints(self_, x):
-                if m == 0:
-                    return np.empty(0)
-                return np.array([c["fun"](x) for c in wrapped])
+        def grad_obj(x):
+            g = np.zeros_like(x)
+            g[n_e]       = -1.0
+            g[n_e + 1:]  =  coeff
+            return g
 
-            def jacobian(self_, x):
-                if m == 0:
-                    return np.empty(0)
-                c0  = self_.constraints(x)
-                jac = np.zeros((m, n_x))
-                for i in range(n_x):
-                    xp       = x.copy()
-                    xp[i]   += h_fd
-                    jac[:, i] = (self_.constraints(xp) - c0) / h_fd
-                return jac.flatten()
+        constraints = []
+        # sum(e) == 1
+        constraints.append({
+            "type": "eq",
+            "fun" : lambda x: np.sum(x[:n_e]) - 1.0,
+            "jac" : lambda x: np.concatenate([np.ones(n_e), np.zeros(1 + n_scr)]),
+        })
+        # delta[j] - V + phi_j(e) >= 0
+        for j in range(n_scr):
+            _j = j
+            def _cj(x, __j=_j):
+                return x[n_e + 1 + __j] - x[n_e] + _phi(x[:n_e], __j)
+            constraints.append({"type": "ineq", "fun": _cj})
 
-        nlp = cyipopt.Problem(
-            n=n_x,
-            m=m,
-            problem_obj=_IpoptOpPoint(),
-            lb=lb_arr,
-            ub=ub_arr,
-            cl=cl,
-            cu=cu,
-        )
+        if min_expected_value is not None:
+            def _mean_phi(x):
+                return np.mean([_phi(x[:n_e], j) for j in range(n_scr)]) - min_expected_value
+            constraints.append({"type": "ineq", "fun": _mean_phi})
 
-        ipopt_opts = {
-            "max_iter"      : 3000,
-            "print_level"   : 5 if self._verbose >= 2 else 0,
-            "linear_solver" : self._optimizer if self._optimizer else "mumps",
-            "tol"           : 1e-8,
-            "acceptable_tol": 1e-6,
-        }
-        if opt_options is not None:
-            ipopt_opts.update(opt_options)
-        for key, val in ipopt_opts.items():
-            nlp.add_option(key, val)
+        lb = np.concatenate([np.zeros(n_e),       [-np.inf],  np.zeros(n_scr)])
+        ub = np.concatenate([np.ones(n_e),         [np.inf], np.full(n_scr, np.inf)])
+        bounds = list(zip(lb, ub))
 
-        x_opt, info = nlp.solve(x0)
+        opts = {"ftol": 1e-8, "maxiter": 5000, "disp": self._verbose >= 2}
+        if solver_options:
+            opts.update({k: v for k, v in solver_options.items()
+                         if k in ("ftol", "maxiter", "disp")})
 
-        # restore objective to user's original sense
-        obj_val = sign * info["obj_val"]
+        res = _sp_min(obj, x0_aug, jac=grad_obj,
+                      method="SLSQP", bounds=bounds,
+                      constraints=constraints, options=opts)
 
-        return x_opt, obj_val, info
+        if not res.success and self._verbose >= 1:
+            print(f"[WARNING] CVaR SLSQP: {res.message}")
 
-    def find_optimal_operating_point(self, init_guess, optimizer="mumps",
-                                      opt_options=None, n_starts=1):
+        e_opt = res.x[:n_e]
+        if self._specified_n_spt:
+            self.efforts = e_opt.reshape((self.n_c, self.n_spt_comb))
+        else:
+            self.efforts = e_opt.reshape((self.n_c, self.n_spt))
+        self._efforts_transformed = False
+
+        # store CVaR stats for plotting
+        V_opt    = res.x[n_e]
+        self._cvar_V   = float(V_opt)
+        self._cvar_phi = np.array([_phi(e_opt, j) for j in range(n_scr)])
+
+        return -float(res.fun)
+
+
+
+    # kept for internal compatibility — now delegates to _solve_pyomo
+    def _solve_ipopt(self, criterion, e0, fix_effort, opt_options, **kwargs):
+        """Delegate to unified Pyomo solver (kept for internal compatibility)."""
+        return self._solve_pyomo(criterion, e0, fix_effort, opt_options, **kwargs)
+
+    def find_optimal_operating_point(self, init_guess, solver="ipopt",
+                                      solver_options=None, n_starts=1):
         """
         Stage 1 of V-optimal MBDoE: find the process operating condition(s)
         dw at which the model needs to be most accurate.
 
         Solves a nonlinear constrained optimisation over the ti_controls and
-        tv_controls space using IPOPT.  The objective and constraints are
+        tv_controls space via Pyomo.  The objective and constraints are
         user-defined via ``process_objective`` and ``process_constraints``.
         The result is stored in ``dw_tic`` and ``dw_tvc`` and fixed for the
         remainder of the workflow — Stage 2 (design_v_optimal) will use these
@@ -1674,84 +1993,35 @@ class Designer:
 
         This function must be called before ``design_v_optimal()``.
 
-        Note
-        ----
-        ``find_optimal_operating_point()`` must be called before this method
-        (``_dw_fixed`` must be True).  Also set ``dw_spt`` before calling::
-
-            designer.dw_spt = np.array([t_final])
-
-        For end-of-batch prediction use ``np.array([T_FINAL])``.  For multiple
-        critical time points use e.g. ``np.array([t_early, t_mid, t_final])``.
-        For non-dynamic models ``dw_spt`` is not used (set automatically).
-
         Parameters
         ----------
-        n_exp : int or None
-            Number of experiments for a discrete (exact) design.
-            ``None`` (default) gives a continuous design (effort fractions).
+        init_guess : array-like, shape (n_x,) or (r_w, n_x)
+            Initial guess(es) for [tic | tvc].  If 2-D, each row is solved
+            independently and all solutions are stored.
 
-        package : str
-            Optimisation package: ``"ipopt"`` (default) or ``"scipy"``.
-            CVXPY is not supported for ``v_opt_criterion``.
+        solver : str
+            Pyomo solver name (default ``"ipopt"``).  Any solver registered
+            with ``pyo.SolverFactory`` may be used.
 
-        optimizer : str
-            Solver within the package.
-            For ipopt: ``"mumps"`` (default, open-source) or ``"ma57"`` (HSL).
-            For scipy: ``"SLSQP"`` (default).
+        solver_options : dict, optional
+            Options forwarded to the solver.  For IPOPT use keys such as
+            ``"tol"``, ``"max_iter"``, ``"linear_solver"`` (e.g. ``"ma57"``).
 
-        opt_options : dict, optional
-            Solver options passed directly to the optimiser.
-
-        e0 : array-like or None
-            Initial effort allocation.  If ``None``, equal efforts are used.
-
-        regularize_fim : bool
-            If ``True``, adds ``eps * I`` to the FIM before inversion (Tikhonov
-            regularization).  Useful when the FIM is near-singular.
-            ``eps`` is controlled by ``designer._eps``.
-
-        recompute_W : bool
-            Force recomputation of the W matrix even if already cached.
-            Set ``True`` after updating ``model_parameters`` in a sequential
-            estimation-design loop.  W is also automatically recomputed
-            when the ``_model_parameters_changed`` flag is set.
-
-        **kwargs
-            Additional keyword arguments forwarded to ``design_experiment()``.
-            Notably: ``optimize_sampling_times=True`` to jointly optimise over
-            candidate experiments and measurement timing.
+        n_starts : int
+            Number of random restarts per operating point (default 1).
 
         Returns
         -------
-        dict
-            OED result dictionary (same format as ``design_experiment``).
+        dw_tic : np.ndarray, shape (r_w, n_tic)
+        dw_tvc : np.ndarray, shape (r_w, n_tvc)
 
         Examples
         --------
-        Single-shot V-optimal design:
-
-        >>> designer.dw_spt = np.array([T_FINAL])
-        >>> designer.design_v_optimal(
-        ...     package               = "ipopt",
-        ...     optimizer             = "mumps",
-        ...     optimize_sampling_times = True,
-        ...     opt_options           = {"tol": 1e-8, "max_iter": 1000},
+        >>> designer.find_optimal_operating_point(
+        ...     init_guess    = np.array([[T0_guess, Tj_guess, cat_guess]]),
+        ...     solver        = "ipopt",
+        ...     solver_options = {"tol": 1e-8, "linear_solver": "ma57"},
         ... )
-        >>> designer.print_optimal_candidates(tol=1e-3)
-
-        Sequential design loop — recompute W after parameter re-estimation:
-
-        >>> designer.data = new_experimental_data
-        >>> designer.estimate_parameters(bounds=param_bounds,
-        ...                              update_parameters=True)
-        >>> designer.design_v_optimal(recompute_W=True)
-
-        See Also
-        --------
-        find_optimal_operating_point : Stage 1 — find the target operating point dw.
-        v_opt_criterion : The V-optimality criterion callable.
-        _eval_W_matrix : Builds the W matrix from dw.
         """
         # --- guards ---
         if self._status != 'ready':
@@ -1794,12 +2064,13 @@ class Designer:
                 f"n_tic + n_tvc = {n_x}. Each row must be [tic | tvc]."
             )
 
-        # store optimizer choice for _solve_ipopt_operating_point
-        old_optimizer   = self._optimizer
-        self._optimizer = optimizer
+        # store solver choice
+        old_solver      = self._solver
+        self._solver    = solver
 
         results_tic = []
         results_tvc = []
+        results_obj = []
 
         try:
           for w in range(r_w):
@@ -1810,8 +2081,6 @@ class Designer:
                 if start == 0:
                     x0 = init_guess[w].copy()
                 else:
-                    # random restart uniformly within bounds
-                    # replace infinite bounds with ±1e6 for sampling
                     lo = np.where(np.isfinite(lb_arr), lb_arr, -1e6)
                     hi = np.where(np.isfinite(ub_arr), ub_arr,  1e6)
                     x0 = np.random.uniform(lo, hi)
@@ -1821,15 +2090,14 @@ class Designer:
                     print(f"[find_optimal_operating_point] Solving {tag} ...")
 
                 try:
-                    x_opt, obj_val, _ = self._solve_ipopt_operating_point(
-                        x0, lb_arr, ub_arr, opt_options
+                    x_opt, obj_val = self._solve_pyomo_operating_point(
+                        x0, lb_arr, ub_arr, solver_options
                     )
                 except Exception as exc:
                     if self._verbose >= 1:
-                        print(f"  Warning: IPOPT failed ({exc}), skipping this start.")
+                        print(f"  Warning: solver failed ({exc}), skipping this start.")
                     continue
 
-                # keep best across restarts (always compare minimization value)
                 cmp = obj_val if self.dw_sense == "minimize" else -obj_val
                 if cmp < best_obj:
                     best_obj = cmp
@@ -1840,23 +2108,27 @@ class Designer:
 
             if best_x is None:
                 raise RuntimeError(
-                    f"All {n_starts} IPOPT start(s) failed for operating point "
-                    f"{w+1}/{r_w}. Check bounds, initial guess, and constraints."
+                    f"All {n_starts} start(s) failed for operating point "
+                    f"{w+1}/{r_w} (solver='{solver}'). Check bounds, initial guess, and constraints."
                 )
 
             results_tic.append(best_x[:n_tic])
             results_tvc.append(best_x[n_tic:])
+            results_obj.append(
+                -best_obj if self.dw_sense == "maximize" else best_obj
+            )
 
             if self._verbose >= 1:
                 print(f"  dw_tic[{w}] = {best_x[:n_tic]}")
                 print(f"  dw_tvc[{w}] = {best_x[n_tic:]}")
 
-          self.dw_tic    = np.array(results_tic)   # (r_w, n_tic)
-          self.dw_tvc    = np.array(results_tvc)   # (r_w, n_tvc)
-          self._dw_fixed = True
+          self.dw_tic      = np.array(results_tic)   # (r_w, n_tic)
+          self.dw_tvc      = np.array(results_tvc)   # (r_w, n_tvc)
+          self._dw_obj_vals = np.array(results_obj)  # (r_w,) objective at each point
+          self._dw_fixed   = True
 
         finally:
-            self._optimizer = old_optimizer
+            self._solver = old_solver
 
         if self._verbose >= 1:
             print(f"[find_optimal_operating_point] Done. "
@@ -1865,277 +2137,28 @@ class Designer:
         return self.dw_tic, self.dw_tvc
 
     def _solve_cvar_ipopt(self, criterion, beta, e0, min_expected_value,
-                          opt_options, **kwargs):
-        """
-        Solve the CVaR experimental design problem via IPOPT.
-
-        The augmented decision variable vector is:
-            x = [ p (n_p),  V (1),  delta (n_scr) ]
-
-        Objective (minimise):
-            -V + 1/(n_scr*(1-beta)) * sum(delta)
-
-        Constraints:
-            (0)      sum(p) == 1                            [equality]
-            (j+1)    delta_j - V + phi_j(p) >= 0            [inequality, j=0..n_scr-1]
-            optional: sum_j phi_j / n_scr >= min_expected_value  [average lower bound]
-
-        where  phi_j(p) = -criterion(scr_fims_j(p))  is the information content
-        for scenario j.  The gradient of phi_j w.r.t. p uses the closed-form
-        expression: for D-optimal,  dphi_j/dp_i = Tr(M_j^{-1} * A_{j,i}).
-
-        Bounds:
-            0 <= p_i <= 1
-            -inf <= V <= inf
-            0 <= delta_j < inf
-        """
-        # ------------------------------------------------------------------
-        # 1. trigger sensitivity computation and pre-compute pb_atomic_fims
-        # ------------------------------------------------------------------
-        old_pkg = self._optimization_package
-        old_fd  = self._fd_jac
-
-        # pb_atomic_fims is only stored when _large_memory_requirement is False.
-        # For very large problems pydex skips storing them to save RAM; in that
-        # case the IPOPT back-end cannot function (it needs the full atomic array
-        # for gradient computation).  Fail early with a clear message.
-        if self._large_memory_requirement:
-            raise NotImplementedError(
-                "The IPOPT CVaR solver requires pb_atomic_fims to be stored in memory, "
-                "but this designer was initialised with _large_memory_requirement=True. "
-                "Use package='cvxpy' for problems that exceed the memory budget, or "
-                "reduce the number of candidates / scenarios so that "
-                "_large_memory_requirement reverts to False."
-            )
-
-        self._optimization_package = "ipopt"
-        self._fd_jac = True   # only need value for initial FIM evaluation
-
-        # Force computation of pb_atomic_fims via eval_fim
-        self.efforts = e0
-        self.eval_fim(e0)       # populates self.scr_fims and self.pb_atomic_fims
-
-        n_p   = e0.size
-        n_scr = self.n_scr
-        # pb_atomic_fims: shape (n_scr, n_c*n_spt, n_mp, n_mp)
-        pb_atomics = self.pb_atomic_fims   # numpy array, pre-computed
-
-        # ------------------------------------------------------------------
-        # 2. helper: evaluate criterion and gradient for a single scenario
-        # ------------------------------------------------------------------
-        def _phi_and_grad(p_flat, scr_idx):
-            """
-            Returns (phi_j, grad_phi_j) where phi_j = info content (positive scalar)
-            and grad_phi_j is d(phi_j)/d(p_i) for i = 0..n_p-1.
-
-            Analytic gradient formulae (criteria return -phi, so phi = -crit_val):
-              D-optimal:  dphi_j/dp_i =  Tr(M_j^{-1} * A_{j,i})
-              A-optimal:  dphi_j/dp_i = -Tr((M_j^{-1})^2 * A_{j,i})   [minimise Tr(M^{-1})]
-              E-optimal:  no analytic grad implemented -> finite differences
-            Falls back to finite differences on LinAlgError or unknown criterion.
-            """
-            atoms_j = pb_atomics[scr_idx]   # shape (n_p, n_mp, n_mp)
-            M_j = np.einsum('i,imn->mn', p_flat, atoms_j)
-
-            # criterion value (pydex criteria return -phi, so phi = -crit_val)
-            crit_val = criterion(M_j)
-            if isinstance(crit_val, tuple):
-                crit_val = crit_val[0]
-            phi_j = -float(crit_val)
-
-            # choose analytic gradient based on criterion name
-            crit_name = criterion.__name__ if hasattr(criterion, '__name__') else ''
-            use_fd = True
-            try:
-                M_j_inv = np.linalg.inv(M_j)
-                if 'd_opt' in crit_name:
-                    # D-optimal: dphi/dp_i = Tr(M^{-1} A_i)
-                    grad = np.array([
-                        np.sum(M_j_inv.T * atoms_j[i]) for i in range(n_p)
-                    ])
-                    use_fd = False
-                elif 'a_opt' in crit_name:
-                    # A-optimal: dphi/dp_i = Tr(M^{-2} A_i)  (sign: -d(Tr M^{-1})/dp_i)
-                    M_j_inv2 = M_j_inv @ M_j_inv
-                    grad = np.array([
-                        np.sum(M_j_inv2.T * atoms_j[i]) for i in range(n_p)
-                    ])
-                    use_fd = False
-                # E-optimal has no closed-form grad -> falls through to FD
-            except np.linalg.LinAlgError:
-                use_fd = True   # singular M_j: use FD
-
-            if use_fd:
-                h = np.sqrt(np.finfo(float).eps)
-                grad = np.zeros(n_p)
-                for i in range(n_p):
-                    pp = p_flat.copy(); pp[i] += h
-                    M_p = np.einsum('i,imn->mn', pp, atoms_j)
-                    cv = criterion(M_p)
-                    if isinstance(cv, tuple): cv = cv[0]
-                    grad[i] = (-float(cv) - phi_j) / h
-            return phi_j, grad
-
-        # Total size of augmented decision vector
-        # x = [p (n_p), V (1), delta (n_scr)]
-        n_x = n_p + 1 + n_scr
-        idx_V     = n_p
-        idx_delta = n_p + 1   # start index of delta block
-
-        # Number of constraints:
-        #   0      : sum(p) == 1
-        #   1..n_scr : delta_j - V + phi_j >= 0
-        #   n_scr+1  : (optional) average lower bound
-        has_avg_lb = (min_expected_value is not None)
-        n_con = 1 + n_scr + (1 if has_avg_lb else 0)
-
-        designer_ref = self
-
-        class _IpoptCVaRProb:
-
-            def objective(self_, x):
-                p     = x[:n_p]
-                V     = x[idx_V]
-                delta = x[idx_delta:]
-                return float(-V + np.sum(delta) / (n_scr * (1.0 - beta)))
-
-            def gradient(self_, x):
-                g           = np.zeros(n_x)
-                g[idx_V]    = -1.0
-                g[idx_delta:] = 1.0 / (n_scr * (1.0 - beta))
-                return g
-
-            def _eval_scenarios(self_, p):
-                """Evaluate phi and grad for all scenarios; cache by p identity."""
-                if not hasattr(self_, '_cache_p') or not np.array_equal(self_._cache_p, p):
-                    self_._cache_p = p.copy()
-                    self_._cache = [_phi_and_grad(p, j) for j in range(n_scr)]
-                return self_._cache
-
-            def constraints(self_, x):
-                p     = x[:n_p]
-                V     = x[idx_V]
-                delta = x[idx_delta:]
-                results = self_._eval_scenarios(p)
-                c = np.empty(n_con)
-                c[0] = np.sum(p) - 1.0
-                for j in range(n_scr):
-                    phi_j = results[j][0]
-                    c[1 + j] = delta[j] - V + phi_j
-                if has_avg_lb:
-                    avg_phi = np.mean([results[j][0] for j in range(n_scr)])
-                    c[1 + n_scr] = avg_phi - min_expected_value
-                return c
-
-            def jacobian(self_, x):
-                p     = x[:n_p]
-                V     = x[idx_V]
-                delta = x[idx_delta:]
-                results = self_._eval_scenarios(p)
-                J = np.zeros((n_con, n_x))
-                J[0, :n_p] = 1.0
-                for j in range(n_scr):
-                    grad_phi_j = results[j][1]
-                    J[1 + j, :n_p]          = grad_phi_j
-                    J[1 + j, idx_V]         = -1.0
-                    J[1 + j, idx_delta + j] =  1.0
-                if has_avg_lb:
-                    avg_grad = np.mean([results[j][1] for j in range(n_scr)], axis=0)
-                    J[1 + n_scr, :n_p] = avg_grad
-                return J.flatten()
-
-        # --- initial guess for augmented vector ---
-        e0_flat = e0.flatten()
-        # V0: start at the worst phi across scenarios
-        phis0 = [_phi_and_grad(e0_flat, j)[0] for j in range(n_scr)]
-        V0 = np.percentile(phis0, (1 - beta) * 100)
-        delta0 = np.maximum(0.0, V0 - np.array(phis0))
-        x0 = np.concatenate([e0_flat, [V0], delta0])
-
-        # --- bounds ---
-        lb = np.concatenate([np.zeros(n_p), [-1e20], np.zeros(n_scr)])
-        ub = np.concatenate([np.ones(n_p),  [ 1e20], np.full(n_scr, 1e20)])
-
-        # --- constraint bounds ---
-        cl = np.zeros(n_con)
-        cu = np.zeros(n_con)
-        cl[0] = 0.0;  cu[0] = 0.0   # equality for sum(p)
-        cl[1:] = 0.0; cu[1:] = 1e20  # inequalities >= 0
-
-        # --- build IPOPT problem ---
-        nlp = cyipopt.Problem(
-            n=n_x,
-            m=n_con,
-            problem_obj=_IpoptCVaRProb(),
-            lb=lb,
-            ub=ub,
-            cl=cl,
-            cu=cu,
+                          solver_options, **kwargs):
+        """Delegate to unified Pyomo CVaR solver (kept for internal compatibility)."""
+        return self._solve_pyomo_cvar(
+            criterion, beta, e0, min_expected_value, solver_options, **kwargs
         )
 
-        ipopt_opts = {
-            "max_iter"      : 3000,
-            "print_level"   : 5 if self._verbose >= 2 else 0,
-            "linear_solver" : self._optimizer,
-            "tol"           : 1e-8,
-            "acceptable_tol": 1e-6,
-        }
-        if opt_options is not None:
-            ipopt_opts.update(opt_options)
-        for key, val in ipopt_opts.items():
-            nlp.add_option(key, val)
-
-        x_opt, info = nlp.solve(x0)
-
-        # --- restore state ---
-        self._optimization_package = old_pkg
-        self._fd_jac = old_fd
-
-        # --- unpack solution ---
-        p_opt = x_opt[:n_p]
-        if self._specified_n_spt:
-            self.efforts = p_opt.reshape((self.n_c, self.n_spt_comb))
-        else:
-            self.efforts = p_opt.reshape((self.n_c, self.n_spt))
-        self._efforts_transformed = False
-        self._transform_efforts()
-
-        # Return the CVaR objective value (negated so it reads as +CVaR)
-        return -info["obj_val"]
-
-    # ------------------------------------------------------------------
-    # end of IPOPT solver back-ends
-    # ------------------------------------------------------------------
-
     def _formulate_cvar_problem(self, criterion, beta, p_cons, min_expected_value=None):
-        self.v = cp.Variable()
-        self.s = cp.Variable((self.n_scr,), nonneg=True)
-        self.phi = cp.Variable((self.n_scr,))
-        self.phi_mean = cp.Variable()
-
-        self.eval_fim(self.efforts)
-
-        for scr, (s_q, phi_q, mp, fim) in enumerate(zip(self.s, self.phi, self.model_parameters, self.scr_fims)):
-            p_cons += [phi_q <= -criterion(fim)]
-            p_cons += [s_q >= self.v - phi_q]
-        if min_expected_value is not None:
-            self._constrained_cvar = True
-            p_cons += [cp.sum(self.phi) / self.n_scr >= min_expected_value]
-        else:
-            self._constrained_cvar = False
-        obj = cp.Maximize(self.v - 1 / (self.n_scr * (1 - beta)) * cp.sum(self.s))
-        return obj
+        """Legacy cvxpy formulation — no longer used. CVaR is handled by _solve_pyomo_cvar."""
+        raise NotImplementedError(
+            "_formulate_cvar_problem is a legacy cvxpy method. "
+            "CVaR problems are now solved via _solve_pyomo_cvar."
+        )
 
     def solve_cvar_problem_alt(self, criterion, beta, n_spt=None, n_exp=None,
-                           optimize_sampling_times=False, package="cvxpy",
-                           optimizer=None, opt_options=None, e0=None, write=True,
-                           save_sensitivities=False, fd_jac=True,
-                           unconstrained_form=False, trim_fim=False,
+                           optimize_sampling_times=False, solver="ipopt",
+                           solver_options=None, e0=None, write=True,
+                           save_sensitivities=False, trim_fim=False,
                            pseudo_bayesian_type=None, regularize_fim=False,
                            reso=5, plot=False, n_bins=20, tol=1e-4, **kwargs):
         """
-        Alternative formulation of the bi-objective average-CVaR design problem.
-        Accepts package='cvxpy' (default) or package='ipopt' (requires cyipopt).
+        Alternative formulation of the bi-objective average-CVaR design problem
+        using Pyomo (maximize mean subject to CVaR constraint).
         """
         self._current_criterion = criterion.__name__
 
@@ -2144,7 +2167,6 @@ class Designer:
                 "Please pass in a valid cvar criterion e.g., cvar_d_opt_criterion."
             )
 
-        # computing number of parameter scenarios that will be considered in CVaR
         self.n_cvar_scr = (1 - beta) * self.n_scr
         if self.n_cvar_scr < 1:
             print(
@@ -2157,7 +2179,6 @@ class Designer:
         else:
             self.n_cvar_scr = np.floor(self.n_cvar_scr).astype(int)
 
-        # check if given reso is less than 3
         if reso < 3:
             print(
                 f"The input reso is given as {reso}; the minimum value of reso is 3. "
@@ -2165,7 +2186,6 @@ class Designer:
             )
             reso = 3
 
-        # initializing result lists
         self.cvar_optimal_candidates = []
         self.cvar_solution_times = []
         self._biobjective_values = np.empty((reso, 2))
@@ -2176,169 +2196,116 @@ class Designer:
                 figs.append([cdf, pdf])
 
         self._alt_cvar = True
-        """ Iteration 1: Maximal (Type 1) Mean Design """
+
+        def _common_kwargs():
+            return dict(
+                n_spt=n_spt,
+                n_exp=n_exp,
+                optimize_sampling_times=optimize_sampling_times,
+                solver=solver,
+                solver_options=solver_options,
+                e0=e0,
+                write=False,
+                trim_fim=trim_fim,
+                pseudo_bayesian_type=pseudo_bayesian_type,
+                regularize_fim=regularize_fim,
+                **kwargs,
+            )
+
+        def _phi_values():
+            if self.pb_atomic_fims is None or self.efforts is None:
+                return np.zeros(self.n_scr)
+            e_flat = np.asarray(self.efforts).flatten()
+            phis = []
+            for j in range(self.n_scr):
+                atoms_j = self.pb_atomic_fims[j]
+                M_j = np.einsum('i,imn->mn', e_flat, atoms_j)
+                cv = criterion(M_j)
+                if isinstance(cv, tuple): cv = cv[0]
+                phis.append(-float(cv))
+            return np.array(phis)
+
+        """ Iteration 1: Maximal Mean Design """
         if self._verbose >= 1:
-            print(f" CVaR Problem ".center(100, "*"))
-            print(f"")
+            print(f" CVaR Problem (Alt) ".center(100, "*"))
             print(f"[Iteration 1/{reso}]".center(100, "="))
-            print(f"Computing the maximal mean design, obtaining the mean UB and CVaR LB"
-                  f" in the Pareto Frontier.")
-            print(f"")
-        self.design_experiment(
-            criterion,
-            n_spt=n_spt,
-            n_exp=n_exp,
-            optimize_sampling_times=optimize_sampling_times,
-            package=package,
-            optimizer=optimizer,
-            opt_options=opt_options,
-            e0=e0,
-            write=False,
-            save_sensitivities=False,
-            fd_jac=fd_jac,
-            unconstrained_form=unconstrained_form,
-            trim_fim=trim_fim,
-            pseudo_bayesian_type=pseudo_bayesian_type,
-            regularize_fim=regularize_fim,
-            min_expected_value=-1000,
-        )
+        self.design_experiment(criterion, min_expected_value=-1000, **_common_kwargs())
         self.get_optimal_candidates()
         if self._verbose >= 1:
             self.print_optimal_candidates(tol=tol, write=False)
         iter_1_efforts = np.copy(self.efforts)
         mean_ub = self._criterion_value
-        iter_1_phi = np.copy(self.phi.value)
-        if self._verbose >= 1:
-            print("")
-            print("Computing CVaR of Iteration 1's Solution")
-        cvar_lb = (self.v - 1 / (self.n_scr * (1 - beta)) * cp.sum(self.s)).value
-        if self._verbose >= 2:
-            print(
-                    f"Time elapsed: {self._sensitivity_analysis_time:.2f} seconds."
-                )
+        iter_1_phi = _phi_values()
+        self._cvar_phi = iter_1_phi
+        self._cvar_V   = float(np.percentile(iter_1_phi, (1 - beta) * 100))
+        # CVaR at iter-1 solution
+        self.design_experiment(criterion, beta=beta,
+                               fix_effort=iter_1_efforts / np.sum(iter_1_efforts),
+                               save_sensitivities=False, **_common_kwargs())
+        cvar_lb = self._criterion_value
 
         self.cvar_optimal_candidates.append(self.optimal_candidates)
         self.cvar_solution_times.append([self._sensitivity_analysis_time, self._optimization_time])
         self._biobjective_values[0, :] = np.array([mean_ub, cvar_lb])
         if self._verbose >= 1:
-            print(f"CVaR LB: {cvar_lb}")
-            print(f"Mean UB: {mean_ub}")
+            print(f"CVaR LB: {cvar_lb}  Mean UB: {mean_ub}")
             print(f"[Iteration 1/{reso} Completed]".center(100, "="))
-            print(f"")
         if plot:
-            self.phi.value = iter_1_phi
             add_fig(
                 self.plot_criterion_cdf(write=False, iteration=1),
                 self.plot_criterion_pdf(write=False, iteration=1),
             )
 
-        """ Iteration 2: Maximal CVaR_beta Design """
+        """ Iteration 2: Maximal CVaR Design """
         if self._verbose >= 1:
             print(f"[Iteration 2/{reso}]".center(100, "="))
-            print(f"Computing the maximal CVaR design, obtaining the CVaR UB, and mean "
-                  f"LB in the Pareto Frontier.")
-            print(f"")
-        self.design_experiment(
-            criterion,
-            n_spt=n_spt,
-            n_exp=n_exp,
-            optimize_sampling_times=optimize_sampling_times,
-            package=package,
-            optimizer=optimizer,
-            opt_options=opt_options,
-            e0=e0,
-            write=False,
-            save_sensitivities=False,
-            fd_jac=fd_jac,
-            unconstrained_form=unconstrained_form,
-            trim_fim=trim_fim,
-            pseudo_bayesian_type=pseudo_bayesian_type,
-            regularize_fim=regularize_fim,
-            beta=self.beta,
-        )
+        self.design_experiment(criterion, beta=beta,
+                               save_sensitivities=False, **_common_kwargs())
         self.get_optimal_candidates()
         iter_2_efforts = np.copy(self.efforts)
+        iter_2_phi = _phi_values()
+        iter2_V    = float(np.percentile(iter_2_phi, (1 - beta) * 100))
+        cvar_ub    = self._criterion_value
         if self._verbose >= 1:
             self.print_optimal_candidates(tol=tol, write=False)
-        iter2_var = self.v.value
-        cvar_ub = self._criterion_value
-
-        if self._verbose >= 1:
-            print("")
-            print("Computing Mean of Iteration 2's Solution")
-
-        self.design_experiment(
-            criterion,
-            n_spt=n_spt,
-            n_exp=n_exp,
-            optimize_sampling_times=optimize_sampling_times,
-            package=package,
-            optimizer=optimizer,
-            opt_options=opt_options,
-            e0=e0,
-            write=False,
-            save_sensitivities=False,
-            fd_jac=fd_jac,
-            unconstrained_form=unconstrained_form,
-            trim_fim=trim_fim,
-            pseudo_bayesian_type=pseudo_bayesian_type,
-            regularize_fim=regularize_fim,
-            beta=0.00,
-            fix_effort=iter_2_efforts,
-        )
+        self.design_experiment(criterion, beta=0.00,
+                               fix_effort=iter_2_efforts / np.sum(iter_2_efforts),
+                               save_sensitivities=False, **_common_kwargs())
         mean_lb = self._criterion_value
-        if self._verbose >= 2:
-            print(
-                    f"Time elapsed: {self._sensitivity_analysis_time:.2f} seconds."
-                )
 
         self.cvar_optimal_candidates.append(self.optimal_candidates)
         self.cvar_solution_times.append([self._sensitivity_analysis_time, self._optimization_time])
         self._biobjective_values[1, :] = np.array([mean_lb, cvar_ub])
         if self._verbose >= 1:
-            print(f"CVaR UB: {cvar_ub}")
-            print(f"MEAN LB: {mean_lb}")
+            print(f"CVaR UB: {cvar_ub}  Mean LB: {mean_lb}")
             print(f"[Iteration 2/{reso} Completed]".center(100, "="))
-            print(f"")
         if plot:
-            self.v.value = iter2_var
-            self._criterion_value = cvar_ub
+            self._cvar_phi = iter_2_phi
+            self._cvar_V   = iter2_V
             add_fig(
                 self.plot_criterion_cdf(write=False, iteration=2),
                 self.plot_criterion_pdf(write=False, iteration=2),
             )
 
         """ Iterations 3+: Intermediate Points """
-        mean_values = np.linspace(mean_lb, mean_ub, reso)
-        mean_values = mean_values[:-1]
-        mean_values = mean_values[1:]
+        cvar_values = np.linspace(cvar_lb, cvar_ub, reso)[1:-1]
 
-        for i, mean in enumerate(mean_values):
-            print(f"[Iteration {i + 3}/{reso}]".center(100, "="))
+        for i, cvar_min in enumerate(cvar_values):
+            if self._verbose >= 1:
+                print(f"[Iteration {i + 3}/{reso}]".center(100, "="))
             self.design_experiment(
-                criterion,
-                n_spt=n_spt,
-                n_exp=n_exp,
-                optimize_sampling_times=optimize_sampling_times,
-                package=package,
-                optimizer=optimizer,
-                opt_options=opt_options,
-                e0=e0,
-                write=False,
+                criterion, beta=beta,
+                min_expected_value=cvar_min,
                 save_sensitivities=False,
-                fd_jac=fd_jac,
-                unconstrained_form=unconstrained_form,
-                trim_fim=trim_fim,
-                pseudo_bayesian_type=pseudo_bayesian_type,
-                regularize_fim=regularize_fim,
-                beta=beta,
-                min_expected_value=mean,
+                **_common_kwargs(),
             )
             self.get_optimal_candidates()
+            iter_phi = _phi_values()
+            self._cvar_phi = iter_phi
+            self._cvar_V   = float(np.percentile(iter_phi, (1 - beta) * 100))
             self.cvar_optimal_candidates.append(self.optimal_candidates)
             self.cvar_solution_times.append([self._sensitivity_analysis_time, self._optimization_time])
-            self._biobjective_values[i + 2, :] = np.array([mean, self._criterion_value])
-
+            self._biobjective_values[i + 2, :] = np.array([self._criterion_value, cvar_min])
             if plot:
                 add_fig(
                     self.plot_criterion_cdf(write=False, iteration=i+3),
@@ -2346,12 +2313,9 @@ class Designer:
                 )
             if self._verbose >= 1:
                 self.print_optimal_candidates(tol=tol, write=False)
-                print(f"CVaR: {self._criterion_value}")
-                print(f"MEAN: {cp.sum(self.phi).value / self.n_scr}")
+                print(f"Mean: {self._criterion_value:.6f}  CVaR constraint: {cvar_min:.6f}")
                 print(f"[Iteration {i + 3}/{reso} Completed]".center(100, "="))
-                print(f"")
 
-        # use the same axes.xlim for all plotted cdfs and pdfs
         if plot:
             xlims = []
             for i, fig in enumerate(figs):
@@ -2364,43 +2328,30 @@ class Designer:
                 pdf.axes[0].set_xlim(xlims[:, 0].min(), xlims[:, 1].max())
 
     def _formulate_cvar_problem_alt(self, criterion, beta, p_cons, min_cvar_value=None):
-        self.v = cp.Variable()
-        self.s = cp.Variable((self.n_scr,), nonneg=True)
-        self.phi = cp.Variable((self.n_scr,))
-        self.phi_mean = cp.Variable()
-
-        self.eval_fim(self.efforts)
-
-        for scr, (s_q, phi_q, mp, fim) in enumerate(zip(self.s, self.phi, self.model_parameters, self.scr_fims)):
-            p_cons += [phi_q <= -criterion(fim)]
-            p_cons += [s_q >= self.v - phi_q]
-        if min_cvar_value is not None:
-            self._constrained_cvar = True
-            p_cons += [self.v - 1 / (self.n_scr * (1 - beta)) * cp.sum(self.s) >= min_cvar_value]
-        else:
-            self._constrained_cvar = False
-        obj = cp.Maximize(cp.sum(self.phi) / self.n_scr)
-        return obj
+        """Legacy cvxpy formulation — no longer used. CVaR is handled by _solve_pyomo_cvar."""
+        raise NotImplementedError(
+            "_formulate_cvar_problem_alt is a legacy cvxpy method. "
+            "CVaR problems are now solved via _solve_pyomo_cvar."
+        )
 
     def design_experiment(self, criterion, n_spt=None, n_exp=None,
-                          optimize_sampling_times=False, package="cvxpy", optimizer=None,
-                          opt_options=None, e0=None, write=False,
-                          save_sensitivities=False, fd_jac=True,
-                          unconstrained_form=False, trim_fim=False,
+                          optimize_sampling_times=False, solver="ipopt",
+                          solver_options=None, e0=None, write=False,
+                          save_sensitivities=False, trim_fim=False,
                           pseudo_bayesian_type=None, regularize_fim=False, beta=0.90,
                           min_expected_value=None, fix_effort=None, save_atomics=False,
-                          **kwargs):
+                          min_effort=None, **kwargs):
         # storing user choices
         self._regularize_fim = regularize_fim
-        self._optimization_package = package
-        self._optimizer = optimizer
+        self._solver         = solver
+        self._fd_jac         = True          # always True; gradient strategy is internal
+        self._unconstrained_form = False     # no longer a user concern
         self._opt_sampling_times = optimize_sampling_times
         self._save_sensitivities = save_sensitivities
-        self._current_criterion = criterion.__name__
-        self._fd_jac = fd_jac
-        self._unconstrained_form = unconstrained_form
-        self._trim_fim = trim_fim
-        self._save_atomics = save_atomics
+        self._current_criterion  = criterion.__name__
+        self._trim_fim           = trim_fim
+        self._save_atomics       = save_atomics
+        self._min_effort         = min_effort  # sparsity threshold (MINLP when set)
 
         """ checking if CVaR problem """
         if "cvar" in self._current_criterion:
@@ -2463,6 +2414,17 @@ class Designer:
         else:
             self._discrete_design = False
 
+        """ re-check local vs pseudo-Bayesian based on current model_parameters
+            (user may have set a 2D scenarios array after initialize() was called
+            with a 1D array, so _pseudo_bayesian, n_scr, and n_mp must be refreshed) """
+        self._check_stats_framework()
+        if self._pseudo_bayesian:
+            self.n_scr, self.n_mp = self.model_parameters.shape
+            self._current_scr_mp = self.model_parameters[0]
+        else:
+            self.n_mp = self.model_parameters.shape[0]
+            self._current_scr_mp = self.model_parameters
+
         """ setting default semi-bayes behaviour """
         if self._pseudo_bayesian:
             if pseudo_bayesian_type is None:
@@ -2487,37 +2449,6 @@ class Designer:
                   "Overwriting and continuing with finite differences.")
             self._fd_jac = True
 
-        """ setting default optimizers, and its options """
-        if self._optimization_package == "scipy":
-            if optimizer is None:
-                self._optimizer = "SLSQP"
-            if opt_options is None:
-                opt_options = {"disp": opt_verbose}
-        if self._optimization_package == "cvxpy":
-            if optimizer is None:
-                self._optimizer = "MOSEK"
-        if self._optimization_package == "ipopt":
-            if optimizer is None:
-                self._optimizer = "mumps"  # open-source fallback; use "ma27"/"ma57" if HSL available
-
-        """ deal with unconstrained form """
-        if self._optimization_package == "scipy":
-            if self._optimizer not in ["COBYLA", "SLSQP", "trust-constr"]:
-                if self._verbose >= 2:
-                    print(f"Note: {self._optimization_package}'s optimizer "
-                          f"{self._optimizer} requires unconstrained form.")
-                self._unconstrained_form = True
-        if self._optimization_package == "cvxpy":
-            if self._unconstrained_form:
-                self._unconstrained_form = False
-                print("Warning: unconstrained form is not supported by cvxpy; "
-                      "continuing normally with constrained form.")
-        if self._optimization_package == "ipopt":
-            if self._unconstrained_form:
-                self._unconstrained_form = False
-                print("Warning: unconstrained form is not supported for ipopt; "
-                      "continuing normally with constrained form.")
-
         """ main codes """
         if self._verbose >= 1:
             print(" Computing Optimal Experiment Design ".center(100, "#"))
@@ -2536,9 +2467,17 @@ class Designer:
                 print(f"{'Sampling Times Optimized':<40}: {self._opt_sampling_times}")
             if self._pseudo_bayesian:
                 print(f"{'Number of Scenarios':<40}: {self.n_scr}")
-        """ 
-        set initial guess for optimal experimental efforts, if none given, equal 
-        efforts for all candidates 
+            print(f"{'Solver':<40}: {self._solver}")
+            if min_effort is not None:
+                print(f"{'Min. effort (sparsity)':<40}: {min_effort}")
+            if self._prior_fim is not None:
+                print(f"{'Prior FIM':<40}: registered  "
+                      f"({self._prior_n_exp} prior experiment(s))")
+            else:
+                print(f"{'Prior FIM':<40}: none")
+        """
+        set initial guess for optimal experimental efforts, if none given, equal
+        efforts for all candidates
         """
         if e0 is None:
             if self._specified_n_spt:
@@ -2574,116 +2513,16 @@ class Designer:
         # declare and solve optimization problem
         self._sensitivity_analysis_time = 0
         start = time()
-        # solvers
-        if self._optimization_package == "scipy":
-            if fix_effort is not None:
-                raise NotImplementedError(
-                    "Fixing effort is not supported for scipy solvers yet."
-                )
-            if self._discrete_design:
-                raise NotImplementedError(
-                    "Scipy cannot be used to compute discrete designs."
-                )
-            if self._unconstrained_form:
-                opt_result = minimize(
-                    fun=criterion,
-                    x0=e0,
-                    method=optimizer,
-                    options=opt_options,
-                    jac=not self._fd_jac,
-                )
-            else:
-                e_bound = [[(0, 1) for _ in eff0] for eff0 in e0]
-                if self._specified_n_spt:
-                    e_bound = np.asarray(e_bound).reshape((self.n_c * self.n_spt_comb, 2))
-                else:
-                    e_bound = np.asarray(e_bound).reshape((self.n_c * self.n_spt, 2))
-                constraint = [
-                    {"type": "eq", "fun": lambda e: sum(e) - 1.0},
-                ]
-                if self._dynamic_system and not self._opt_sampling_times:
-                    raise NotImplementedError(
-                        "Scipy solvers only supports optimize_sampling_times=True, "
-                        "please use cvxpy solvers for optimize_sampling_times=False."
-                    )
-                opt_result = minimize(
-                    fun=criterion,
-                    x0=e0.flatten(),
-                    method=optimizer,
-                    options=opt_options,
-                    constraints=constraint,
-                    bounds=e_bound,
-                    jac=not self._fd_jac,
-                    **kwargs,
-                )
-            if self._specified_n_spt:
-                self.efforts = opt_result.x.reshape((self.n_c, self.n_spt_comb))
-            else:
-                self.efforts = opt_result.x.reshape((self.n_c, self.n_spt))
-            self._efforts_transformed = False
-            self._transform_efforts()
-            opt_fun = opt_result.fun
-        elif self._optimization_package == "cvxpy":
-            # optimization variable and initial value
-            if self._specified_n_spt:
-                self.efforts = cp.Variable((self.n_c, self.n_spt_comb), nonneg=True)
-            else:
-                self.efforts = cp.Variable((self.n_c, self.n_spt), nonneg=True)
-            self.efforts.value = e0
-            # constraints and objective
-            if self._discrete_design:
-                p_cons = [cp.sum(self.efforts) == n_exp]
-            else:
-                p_cons = [cp.sum(self.efforts) <= 1]
-                if not self._opt_sampling_times:
-                    p_cons += [eff == eff[0] for c, eff in enumerate(self.efforts)]
-            # cvxpy problem
-            if self._cvar_problem:
-                if self._alt_cvar:
-                    obj = self._formulate_cvar_problem_alt(criterion, beta, p_cons, min_cvar_value=min_expected_value)
-                else:
-                    obj = self._formulate_cvar_problem(criterion, beta, p_cons, min_expected_value=min_expected_value)
-            else:
-                obj = cp.Maximize(-criterion(self.efforts))
-            if fix_effort is not None:
-                p_cons += [self.efforts == fix_effort / fix_effort.sum()]
-            problem = cp.Problem(obj, p_cons)
-            # solution
-            if self._discrete_design:
-                root = Node(self.efforts, problem)
-                tree = Tree(root)
-                tree._verbose = self._verbose
-                opt_node = tree.solve()
-                self.efforts = opt_node.int_var_val
-                opt_fun = opt_node.ub
-            else:
-                opt_fun = problem.solve(
-                    verbose=opt_verbose,
-                    solver=self._optimizer,
-                    **kwargs
-                )
-                self.efforts = self.efforts.value
-        elif self._optimization_package == "ipopt":
-            if not _CYIPOPT_AVAILABLE:
-                raise ImportError(
-                    "cyipopt is not installed. Install it with: pip install cyipopt\n"
-                    "Note: IPOPT itself must also be available on your system."
-                )
-            if self._discrete_design:
-                raise NotImplementedError(
-                    "Discrete (exact) designs are not supported for the ipopt package; "
-                    "use 'cvxpy' instead."
-                )
-            if self._cvar_problem:
-                opt_fun = self._solve_cvar_ipopt(
-                    criterion, beta, e0, min_expected_value, opt_options, **kwargs
-                )
-            else:
-                opt_fun = self._solve_ipopt(
-                    criterion, e0, fix_effort, opt_options, **kwargs
-                )
+
+        # single unified Pyomo dispatch
+        if self._cvar_problem:
+            opt_fun = self._solve_pyomo_cvar(
+                criterion, beta, e0, min_expected_value, solver_options, **kwargs
+            )
         else:
-            raise SyntaxError("Unrecognized package; try \"scipy\", \"cvxpy\", or \"ipopt\".")
+            opt_fun = self._solve_pyomo(
+                criterion, e0, fix_effort, solver_options, **kwargs
+            )
 
         finish = time()
 
@@ -2698,8 +2537,7 @@ class Designer:
                 f"Complete: \n"
                 f" ~ sensitivity analysis took {self._sensitivity_analysis_time:.2f} "
                 f"CPU seconds.\n"
-                f" ~ optimization with {self._optimizer:s} via "
-                f"{self._optimization_package} took "
+                f" ~ optimization with {self._solver} took "
                 f"{self._optimization_time:.2f} CPU seconds."
             )
             print("".center(100, "#"))
@@ -2717,13 +2555,15 @@ class Designer:
             "sampling_times_candidates": self.sampling_times_candidates,
             "optimal_efforts": self.efforts,
             "criterion_value": self._criterion_value,
-            "optimization_package": self._optimization_package,
-            "optimizer": self._optimizer,
+            "solver": self._solver,
             "pseudo_bayesian": self._pseudo_bayesian,
             "pseudo_bayesian_type": self._pseudo_bayesian_type,
             "optimize_sampling_times": self._opt_sampling_times,
             "regularized": self._regularize_fim,
             "n_spt_spec": self._n_spt_spec,
+            "prior_fim": self._prior_fim,
+            "prior_fim_mp": self._prior_fim_mp,
+            "prior_n_exp": self._prior_n_exp,
         }
         if write:
             self.write_oed_result()
@@ -2740,21 +2580,23 @@ class Designer:
         fig = plt.figure(figsize=figsize)
         axes = fig.add_subplot(111)
         if self._cvar_problem:
-            x = np.sort(self.phi.value)
-            mean = self.phi.value.mean()
+            phi_vals = getattr(self, '_cvar_phi', np.zeros(self.n_scr))
+            V_val    = getattr(self, '_cvar_V',   float('nan'))
+            x = np.sort(phi_vals)
+            mean = phi_vals.mean()
             x = np.insert(x, 0, x[0])
             y = np.linspace(0, 1, x.size)
             axes.plot(x, y, "o--", alpha=0.3, c="#1f77b4")
             axes.plot(x, y, drawstyle="steps-post", c="#1f77b4")
             axes.axvline(
-                x=self.v.value,
+                x=V_val,
                 ymin=0,
                 ymax=1,
                 c="tab:red",
                 label=f"VaR {self.beta}",
             )
             axes.axvline(
-                x=(self.v - 1 / (self.n_scr * (1 - self.beta)) * cp.sum(self.s)).value,
+                x=getattr(self, "_criterion_value", float("nan")),
                 ymin=0,
                 ymax=1,
                 c="tab:green",
@@ -2799,11 +2641,10 @@ class Designer:
                         "edgecolor": "k",
                     },
                 )
-
                 axes.annotate(
                     "VaR",
-                    xy=(self.v.value, 0.80),
-                    xytext=(self.v.value + 0.2 * np.abs(self.v.value), 0.80),
+                    xy=(V_val, 0.80),
+                    xytext=(V_val + 0.2 * np.abs(V_val), 0.80),
                     arrowprops={
                         "width": 5,
                         "shrink": 0.05,
@@ -2811,7 +2652,7 @@ class Designer:
                         "edgecolor": "k",
                     },
                 )
-                cvar = (self.v - 1 / (self.n_scr * (1 - self.beta)) * cp.sum(self.s)).value
+                cvar = getattr(self, "_criterion_value", float("nan"))
                 axes.annotate(
                     "CVaR",
                     xy=(cvar, 0.50),
@@ -2858,22 +2699,11 @@ class Designer:
         fig = plt.figure()
         axes = fig.add_subplot(111)
         if self._cvar_problem:
-            x = self.phi.value
+            x     = getattr(self, '_cvar_phi', np.zeros(self.n_scr))
+            V_val = getattr(self, '_cvar_V',   float('nan'))
             axes.hist(x, bins=n_bins)
-            axes.axvline(
-                self.v.value,
-                0,
-                1,
-                c="tab:red",
-                label=f"VaR {self.beta}",
-            )
-            axes.axvline(
-                self._criterion_value,
-                0,
-                1,
-                c="tab:green",
-                label=f"CVaR {self.beta}",
-            )
+            axes.axvline(V_val, 0, 1, c="tab:red",   label=f"VaR {self.beta}")
+            axes.axvline(self._criterion_value, 0, 1, c="tab:green", label=f"CVaR {self.beta}")
             axes.set_xlabel(f"{self._current_criterion}")
             axes.set_ylabel("Frequency")
             axes.legend()
@@ -2893,75 +2723,12 @@ class Designer:
 
     def compute_criterion_value(self, criterion, decimal_places=3):
         crit_val = criterion(self.efforts)
-        try:
-            crit_val = crit_val.value
-        except AttributeError:
-            pass
+        if isinstance(crit_val, tuple):
+            crit_val = crit_val[0]
+        crit_val = float(np.squeeze(crit_val))
         if self._verbose >= 1:
             print(f"{criterion.__name__}: {crit_val:.{decimal_places}E}")
         return crit_val
-
-    def estimability_study(self, base_step=None, step_ratio=None, num_steps=None,
-                           estimable_tolerance=0.04, write=False,
-                           save_sensitivities=False, normalize=False):
-        self._save_sensitivities = save_sensitivities
-        self._compute_sensitivities = self._model_parameters_changed
-        self._compute_sensitivities = self._compute_sensitivities or self._candidates_changed
-        self._compute_sensitivities = self._compute_sensitivities or self.sensitivities is None
-
-        if self._compute_sensitivities:
-            self.eval_sensitivities(
-                base_step=base_step,
-                step_ratio=step_ratio,
-            )
-        if normalize:
-            self.normalize_sensitivities()
-        else:
-            self.normalized_sensitivity = self.sensitivities / self.responses_scales[None, None, :, None]
-
-        z = self.normalized_sensitivity[:, :, self.measurable_responses, :].reshape(
-            self.n_spt * self.n_m_r * self.n_c, self.n_mp)
-
-        z_col_mag = np.nansum(np.power(z, 2), axis=0)
-        next_estim_param = np.argmax(z_col_mag)
-        self.estimable_columns = np.array([next_estim_param])
-        self.estimability = [z_col_mag[next_estim_param]]
-        finished = False
-        while not finished:
-            x_l = z[:, self.estimable_columns]
-            z_theta = np.linalg.inv(x_l.T.dot(x_l)).dot(x_l.T).dot(z)
-            z_hat = x_l.dot(z_theta)
-            r = z - z_hat
-            r_col_mag = np.nansum(np.power(r, 2), axis=0)
-            next_estim_param = np.argmax(r_col_mag)
-            if r_col_mag[next_estim_param] <= estimable_tolerance:
-                if write:
-                    fn = f"estimability_{self.n_c}_cand"
-                    fp = self._generate_result_path(fn, "pkl")
-                    dump(self.estimable_columns, open(fp, 'wb'))
-                print(
-                    f'Identified estimable parameters are: '
-                    f'{np.array2string(self.estimable_columns,separator=", ")}'
-                )
-                with np.printoptions(precision=1):
-                    print(
-                        f"Degree of Estimability: "
-                        f"{np.array2string(np.asarray(self.estimability),separator=', ')}"
-                    )
-                return self.estimable_columns
-            self.estimability.append(r_col_mag[next_estim_param])
-            self.estimable_columns = np.append(self.estimable_columns, next_estim_param)
-
-    def estimability_study_fim(self, save_sensitivities=False):
-        self._save_sensitivities = save_sensitivities
-        self.efforts = np.ones((self.n_c, self.n_spt))
-        self.eval_fim(self.efforts)
-        print(f"Estimable parameters: {self.estimable_model_parameters}")
-        with np.printoptions(precision=1):
-            print(f"Degree of Estimability: {self.estimability}")
-        return self.estimable_model_parameters, self.estimability
-
-    """ core utilities """
 
     def apportion(self, n_exp, method="adams", trimmed=True, compute_actual_efficiency=True):
         self.n_exp = n_exp
@@ -3022,7 +2789,7 @@ class Designer:
                 print(f"{'Beta':<40}: {self.beta}")
                 print(f"{'Constrained Problem':<40}: {self._constrained_cvar}")
                 if self._constrained_cvar:
-                    print(f"{'Min. Mean Value':<40}: {cp.sum(self.phi).value / self.n_scr:.6f}")
+                    print(f"{'Min. Mean Value':<40}: {getattr(self, "_cvar_mean_phi", float("nan")):.6f}")
             print(f"{'Dynamic':<40}: {self._dynamic_system}")
             print(f"{'Time-invariant Controls':<40}: {self._invariant_controls}")
             print(f"{'Time-varying Controls':<40}: {self._dynamic_controls}")
@@ -3563,66 +3330,7 @@ class Designer:
 
         return fig
 
-    def plot_parity(self):
-        if self.response is None:
-            raise RuntimeError(
-                "Cannot generate parity plot when response is empty. "
-                "Run simulate_all_candidates and store responses."
-            )
-        if self.data is None:
-            raise RuntimeError(
-                "Cannot generate parity plot when data is empty. "
-                "Please specify data to the designer."
-            )
-        fig = plt.figure()
-        n_rows = np.ceil(np.sqrt(self.n_m_r)).astype(int)
-        gridspec = plt.GridSpec(nrows=n_rows, ncols=n_rows)
-        for r in range(self.n_m_r):
-            row = r % n_rows
-            col = np.floor_divide(r, n_rows)
-            axes = fig.add_subplot(gridspec[row, col])
-            axes.scatter(
-                [dat for dat in self.data[:, :, r]],
-                [res for res in self.response[:, :, self.measurable_responses[r]]],
-                marker="1",
-            )
-            axes.plot(
-                [-1e10, 1e10],
-                [-1e10, 1e10],
-                linestyle="-",
-                marker="None",
-                c="gray",
-                alpha=0.3,
-            )
-            data_lim = [
-                np.nanmin(self.data[:, :, r]),
-                np.nanmax(self.data[:, :, r]),
-            ]
-            res_lim = [
-                np.nanmin(self.response[:, :, self.measurable_responses[r]]),
-                np.nanmax(self.response[:, :, self.measurable_responses[r]]),
-            ]
-            lim = [
-                np.min([data_lim[0], res_lim[0]]),
-                np.max([data_lim[1], res_lim[1]]),
-            ]
-            lim = lim + np.array([
-                -0.1 * (lim[1] - lim[0]),
-                 0.1 * (lim[1] - lim[0]),
-            ])
-            axes.set_xlim(lim)
-            axes.set_ylim(lim)
-            if self.response_names is not None:
-                axes.set_title(f"{self.response_names[r]}")
-            else:
-                axes.set_title(f"Response {r}")
-            axes.set_xlabel(f"Data")
-            axes.set_ylabel(f"Prediction")
-        plt.get_current_fig_manager().window.showMaximized()
-        plt.gcf().tight_layout()
-        return fig
-
-    def plot_predictions(self, plot_data=False, figsize=None, label_candidates=True):
+    def plot_predictions(self, figsize=None, label_candidates=True):
         if not self._dynamic_system:
             raise NotImplementedError(
                 f"Plot predictions not supported for non-dynamic systems."
@@ -3640,20 +3348,9 @@ class Designer:
                 nrows=n_rows,
                 ncols=n_cols,
             )
-            res_lim = [
+            lim = [
                 np.nanmin(self.response[:, :, self.measurable_responses[res]]),
                 np.nanmax(self.response[:, :, self.measurable_responses[res]]),
-            ]
-            if plot_data:
-                data_lim = [
-                    np.nanmin(self.data[:, :, res]),
-                    np.nanmax(self.data[:, :, res]),
-                ]
-            else:
-                data_lim = res_lim
-            lim = [
-                np.min([data_lim[0], res_lim[0]]),
-                np.max([data_lim[1], res_lim[1]])
             ]
             lim = lim + np.array([
                 - 0.1 * (lim[1] - lim[0]),
@@ -3671,15 +3368,6 @@ class Designer:
                             marker="1",
                             label="Prediction"
                         )
-                        if plot_data:
-                            axes.plot(
-                                self.sampling_times_candidates[cand, :],
-                                self.data[n_cols * row + col, :, res],
-                                linestyle="none",
-                                marker="v",
-                                fillstyle="none",
-                                label="Data"
-                            )
                         axes.set_ylim(lim)
                         if self.time_unit_name is not None:
                             axes.set_xlabel(f"Time ({self.time_unit_name})")
@@ -3689,8 +3377,6 @@ class Designer:
                         if self.response_unit_names is not None:
                             ylabel += f" ({self.response_unit_names[res]})"
                         axes.set_ylabel(ylabel)
-                        if cand + 1 == self.n_c:
-                            axes.legend(prop={"size": 6})
                         if label_candidates:
                             axes.set_title(f"{self.candidate_names[cand]}")
             if self.response_names is not None:
@@ -3746,21 +3432,22 @@ class Designer:
                         style="sci",
                         scilimits=(0, 0),
                     )
-                    if self.time_unit_name is not None:
-                        axes.set_xlabel(f"Sampling Times ({self.time_unit_name})")
-                    else:
-                        axes.set_xlabel('Sampling Times')
-                    ylabel = self.response_names[self.measurable_responses[row]]
-                    ylabel += "/"
-                    ylabel += self.model_parameter_names[col]
-                    if self.response_unit_names is not None:
-                        if self.model_parameter_unit_names is not None:
-                            ylabel += f" ({self.response_unit_names[row]}/{self.model_parameter_unit_names[col]})"
-                    axes.set_ylabel(ylabel)
+                # labels outside candidate loop
+                if self.time_unit_name is not None:
+                    axes[row, col].set_xlabel(f"Sampling Times ({self.time_unit_name})")
+                else:
+                    axes[row, col].set_xlabel('Sampling Times')
+                ylabel = self.response_names[self.measurable_responses[row]]
+                ylabel += "/"
+                ylabel += self.model_parameter_names[col]
+                if self.response_unit_names is not None:
+                    if self.model_parameter_unit_names is not None:
+                        ylabel += f" ({self.response_unit_names[row]}/{self.model_parameter_unit_names[col]})"
+                axes[row, col].set_ylabel(ylabel)
                 if legend and self.n_c <= 10:
-                    axes[-1, -1].legend()
+                    axes[row, col].legend()
         fig.tight_layout()
-        return fig
+        return [fig]
 
     def plot_optimal_predictions(self, legend=None, figsize=None, markersize=10,
                                  fontsize=10, legend_size=8, colour_map="jet",
@@ -4003,7 +3690,7 @@ class Designer:
             print(f"{'Beta':<40}: {self.beta}")
             print(f"{'Constrained Problem':<40}: {self._constrained_cvar}")
             if self._constrained_cvar:
-                print(f"{'Min. Mean Value':<40}: {cp.sum(self.phi).value / self.n_scr:.6f}")
+                print(f"{'Min. Mean Value':<40}: {getattr(self, "_cvar_mean_phi", float("nan")):.6f}")
         print(f"{'Dynamic':<40}: {self._dynamic_system}")
         print(f"{'Time-invariant Controls':<40}: {self._invariant_controls}")
         print(f"{'Time-varying Controls':<40}: {self._dynamic_controls}")
@@ -4019,6 +3706,12 @@ class Designer:
         print(f"{'Information Matrix Regularized':<40}: {self._regularize_fim}")
         if self._regularize_fim:
             print(f"{'Regularization Epsilon':<40}: {self._eps}")
+        if self._prior_fim is not None:
+            print(f"{'Prior FIM':<40}: registered  "
+                  f"({self._prior_n_exp} prior experiment(s), "
+                  f"θ_prior={np.array2string(self._prior_fim_mp, precision=3, separator=', ')})")
+        else:
+            print(f"{'Prior FIM':<40}: none (first-round design)")
         print(f"{'Minimum Effort Threshold':<40}: {tol}")
         for i, opt_cand in enumerate(self.optimal_candidates):
             print(f"{f'[Candidate {opt_cand[0] + 1:d}]':-^100}")
@@ -4258,13 +3951,17 @@ class Designer:
         self.model_parameters = oed_result["model_parameters"]
         self.sampling_times_candidates = oed_result["sampling_times_candidates"]
         self.efforts = oed_result["optimal_efforts"]
-        self._optimization_package = oed_result["optimization_package"]
-        self._optimizer = oed_result["optimizer"]
+        # support both new "solver" key and legacy "optimization_package" key
+        self._solver = oed_result.get("solver",
+                       oed_result.get("optimization_package", "ipopt"))
         self._pseudo_bayesian = oed_result["pseudo_bayesian"]
         self._pseudo_bayesian_type = oed_result["pseudo_bayesian_type"]
         self._opt_sampling_times = oed_result["optimize_sampling_times"]
         self._regularize_fim = oed_result["regularized"]
         self._n_spt_spec = oed_result["n_spt_spec"]
+        self._prior_fim    = oed_result.get("prior_fim",    None)
+        self._prior_fim_mp = oed_result.get("prior_fim_mp", None)
+        self._prior_n_exp  = oed_result.get("prior_n_exp",  0)
         self._candidates_changed = False
         self._model_parameters_changed = False
 
@@ -4420,12 +4117,6 @@ class Designer:
         return self._v_opt_criterion(efforts)
 
     def _v_opt_criterion(self, efforts):
-        if self._optimization_package == "cvxpy":
-            raise NotImplementedError(
-                "CVXPY is not supported for v_opt_criterion. "
-                "Use package='ipopt' or package='scipy'."
-            )
-
         if not self._dw_fixed:
             raise SyntaxError(
                 "dw has not been fixed. Call find_optimal_operating_point() "
@@ -4609,101 +4300,30 @@ class Designer:
 
         return self.W
 
-    def design_v_optimal(self, n_exp=None, package="ipopt", optimizer="mumps",
-                          opt_options=None, e0=None, regularize_fim=False,
-                          recompute_W=False, **kwargs):
+    def design_v_optimal(self, n_exp=None, solver="ipopt", solver_options=None,
+                          e0=None, regularize_fim=False, recompute_W=False, **kwargs):
         """
         Stage 2 of V-optimal MBDoE: design experiments that minimise prediction
         variance at the optimal operating point ``dw`` found in Stage 1.
-
-        This is a convenience wrapper around ``design_experiment()`` that:
-
-        1. Verifies Stage 1 has been completed (``_dw_fixed`` is ``True``).
-        2. Verifies ``dw_spt`` has been set.
-        3. Computes (or recomputes) the W matrix via ``_eval_W_matrix()``.
-        4. Calls ``design_experiment(criterion=v_opt_criterion, ...)``.
-
-        The V-optimality criterion minimised is:
-
-        .. math::
-
-            J_V = \\mathrm{trace}\\left( W \\, \\mathrm{FIM}^{-1} W^T \\right)
-
-        where ``W`` encodes the model prediction directions at ``dw`` and
-        ``FIM`` is built from the experimental candidate grid as usual.
-
-        Note
-        ----
-        ``find_optimal_operating_point()`` must be called before this method
-        (``_dw_fixed`` must be ``True``).  Also set ``dw_spt`` before calling::
-
-            designer.dw_spt = np.array([t_final])
-
-        ``dw_spt`` is the time point(s) at which prediction accuracy is
-        required — e.g. ``np.array([T_FINAL])`` for end-of-batch prediction.
-        For non-dynamic models it is not used (set automatically).
-        It is a user specification, not a degree of freedom; it is distinct
-        from ``sampling_times_candidates``, which pydex optimises over.
 
         Parameters
         ----------
         n_exp : int or None
             Number of experiments for a discrete (exact) design.
             ``None`` (default) gives a continuous design (effort fractions).
-        package : str
-            Optimisation package: ``"ipopt"`` (default) or ``"scipy"``.
-            CVXPY is not supported for ``v_opt_criterion``.
-        optimizer : str
-            Solver within the package.
-            For ipopt: ``"mumps"`` (default, open-source) or ``"ma57"`` (HSL).
-            For scipy: ``"SLSQP"`` (default).
-        opt_options : dict, optional
-            Solver options passed directly to the optimiser.
+        solver : str
+            Pyomo solver name (default ``"ipopt"``).
+        solver_options : dict, optional
+            Options forwarded to the solver
+            (e.g. ``{"tol": 1e-8, "linear_solver": "ma57"}``).
         e0 : array-like or None
             Initial effort allocation.  ``None`` uses equal efforts.
         regularize_fim : bool
-            If ``True``, adds ``eps * I`` to the FIM before inversion
-            (Tikhonov regularization).  ``eps`` is ``designer._eps``.
+            If ``True``, adds ``eps * I`` to the FIM before inversion.
         recompute_W : bool
-            Force recomputation of W even if already cached.  Set ``True``
-            after updating ``model_parameters`` in a sequential design loop.
-            W is also recomputed automatically when ``_model_parameters_changed``
-            is set by the ``model_parameters`` setter.
+            Force recomputation of W even if already cached.
         **kwargs
-            Forwarded to ``design_experiment()``.  Notably:
-            ``optimize_sampling_times=True`` to jointly optimise over
-            candidate experiments and measurement timing.
-
-        Returns
-        -------
-        dict
-            OED result dictionary (same format as ``design_experiment``).
-
-        Examples
-        --------
-        Single-shot V-optimal design:
-
-        >>> designer.dw_spt = np.array([T_FINAL])
-        >>> designer.design_v_optimal(
-        ...     package                 = "ipopt",
-        ...     optimizer               = "mumps",
-        ...     optimize_sampling_times = True,
-        ...     opt_options             = {"tol": 1e-8, "max_iter": 1000},
-        ... )
-        >>> designer.print_optimal_candidates(tol=1e-3)
-
-        Sequential design loop — recompute W after parameter re-estimation:
-
-        >>> designer.data = new_experimental_data
-        >>> designer.estimate_parameters(bounds=param_bounds,
-        ...                              update_parameters=True)
-        >>> designer.design_v_optimal(recompute_W=True)
-
-        See Also
-        --------
-        find_optimal_operating_point : Stage 1 — find the target operating point dw.
-        v_opt_criterion : The V-optimality criterion callable.
-        _eval_W_matrix : Builds the W matrix from dw.
+            Forwarded to ``design_experiment()``.
         """
         if not self._dw_fixed:
             raise SyntaxError(
@@ -4716,8 +4336,6 @@ class Designer:
                 "e.g. designer.dw_spt = np.array([t_final])"
             )
 
-        # also recompute W if model_parameters have changed since last computation,
-        # even if recompute_W was not explicitly requested
         if self._model_parameters_changed:
             recompute_W = True
 
@@ -4727,9 +4345,8 @@ class Designer:
         return self.design_experiment(
             criterion=self.v_opt_criterion,
             n_exp=n_exp,
-            package=package,
-            optimizer=optimizer,
-            opt_options=opt_options,
+            solver=solver,
+            solver_options=solver_options,
             e0=e0,
             regularize_fim=regularize_fim,
             **kwargs,
@@ -4745,8 +4362,6 @@ class Designer:
             return self._vdi_opt_criterion(efforts)
 
     def _vdi_opt_criterion(self, efforts):
-        if self._optimization_package == "cvxpy":
-            raise NotImplementedError("CVXPY unavailable for vdi_opt.")
 
         self.eval_pim_for_v_opt(efforts)
         di_opts = np.empty((self.n_c_go, self.n_spt_go))
@@ -4767,8 +4382,6 @@ class Designer:
             raise NotImplementedError("Analytic Jacobian for ei_opt unavailable.")
 
     def eval_pim_for_v_opt(self, efforts, vector=False):
-        if self._optimization_package == "cvxpy":
-            raise NotImplementedError
 
         """ update mp, and efforts """
         self.eval_fim(efforts)
@@ -4828,32 +4441,19 @@ class Designer:
 
     # risk-averse
     def cvar_d_opt_criterion(self, fim):
+        """
+        D-optimal CVaR criterion.  Called by the CVaR solver with a per-scenario
+        FIM (plain numpy array).  Returns -log-det(fim).
+        """
         self._cvar_problem = True
 
         if self._pseudo_bayesian:
-            if self._optimization_package == "ipopt":
-                # fim is a plain numpy array when called from the IPOPT back-end
-                if np.asarray(fim).size == 1:
-                    return -float(np.squeeze(fim))
-                sign, logdet = np.linalg.slogdet(np.asarray(fim))
-                if sign != 1:
-                    return np.inf
-                return -logdet
-            # cvxpy path (original behaviour)
-            # old behaviour
-            if False:
-                self._eval_fim(efforts, mp)
-                self._model_parameters_changed = True
-                if self.fim.size == 1:
-                    return -self.fim
-                else:
-                    return -cp.log_det(self.fim)
-                # new behaviour
-            if True:
-                if self.fim.size == 1:
-                    return -fim
-                else:
-                    return -cp.log_det(fim)
+            # fim is a plain numpy array supplied by _solve_pyomo_cvar
+            fim = np.asarray(fim)
+            if fim.size == 1:
+                return -float(np.squeeze(fim))
+            sign, logdet = np.linalg.slogdet(fim)
+            return -logdet if sign == 1 else np.inf
         else:
             raise SyntaxError(
                 "CVaR criterion cannot be used for non Pseudo-bayesian problems, please "
@@ -4863,35 +4463,70 @@ class Designer:
 
     """ evaluators """
 
-    def eval_residuals(self, model_parameters):
-        self.model_parameters = model_parameters
-
-        """ run the model to get predictions """
-        self.simulate_candidates()
-        if self._dynamic_system:
-            self.residuals = self.data - self.response[:, :, self.measurable_responses]
-        else:
-            self.residuals = self.data - self.response[:, self.measurable_responses]
-
-        return self.residuals[
-            ~np.isnan(self.residuals)]  # return residuals where entries are not empty
-
     def eval_sensitivities(self, method='forward', base_step=2, step_ratio=2,
                            store_predictions=True,
                            plot_analysis_times=False, save_sensitivities=None,
-                           reporting_frequency=None):
+                           reporting_frequency=None, n_jobs=None):
         """
         Main evaluator for computing numerical sensitivities of the responses with
-        respect to the model parameters. Simply provides an interface to numdifftool's
-        Jacobian method.
+        respect to the model parameters.
 
-        Numdifftool uses adaptive finite difference to approximate the sensitivities,
-        coupled with Richard extrapolation for improved accuracy. Although less accurate,
-        default behaviour is to use forward finite difference. This is to prevent model
-        instability in common situations where during sensitivity evaluation (e.g.
-        with central) model parameter values that are passed to the model changes sign
-        and causes the model to fail to run.
+        By default uses numdifftools' adaptive finite-difference Jacobian with
+        Richardson extrapolation.  When use_pyomo_ift=True, exact parametric
+        sensitivities are computed via the Implicit-Function Theorem (IFT) applied
+        to a user-supplied Pyomo DAE model — no finite-difference perturbations.
+
+        Parameters
+        ----------
+        method : str
+            Finite-difference method passed to numdifftools ('forward', 'central',
+            etc.).  Ignored when use_pyomo_ift=True.
+        base_step : float
+            Base step size for numdifftools step generator.
+        step_ratio : float
+            Step ratio for numdifftools Richardson extrapolation.
+        store_predictions : bool
+            Whether to cache model predictions alongside sensitivities.
+        plot_analysis_times : bool
+            If True, plot per-candidate sensitivity computation times.
+        save_sensitivities : bool or None
+            Override the designer's save_sensitivities flag for this call.
+        reporting_frequency : int or None
+            How often to print progress (every N candidates).  None uses
+            the designer default.
+        n_jobs : int
+            Number of parallel workers for sensitivity computation.
+            1  — sequential (default, safe for all backends).
+            -1 — use all available CPU cores.
+            N  — use N cores.
+
+            Parallelisation is currently supported only when use_pyomo_ift=True.
+            Uses joblib with prefer="processes" (loky backend) so each worker
+            runs in an isolated subprocess — fully avoiding Pyomo's thread-unsafe
+            LoggingIntercept and C-extension global state.  For the non-PB path
+            each subprocess handles one candidate; for the PB path each subprocess
+            handles all candidates for one scenario (amortising spawn overhead).
+
+            For the finite-difference path, n_jobs > 1 is ignored (numdifftools
+            is not thread-safe across candidates without additional work).
+
+            Requires: pip install joblib  (usually already installed via scipy).
+
+        Notes
+        -----
+        Default behaviour is forward finite difference to prevent model instability
+        when parameter values change sign during central-difference evaluation.
+
+        When use_pyomo_ift=True, the sensitivity method is entirely different:
+        the Jacobian of the discretised DAE constraints is assembled via PyomoNLP
+        (compiled ASL, fast) or Pyomo's symbolic differentiate() (pure Python,
+        slower), then the IFT linear system J_z * S = -J_p is solved once per
+        candidate to give exact sensitivities for all parameters simultaneously.
         """
+        # Resolve n_jobs: explicit argument overrides self.n_jobs attribute
+        if n_jobs is None:
+            n_jobs = getattr(self, 'n_jobs', 1) or 1
+
         if self.use_finite_difference:
             # setting default behaviour for step generators
             step_generator = nd.step_generators.MaxStepGenerator(
@@ -4909,12 +4544,33 @@ class Designer:
         if self._pseudo_bayesian and not self._large_memory_requirement:
             self._scr_sens = np.empty((self.n_scr, self.n_c, self.n_spt, self.n_m_r, self.n_mp))
 
+        # ── Pyomo IFT path: validate ──────────────────────────────────────────
+        _use_pyomo_ift = getattr(self, 'use_pyomo_ift', False)
+        if _use_pyomo_ift:
+            if not _PYOMO_IFT_AVAILABLE:
+                raise ImportError(
+                    "use_pyomo_ift=True but Pyomo/scipy could not be imported. "
+                    "Install with: pip install pyomo scipy"
+                )
+            if self.pyomo_model_fn is None:
+                raise ValueError(
+                    "use_pyomo_ift=True but pyomo_model_fn is None. "
+                    "Assign a callable with signature\n"
+                    "  pyomo_model_fn(ti_controls, model_parameters)\n"
+                    "  -> (model, all_vars, all_bodies, t_sorted)\n"
+                    "where all_vars has the n_mp parameter Vars listed first."
+                )
+
         self._sensitivity_analysis_done = False
         if self._verbose >= 2:
             print('[Sensitivity Analysis]'.center(100, "-"))
-            print(f"{'Use Finite Difference':<40}: {self.use_finite_difference}")
-            if self.use_finite_difference:
-                print(f"{'Richardson Extrapolation Steps':<40}: {self._num_steps}")
+            if _use_pyomo_ift:
+                backend = "PyomoNLP / ASL (compiled)" if _PYNUMERO_ASL_AVAILABLE else "Pyomo differentiate() (pure Python)"
+                print(f"{'Sensitivity Method':<40}: Pyomo IFT — {backend}")
+            else:
+                print(f"{'Use Finite Difference':<40}: {self.use_finite_difference}")
+                if self.use_finite_difference:
+                    print(f"{'Richardson Extrapolation Steps':<40}: {self._num_steps}")
             print(f"{'Normalized by Parameter Values':<40}: {self._norm_sens_by_params}")
             print(f"".center(100, "-"))
         start = time()
@@ -4922,89 +4578,173 @@ class Designer:
         self.sensitivities = np.empty((self.n_c, self.n_spt, self.n_m_r, self.n_mp))
 
         candidate_sens_times = []
-        if self.use_finite_difference:
+        if self.use_finite_difference and not _use_pyomo_ift:
             jacob_fun = nd.Jacobian(fun=self._sensitivity_sim_wrapper, step=step_generator, method=method, full_output=False)
         """ main loop over experimental candidates """
         main_loop_start = time()
-        for i, exp_candidate in enumerate(
-                zip(self.sampling_times_candidates, self.ti_controls_candidates,
-                    self.tv_controls_candidates)):
-            """ specifying current experimental candidate """
-            self._current_tic = exp_candidate[1]
-            self._current_tvc = exp_candidate[2]
-            self._current_spt = exp_candidate[0][~np.isnan(exp_candidate[0])]
 
-            self.feval_sensitivity = 0
-            single_start = time()
+        # ── Parallel Pyomo IFT path ───────────────────────────────────────────
+        # When n_jobs != 1 and use_pyomo_ift=True, candidates are evaluated
+        # in parallel using joblib with prefer="threads".  A threading.Lock
+        # (created once per eval_sensitivities call) serialises pyomo_model_fn()
+        # to avoid the Pyomo LoggingIntercept AssertionError that fires when
+        # dae.collocation transforms run concurrently in multiple threads.
+        # The ASL Jacobian and IFT linear solve run without the lock.
+        if _use_pyomo_ift and n_jobs != 1:
             try:
-                if self.use_finite_difference:
-                    temp_sens = jacob_fun(self._current_scr_mp, store_predictions)
-                else:
-                    temp_resp, temp_sens = self._sensitivity_sim_wrapper(self._current_scr_mp,
-                                                                         store_predictions)
-            except RuntimeError:
-                print(
-                    "The simulate function you provided encountered a Runtime Error "
-                    "during sensitivity analysis. The inputs to the simulate function "
-                    "were as follows."
+                from joblib import Parallel, delayed
+            except ImportError:
+                raise ImportError(
+                    "n_jobs != 1 requires joblib. Install with: pip install joblib"
                 )
-                print("Model Parameters:")
-                print(self._current_scr_mp)
-                print("Time-invariant Controls:")
-                print(self._current_tic)
-                print("Time-varying Controls:")
-                print(self._current_tvc)
-                print("Sampling Time Candidates:")
-                print(self._current_spt)
-                raise RuntimeError
-            finish = time()
-            if self._verbose >= 2 and self.sens_report_freq != 0:
-                if (i + 1) % np.ceil(self.n_c / self.sens_report_freq) == 0 or (
-                        i + 1) == self.n_c:
-                    print(
-                        f'[Candidate {f"{i + 1:d}/{self.n_c:d}":>10}]: '
-                        f'time elapsed {f"{finish - main_loop_start:.2f}":>15} seconds.'
-                    )
-            candidate_sens_times.append(finish - single_start)
-            """
-            bunch of lines to make sure the Jacobian method returns the 
-            sensitivity (temp_sens) with dims: n_sp, n_res, n_theta
-            -------------------------------------------------------------------------
-            8 possible cases
-            -------------------------------------------------------------------------
-            case_1: complete                        n_sp    n_theta     n_res
-            case_2: n_sp = 1                        n_res   n_theta
-            case_3: n_theta = 1                     n_res   n_sp
-            case_4: n_res = 1                       n_sp    n_theta
-            case_5: n_sp & n_theta = 1              1       n_res
-            case_6: n_sp & n_res = 1                1       n_theta
-            case_7: n_theta & n_res = 1             1       n_sp
-            case_8: n_sp, n_res, n_theta = 1        1       1
-            -------------------------------------------------------------------------
-            """
-            if self.use_finite_difference:
-                n_dim = len(temp_sens.shape)
-                if n_dim == 3:  # covers case 1
-                    temp_sens = np.moveaxis(temp_sens, 1, 2)  # switch n_theta and n_res
-                elif self.n_spt == 1:
-                    if self.n_mp == 1:  # covers case 5: add a new axis in the last dim
-                        temp_sens = temp_sens[:, :, np.newaxis]
-                    else:  # covers case 2, 6, and 8: add a new axis in
-                        # the first dim
-                        temp_sens = temp_sens[np.newaxis]
-                elif self.n_mp == 1:  # covers case 3 and 7
-                    temp_sens = np.moveaxis(temp_sens, 0,
-                                            1)  # move n_sp to the first dim as needed
-                    temp_sens = temp_sens[:, :,
-                                np.newaxis]  # create a new axis as the last dim for
-                    # n_theta
-                elif self.n_r == 1:  # covers case 4
-                    temp_sens = temp_sens[:, np.newaxis,
-                                :]  # create axis in the middle for n_res
 
-            self.sensitivities[i, :] = temp_sens
-            if self._save_txt and i == self._save_txt_nc-1:
-                self._save_sensitivities_to_txt()
+            # Extract all candidate inputs upfront — workers receive plain arrays
+            candidates = [
+                (
+                    exp_candidate[1],                                    # tic
+                    exp_candidate[2],                                    # tvc
+                    exp_candidate[0][~np.isnan(exp_candidate[0])],      # spt
+                )
+                for exp_candidate in zip(
+                    self.sampling_times_candidates,
+                    self.ti_controls_candidates,
+                    self.tv_controls_candidates,
+                )
+            ]
+
+            pyomo_fn   = self.pyomo_model_fn
+            scr_mp     = self._current_scr_mp
+            out_names  = getattr(self, 'pyomo_output_var_name', None)
+            n_mr       = self.n_m_r
+
+            # Use loky (subprocess) workers to fully isolate Pyomo global state
+            # (LoggingIntercept, C-extension caches) between workers.
+            def _worker(tic, tvc, spt):
+                """Subprocess worker — fully isolated, returns (resp, sens)."""
+                import types, numpy as _np
+                fake = types.SimpleNamespace(
+                    _current_spt          = spt,
+                    pyomo_model_fn        = pyomo_fn,
+                    pyomo_output_var_name = out_names,
+                    n_m_r                 = n_mr,
+                )
+                return Designer._eval_sensitivities_pyomo_ift(
+                    fake, tic, scr_mp, store_predictions=False
+                )
+
+            if self._verbose >= 1:
+                print(
+                    f"[eval_sensitivities] Running {self.n_c} candidates in parallel "
+                    f"(n_jobs={n_jobs}, backend=loky)..."
+                )
+
+            results = Parallel(n_jobs=n_jobs, prefer="processes")(
+                delayed(_worker)(tic, tvc, spt)
+                for tic, tvc, spt in candidates
+            )
+
+            for i, (temp_resp, temp_sens) in enumerate(results):
+                self.sensitivities[i, :] = temp_sens
+                candidate_sens_times.append(0.0)  # timing not meaningful in parallel
+
+            if self._verbose >= 2:
+                finish = time()
+                print(
+                    f"[eval_sensitivities] Parallel sensitivity complete: "
+                    f"{finish - main_loop_start:.2f}s total."
+                )
+
+        else:
+            # ── Sequential path (original behaviour) ─────────────────────────
+            for i, exp_candidate in enumerate(
+                    zip(self.sampling_times_candidates, self.ti_controls_candidates,
+                        self.tv_controls_candidates)):
+                """ specifying current experimental candidate """
+                self._current_tic = exp_candidate[1]
+                self._current_tvc = exp_candidate[2]
+                self._current_spt = exp_candidate[0][~np.isnan(exp_candidate[0])]
+
+                self.feval_sensitivity = 0
+                single_start = time()
+
+                # ── Pyomo IFT branch ──────────────────────────────────────────────
+                if _use_pyomo_ift:
+                    try:
+                        temp_resp, temp_sens = self._eval_sensitivities_pyomo_ift(
+                            self._current_tic,
+                            self._current_scr_mp,
+                            store_predictions,
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[Pyomo IFT] Error for candidate {i}:\n"
+                            f"  ti_controls      : {self._current_tic}\n"
+                            f"  model_parameters : {self._current_scr_mp}\n"
+                            f"  Error: {exc}"
+                        )
+                        raise
+                    finish = time()
+                    if self._verbose >= 2 and self.sens_report_freq != 0:
+                        if (i + 1) % max(1, int(np.ceil(self.n_c / self.sens_report_freq))) == 0 \
+                                or (i + 1) == self.n_c:
+                            print(
+                                f'[Candidate {f"{i + 1:d}/{self.n_c:d}":>10}]: '
+                                f'time elapsed {f"{finish - main_loop_start:.2f}":>15} seconds.'
+                            )
+                    candidate_sens_times.append(finish - single_start)
+                    self.sensitivities[i, :] = temp_sens
+
+                # ── Original path: finite-difference or analytic ──────────────────
+                else:
+                    try:
+                        if self.use_finite_difference:
+                            temp_sens = jacob_fun(self._current_scr_mp, store_predictions)
+                        else:
+                            temp_resp, temp_sens = self._sensitivity_sim_wrapper(self._current_scr_mp,
+                                                                                 store_predictions)
+                    except RuntimeError:
+                        print(
+                            "The simulate function you provided encountered a Runtime Error "
+                            "during sensitivity analysis. The inputs to the simulate function "
+                            "were as follows."
+                        )
+                        print("Model Parameters:")
+                        print(self._current_scr_mp)
+                        print("Time-invariant Controls:")
+                        print(self._current_tic)
+                        print("Time-varying Controls:")
+                        print(self._current_tvc)
+                        print("Sampling Time Candidates:")
+                        print(self._current_spt)
+                        raise RuntimeError
+                    finish = time()
+                    if self._verbose >= 2 and self.sens_report_freq != 0:
+                        if (i + 1) % np.ceil(self.n_c / self.sens_report_freq) == 0 or (
+                                i + 1) == self.n_c:
+                            print(
+                                f'[Candidate {f"{i + 1:d}/{self.n_c:d}":>10}]: '
+                                f'time elapsed {f"{finish - main_loop_start:.2f}":>15} seconds.'
+                            )
+                    candidate_sens_times.append(finish - single_start)
+                # Pyomo IFT already returns (n_spt, n_mr, n_mp) — no reshaping needed.
+                # Only apply the FD axis-reordering logic for the finite-difference path.
+                if self.use_finite_difference and not _use_pyomo_ift:
+                    n_dim = len(temp_sens.shape)
+                    if n_dim == 3:
+                        temp_sens = np.moveaxis(temp_sens, 1, 2)
+                    elif self.n_spt == 1:
+                        if self.n_mp == 1:
+                            temp_sens = temp_sens[:, :, np.newaxis]
+                        else:
+                            temp_sens = temp_sens[np.newaxis]
+                    elif self.n_mp == 1:
+                        temp_sens = np.moveaxis(temp_sens, 0, 1)
+                        temp_sens = temp_sens[:, :, np.newaxis]
+                    elif self.n_r == 1:
+                        temp_sens = temp_sens[:, np.newaxis, :]
+                    self.sensitivities[i, :] = temp_sens
+                if self._save_txt and i == self._save_txt_nc - 1:
+                    self._save_sensitivities_to_txt()
 
         finish = time()
         if self._verbose >= 2 and self.sens_report_freq != 0:
@@ -5109,7 +4849,326 @@ class Designer:
             )
             return self.fim
 
-    def _eval_fim(self, efforts, store_predictions=True, save_atomics=None):
+    def diagnose_sensitivity(self, tol_diag=1.0, tol_cond=1e4, plot=True,
+                             figsize=None, write=False, dpi=360):
+        """
+        Diagnose rank-deficiency and near-zero sensitivity in the candidate grid
+        using scale-free, physically motivated thresholds.
+
+        Background
+        ----------
+        pydex normalises every sensitivity by the nominal parameter value::
+
+            s_norm[c, t, r, j] = (∂y_r / ∂θ_j) · θ_j
+
+        This makes sensitivities dimensionless — they represent the fractional
+        change in response per fractional change in parameter (local elasticity).
+        The atomic FIM diagonal is therefore also dimensionless::
+
+            A_k[j, j] = Σ_{t,r}  s_norm[k,t,r,j]² / σ_r²
+
+        Its inverse is the Cramér–Rao lower bound on the variance of θ_j / θ_j
+        (relative variance) from a **single** experiment at candidate k.
+        This gives a natural, grid-independent threshold:
+
+        - ``A_k[j,j] < 1`` — one experiment cannot determine θⱼ to within its
+          own magnitude; you need at least ``1/A_k[j,j]`` experiments at this
+          candidate just to get a signal-to-noise ratio of 1 for θⱼ.
+        - ``A_k[j,j] < tol_diag`` (default 1.0) — flags the above condition.
+
+        Unlike a relative-norm threshold (which depends on which other candidates
+        are in the grid), this criterion is entirely self-contained: it only
+        depends on the model physics, the measurement noise, and the nominal
+        parameters.
+
+        Two quantities are computed per candidate
+        ------------------------------------------
+        1. **Atomic FIM diagonal** ``diag_A[c, j] = A_k[j, j]``
+           — Fisher information for θⱼ from one experiment at candidate c.
+           Flagged when below ``tol_diag``.
+
+        2. **Condition number** of the full atomic FIM ``A_k``
+           — ratio of largest to smallest eigenvalue.  A large condition number
+           (even when no diagonal entry is near zero) means two or more parameters
+           are nearly collinear at this candidate: allocating many experiments
+           there still leaves a linear combination of parameters poorly determined.
+           Flagged when above ``tol_cond``.
+
+        The singular values of each ``A_k`` are also returned so users can inspect
+        the full spectrum and identify which parameter directions are unobservable.
+
+        Parameters
+        ----------
+        tol_diag : float
+            Threshold for flagging a near-zero atomic FIM diagonal entry.
+            ``A_k[j,j] < tol_diag`` → flag parameter θⱼ as unobservable at
+            candidate k.  Default: 1.0 (one experiment cannot determine θⱼ to
+            within its own magnitude).  Increase to be stricter (e.g. 10 means
+            the single-experiment SNR must be at least √10 ≈ 3).
+
+        tol_cond : float
+            Condition number threshold above which a candidate is flagged as
+            ill-conditioned.  Default: 1e4.
+
+        plot : bool
+            If True, produce two figures:
+              - Heatmap of ``log10(A_k[j,j])`` (candidates × parameters),
+                with ``tol_diag`` threshold line and flagged cells marked.
+              - Bar chart of per-candidate condition numbers.
+
+        figsize : tuple or None
+            Figure size.  None uses automatic sizing.
+
+        write : bool
+            Save figures to the result directory.
+
+        dpi : int
+            DPI for saved figures.
+
+        Returns
+        -------
+        dict with keys:
+            ``"diag_A"``        : np.ndarray (n_c, n_mp) — atomic FIM diagonal
+            ``"cond"``          : np.ndarray (n_c,)      — condition numbers
+            ``"singular_vals"`` : list of np.ndarray     — eigenvalues of A_k per candidate
+            ``"flagged_diag"``  : list of (cand_idx, param_idx) — below tol_diag
+            ``"flagged_cond"``  : list of int             — above tol_cond
+            ``"param_names"``   : list of str
+            ``"candidate_names"``: list of str
+            ``"figs"``          : list of matplotlib Figure
+
+        Raises
+        ------
+        RuntimeError
+            If ``eval_sensitivities()`` has not been called yet.
+
+        Examples
+        --------
+        >>> d.eval_sensitivities()
+        >>> result = d.diagnose_sensitivity(tol_diag=1.0, tol_cond=1e4)
+        >>> # result["flagged_diag"] — (candidate, parameter) pairs: one experiment
+        >>> #   cannot determine that parameter to within its own magnitude here.
+        >>> # result["flagged_cond"] — candidates where parameters are collinear.
+        """
+        if self.sensitivities is None:
+            raise RuntimeError(
+                "Sensitivities have not been computed yet. "
+                "Call eval_sensitivities() first."
+            )
+
+        sens = self.sensitivities   # (n_c, n_spt, n_m_r, n_mp)
+
+        # --- names ---
+        param_names = (
+            list(self.model_parameter_names)
+            if self.model_parameter_names is not None
+            else [f"θ_{j}" for j in range(self.n_mp)]
+        )
+        cand_names = (
+            [str(cn) for cn in self.candidate_names]
+            if self.candidate_names is not None
+            else [f"C{c+1}" for c in range(self.n_c)]
+        )
+
+        # --- error FIM ---
+        err_fim = self.error_fim if self.error_fim is not None else np.eye(self.n_m_r)
+
+        # --- measurable responses only ---
+        sens_m = sens[:, :, self.measurable_responses, :]  # (n_c, n_spt, n_m_r, n_mp)
+
+        # --- per-candidate atomic FIM, diagonal, condition number, eigenvalues ---
+        diag_A       = np.zeros((self.n_c, self.n_mp))
+        cond_numbers = np.zeros(self.n_c)
+        singular_vals = []
+
+        for c in range(self.n_c):
+            # sens_m[c] shape: (n_spt, n_m_r, n_mp)
+            # Accumulate A_c = Σ_t  S_t.T @ err_fim @ S_t  (sum over time points)
+            # This is equivalent to S_flat.T @ block_diag(err_fim,...) @ S_flat
+            # but avoids building the large block-diagonal matrix explicitly.
+            A_c = np.zeros((self.n_mp, self.n_mp))
+            for t in range(sens_m.shape[1]):
+                S_t = sens_m[c, t]            # (n_m_r, n_mp)
+                A_c += S_t.T @ err_fim @ S_t  # (n_mp, n_mp)
+            diag_A[c] = np.diag(A_c)
+
+            # eigenvalues (symmetric matrix — use eigvalsh for stability)
+            ev = np.linalg.eigvalsh(A_c)               # ascending order
+            ev_pos = ev[ev > 0]
+            cond_numbers[c] = (ev_pos[-1] / ev_pos[0]) if len(ev_pos) >= 2 else np.inf
+            singular_vals.append(ev[::-1])             # store descending
+
+        # --- flags ---
+        flagged_diag = [
+            (c, j)
+            for c in range(self.n_c)
+            for j in range(self.n_mp)
+            if diag_A[c, j] < tol_diag
+        ]
+        flagged_cond = [c for c in range(self.n_c) if cond_numbers[c] > tol_cond]
+
+        # --- print report ---
+        sep = "─" * 100
+        print(f"\n{' Sensitivity Diagnosis ':─^100}")
+        print(f"  Candidates         : {self.n_c}")
+        print(f"  Parameters         : {self.n_mp}")
+        print(f"  tol_diag           : {tol_diag:.1g}"
+              f"  (flag A_k[j,j] < {tol_diag:.1g}  ← {tol_diag:.1g} experiment(s) needed"
+              f" for SNR≥1 on θⱼ)")
+        print(f"  tol_cond           : {tol_cond:.1g}")
+        print(f"{sep}")
+
+        pcw = max(10, max(len(p) for p in param_names))
+        header = f"  {'Candidate':<20}"
+        for p in param_names:
+            header += f"  {p:>{pcw}}"
+        header += f"  {'Cond#':>12}  Status"
+        print(header)
+        print(f"  {'':20}  " + "  ".join(f"{'A_k[j,j]':>{pcw}}" for _ in param_names)
+              + f"  {'':>12}")
+        print(sep)
+
+        for c in range(self.n_c):
+            row    = f"  {cand_names[c]:<20}"
+            issues = []
+            for j in range(self.n_mp):
+                val = diag_A[c, j]
+                s   = f"{val:>{pcw}.3f}"
+                if val < tol_diag:
+                    s = f"{'!'+f'{val:.1e}':>{pcw}}"
+                    issues.append(f"{param_names[j]}")
+                row += f"  {s}"
+            cn     = cond_numbers[c]
+            cn_str = f"{cn:>12.2e}" if np.isfinite(cn) else f"{'∞':>12}"
+            if cn > tol_cond:
+                cn_str = f"{'!'+f'{cn:.1e}':>12}"
+                issues.append("ill-cond")
+            row += f"  {cn_str}"
+            if issues:
+                row += f"  ⚠ {', '.join(issues)}"
+            print(row)
+
+        print(sep)
+        print(f"\n  Summary:")
+        print(f"    Near-zero diagonal flags  : {len(flagged_diag)} "
+              f"(candidate, parameter) pairs")
+        if flagged_diag:
+            for c, j in flagged_diag[:10]:
+                print(f"      {cand_names[c]:<22}  {param_names[j]:<20}"
+                      f"  A_k[j,j] = {diag_A[c,j]:.2e}"
+                      f"  → need ≥{1/max(diag_A[c,j],1e-30):.1f} experiments here for SNR≥1")
+            if len(flagged_diag) > 10:
+                print(f"      ... and {len(flagged_diag)-10} more")
+        print(f"    Ill-conditioned candidates : {len(flagged_cond)}")
+        if flagged_cond:
+            for c in flagged_cond[:10]:
+                print(f"      {cand_names[c]:<22}  cond = {cond_numbers[c]:.2e}")
+            if len(flagged_cond) > 10:
+                print(f"      ... and {len(flagged_cond)-10} more")
+        print(f"{'─'*100}\n")
+
+        # --- plots ---
+        figs = []
+        if plot:
+            if figsize is None:
+                figsize = (max(8, self.n_mp * 1.4), max(4, self.n_c * 0.32))
+
+            log_diag = np.log10(np.clip(diag_A, 1e-30, None))
+            log_tol  = np.log10(tol_diag)
+
+            # heatmap of log10(A_k[j,j])
+            fig1, ax1 = plt.subplots(figsize=figsize)
+            vmin = min(log_tol - 2, log_diag.min())
+            vmax = max(log_tol + 2, log_diag.max())
+            im = ax1.imshow(
+                log_diag, aspect='auto', cmap='RdYlGn',
+                vmin=vmin, vmax=vmax, interpolation='nearest',
+            )
+            cb = plt.colorbar(im, ax=ax1)
+            cb.set_label('log₁₀(A_k[j,j])  — Fisher info per experiment')
+            cb.ax.axhline(log_tol, color='black', lw=1.5, ls='--')
+            cb.ax.text(1.05, (log_tol - vmin) / (vmax - vmin),
+                       f'tol={tol_diag:.0g}', transform=cb.ax.transAxes,
+                       va='center', fontsize=7)
+            ax1.set_xticks(range(self.n_mp))
+            ax1.set_xticklabels(param_names, rotation=30, ha='right', fontsize=8)
+            ax1.set_yticks(range(self.n_c))
+            ax1.set_yticklabels(cand_names, fontsize=7)
+            ax1.set_title(
+                "Atomic FIM diagonal  —  A_k[j,j] = Fisher info for θⱼ per experiment\n"
+                f"(green = informative, red = near-zero, threshold = {tol_diag:.0g})"
+            )
+            for c, j in flagged_diag:
+                ax1.text(j, c, '!', ha='center', va='center',
+                         color='black', fontsize=8, fontweight='bold')
+            fig1.tight_layout()
+            figs.append(fig1)
+
+            # bar chart of condition numbers
+            fig2, ax2 = plt.subplots(figsize=(max(8, self.n_c * 0.25), 4))
+            colors = ['#d62728' if cond_numbers[c] > tol_cond else '#2ca02c'
+                      for c in range(self.n_c)]
+            cn_plot = np.where(np.isfinite(cond_numbers), cond_numbers, 1e15)
+            ax2.bar(range(self.n_c), np.log10(cn_plot + 1), color=colors)
+            ax2.axhline(np.log10(tol_cond),
+                        color='orange', ls='--',
+                        label=f'threshold = 10^{np.log10(tol_cond):.0f}')
+            ax2.set_xticks(range(self.n_c))
+            ax2.set_xticklabels(cand_names, rotation=90, fontsize=6)
+            ax2.set_ylabel('log₁₀(condition number of A_k)')
+            ax2.set_title(
+                'Per-candidate condition number  —  A_k = Sₖᵀ Σ⁻¹ Sₖ\n'
+                '(red = ill-conditioned, parameters are collinear at this candidate)'
+            )
+            ax2.legend(fontsize=8)
+            fig2.tight_layout()
+            figs.append(fig2)
+
+            if write:
+                fp1 = self._generate_result_path("sensitivity_diag_heatmap", "png")
+                fp2 = self._generate_result_path("sensitivity_condition",    "png")
+                fig1.savefig(fp1, dpi=dpi)
+                fig2.savefig(fp2, dpi=dpi)
+
+        return {
+            "diag_A"         : diag_A,
+            "cond"           : cond_numbers,
+            "singular_vals"  : singular_vals,
+            "flagged_diag"   : flagged_diag,
+            "flagged_cond"   : flagged_cond,
+            "param_names"    : param_names,
+            "candidate_names": cand_names,
+            "figs"           : figs,
+        }
+
+
+    def eval_fim(self, efforts, store_predictions=True):
+        """
+        Construct the FIM from sensitivities. See diagnose_sensitivity() for
+        per-candidate rank and condition diagnostics.
+        """
+        if self._pseudo_bayesian:
+            self._eval_pb_fims(
+                efforts=efforts,
+                store_predictions=store_predictions,
+            )
+            return self.scr_fims
+        else:
+            self._eval_fim(
+                efforts=efforts,
+                store_predictions=store_predictions,
+            )
+            return self.fim
+
+    def _eval_fim(self, efforts, store_predictions=True, save_atomics=None,
+                  skip_sens_eval=False):
+        """
+        skip_sens_eval : bool
+            When True, skip the eval_sensitivities() call and use whatever is
+            already stored in self.sensitivities.  Used by the parallel
+            pseudo-Bayesian path in _eval_pb_fims() which pre-computes all
+            sensitivities in one flat parallel job and injects them directly.
+        """
         if save_atomics is not None:
             self._save_atomics = save_atomics
 
@@ -5140,27 +5199,22 @@ class Designer:
         if self._pseudo_bayesian:
             self._compute_sensitivities = self._compute_atomics or self.scr_fims is None
 
-        if self._compute_sensitivities and self._compute_atomics:
+        if self._compute_sensitivities and self._compute_atomics and not skip_sens_eval:
             self.eval_sensitivities(
                 save_sensitivities=self._save_sensitivities,
                 store_predictions=store_predictions,
             )
 
-        """ deal with unconstrained form, i.e. transform efforts """
-        if self._unconstrained_form:
-            self._efforts_transformed = False
-        self._transform_efforts()  # only transform if required, logic incorporated there
-
         """ evaluate fim """
         start = time()
 
-        if self._optimization_package in ("scipy", "ipopt"):
-            if self._specified_n_spt:
-                self.efforts = self.efforts.reshape((self.n_c, self.n_spt_comb))
-            else:
-                self.efforts = self.efforts.reshape((self.n_c, self.n_spt))
-                if self.n_spt == 1:
-                    self.efforts = self.efforts[:, None]
+        # reshape efforts to (n_c, n_spt) for iteration
+        if self._specified_n_spt:
+            self.efforts = self.efforts.reshape((self.n_c, self.n_spt_comb))
+        else:
+            self.efforts = self.efforts.reshape((self.n_c, self.n_spt))
+            if self.n_spt == 1:
+                self.efforts = self.efforts[:, None]
         # if atomic is not given
         if self._compute_atomics:
             self.atomic_fims = []
@@ -5210,22 +5264,18 @@ class Designer:
 
         finish = time()
 
-        try:
-            if isinstance(self.fim, cp.Expression):
-                if np.all(self.fim.value == 0):
-                    return np.array([0])
-            else:
-                if np.all(self.fim == 0):
-                    return np.array([0])
-        except AttributeError:
-            if isinstance(self.fim, cp.expressions.expression.Expression):
-                if np.all(self.fim.value == 0):
-                    return np.array([0])
-            else:
-                if np.all(self.fim == 0):
-                    return np.array([0])
+        if np.all(np.asarray(self.fim) == 0):
+            return np.array([0])
 
-        self.evaluate_estimability_index()
+        # --- add prior experimental information (sequential MBDoE) ---
+        if self._prior_fim is not None:
+            prior = self._prior_fim.copy()
+            # rescale to current model_parameters if they changed since prior was computed
+            if not np.allclose(self._current_scr_mp, self._prior_fim_mp, rtol=1e-10):
+                scale = self._current_scr_mp / self._prior_fim_mp   # (n_mp,)
+                rescale = np.outer(scale, scale)
+                prior = prior * rescale
+            self.fim = self.fim + prior
 
         if self._regularize_fim:
             if self._verbose >= 3:
@@ -5267,23 +5317,116 @@ class Designer:
                 self.scr_responses = []
             if not self._large_memory_requirement:
                 self.pb_atomic_fims = np.empty((self.n_scr, self.n_c * self.n_spt, self.n_mp, self.n_mp))
-            for scr, mp in enumerate(self.model_parameters):
-                self.atomic_fims = None
-                self._current_scr = scr
-                self._current_scr_mp = mp
-                if self._verbose >= 2:
-                    print(f"{f'[Scenario {scr+1}/{self.n_scr}]':=^100}")
-                    print("Model Parameters:")
-                    print(mp)
-                self._eval_fim(efforts, store_predictions)
-                self.scr_fims.append(self.fim)
-                if self._verbose >= 2:
-                    print(f"Time elapsed: {self._sensitivity_analysis_time:.2f} seconds.")
-                if store_predictions:
-                    self.scr_responses.append(self.response)
-                    self.response = None
-                if not self._large_memory_requirement:
-                    self.pb_atomic_fims[scr] = self.atomic_fims
+
+            # ── Parallel pseudo-Bayesian path (Pyomo IFT only) ───────────────
+            # Parallelise over scenarios using loky (subprocess) workers.
+            # Each subprocess handles all n_c candidates for one scenario
+            # sequentially — this isolates Pyomo global state (logging,
+            # C-extension caches) between workers, eliminating the thread-
+            # safety issues that affect prefer="threads".
+            # Spawn overhead (~0.3 s per worker) is amortised over n_c
+            # candidates per job, so net cost is small.
+            _use_pyomo_ift = getattr(self, "use_pyomo_ift", False)
+            _n_jobs = getattr(self, "n_jobs", 1)
+            if _use_pyomo_ift and _n_jobs != 1:
+                try:
+                    from joblib import Parallel, delayed
+                except ImportError:
+                    raise ImportError(
+                        "n_jobs != 1 requires joblib. Install with: pip install joblib"
+                    )
+
+                pyomo_fn  = self.pyomo_model_fn
+                out_names = getattr(self, "pyomo_output_var_name", None)
+                n_mr      = self.n_m_r
+                tic_list  = self.ti_controls_candidates
+                mp_list   = self.model_parameters   # shape (n_scr, n_mp)
+                n_c_      = self.n_c
+                n_spt_    = self.n_spt
+                n_mp_     = self.n_mp
+
+                def _pb_scenario_worker(scr, mp, tic_list_, out_names_, n_mr_, n_spt__,
+                                            n_mp__, norm_sens):
+                    """Process all candidates for one scenario; runs in a subprocess.
+
+                    mp          : parameter vector for THIS scenario.
+                    norm_sens   : whether to apply parameter-value normalization
+                                  (mirrors the _norm_sens_by_params step that
+                                  eval_sensitivities applies in the sequential path).
+                    """
+                    import types, numpy as _np
+                    mp = _np.asarray(mp, dtype=float)
+                    sens_scr = _np.empty((len(tic_list_), n_spt__, n_mr_, n_mp__))
+                    for c, tic in enumerate(tic_list_):
+                        fake = types.SimpleNamespace(
+                            _current_spt          = _np.atleast_1d(tic),
+                            pyomo_model_fn        = pyomo_fn,
+                            pyomo_output_var_name = out_names_,
+                            n_m_r                 = n_mr_,
+                        )
+                        _, sens = Designer._eval_sensitivities_pyomo_ift(
+                            fake, tic, mp, store_predictions=False
+                        )
+                        sens_scr[c] = sens
+                    # Apply parameter-value normalization (S_ij *= theta_j)
+                    # This mirrors the _norm_sens_by_params step in eval_sensitivities
+                    # which is bypassed when skip_sens_eval=True.
+                    if norm_sens:
+                        sens_scr *= mp[_np.newaxis, _np.newaxis, _np.newaxis, :]
+                    return scr, sens_scr
+
+                if self._verbose >= 1:
+                    print(
+                        f"[_eval_pb_fims] Running {self.n_scr} scenario jobs "
+                        f"({self.n_scr} scenarios × {self.n_c} candidates) "
+                        f"in parallel (n_jobs={_n_jobs}, backend=loky)..."
+                    )
+
+                scr_sens = np.empty((self.n_scr, self.n_c, self.n_spt, self.n_m_r, self.n_mp))
+                _pb_par_start = time()
+                _norm_sens = getattr(self, "_norm_sens_by_params", True)
+                raw = Parallel(n_jobs=_n_jobs, prefer="processes")(
+                    delayed(_pb_scenario_worker)(
+                        scr, mp_list[scr].copy(), list(tic_list), out_names,
+                        n_mr, n_spt_, n_mp_, _norm_sens
+                    )
+                    for scr in range(self.n_scr)
+                )
+                self._sensitivity_analysis_time = time() - _pb_par_start
+                for scr, sens_scr in raw:
+                    scr_sens[scr] = sens_scr
+
+                # Build per-scenario FIMs from the collected sensitivities
+                for scr, mp in enumerate(self.model_parameters):
+                    self._current_scr     = scr
+                    self._current_scr_mp  = mp
+                    self.sensitivities    = scr_sens[scr]
+                    self.atomic_fims      = None
+                    self._eval_fim(efforts, store_predictions,
+                                   skip_sens_eval=True)
+                    self.scr_fims.append(self.fim)
+                    if not self._large_memory_requirement:
+                        self.pb_atomic_fims[scr] = self.atomic_fims
+
+            else:
+                # ── Sequential scenario loop (original behaviour) ─────────────
+                for scr, mp in enumerate(self.model_parameters):
+                    self.atomic_fims = None
+                    self._current_scr = scr
+                    self._current_scr_mp = mp
+                    if self._verbose >= 2:
+                        print(f"{f'[Scenario {scr+1}/{self.n_scr}]':=^100}")
+                        print("Model Parameters:")
+                        print(mp)
+                    self._eval_fim(efforts, store_predictions)
+                    self.scr_fims.append(self.fim)
+                    if self._verbose >= 2:
+                        print(f"Time elapsed: {self._sensitivity_analysis_time:.2f} seconds.")
+                    if store_predictions:
+                        self.scr_responses.append(self.response)
+                        self.response = None
+                    if not self._large_memory_requirement:
+                        self.pb_atomic_fims[scr] = self.atomic_fims
             if store_predictions:
                 self.scr_responses = np.array(self.scr_responses)
 
@@ -5303,8 +5446,6 @@ class Designer:
         return self.scr_fims
 
     def eval_pim(self, efforts, vector=False):
-        if self._optimization_package == "cvxpy":
-            raise NotImplementedError
 
         """ update mp, and efforts """
         self.eval_fim(efforts)
@@ -5424,193 +5565,66 @@ class Designer:
 
     """ optional operations """
 
-    def evaluate_estimability_index(self):
-        self.estimable_model_parameters = np.array([])
-        self.estimability = np.array([])
-        if self._optimization_package == 'cvxpy':
-            try:
-                fim_value = self.fim.value
-            except AttributeError:
-                fim_value = self.fim
-        else:
-            fim_value = self.fim
-        try:
-            if isinstance(self.fim, cp.Expression):
-                if np.all(self.fim.value == 0):
-                    return
-            else:
-                if np.all(self.fim == 0):
-                    return
-        except AttributeError:
-            if isinstance(self.fim, cp.expressions.expression.Expression):
-                if np.all(self.fim.value == 0):
-                    return
-            else:
-                if np.all(self.fim == 0):
-                    return
-
-        for i, row in enumerate(fim_value):
-            if not np.allclose(row, 0.0):
-                self.estimable_model_parameters = np.append(
-                    self.estimable_model_parameters, i)
-                self.estimability = np.append(self.estimability,
-                                              np.sqrt(np.inner(row, row)))
-        self.estimable_model_parameters = self.estimable_model_parameters.astype(int)
-
-        if self._trim_fim:
-            if len(self.estimable_model_parameters) == 0:
-                self.fim = np.array([0])
-            else:
-                self.fim = self.fim[
-                    np.ix_(self.estimable_model_parameters, self.estimable_model_parameters)
-                ]
-
-    def normalize_sensitivities(self, overwrite_unnormalized=False):
-        assert not np.allclose(self.model_parameters,
-                               0), 'At least one nominal model parameter value is ' \
-                                   'equal to 0, cannot normalize sensitivities. ' \
-                                   'Consider re-estimating your parameters or ' \
-                                   're-parameterize your model.'
-
-        # normalize parameter values
-        self.normalized_sensitivity = np.multiply(self.sensitivities,
-                                                  self.model_parameters[None, None, None,
-                                                  :])
-        if self.responses_scales is None:
-            if self._verbose >= 0:
-                print(
-                    'Scale for responses not given, using raw prediction values to '
-                    'normalize sensitivities; '
-                    'likely to fail (e.g. if responses are near 0). Recommend: provide '
-                    'designer with scale '
-                    'info through: "designer.responses_scale = <your_scale_array>."')
-            if self.response is None:
-                self.simulate_candidates(store_predictions=True)
-            # normalize response values
-            self.normalized_sensitivity = np.divide(
-                self.normalized_sensitivity,
-                self.response[:, :, :, None],
-            )
-        else:
-            assert isinstance(self.responses_scales,
-                              np.ndarray), "Please specify responses_scales as a 1D " \
-                                           "numpy array."
-            assert self.responses_scales.size == self.n_r, 'Length of responses scales ' \
-                                                           'those which are measurable ' \
-                                                           'and not).)'
-            self.normalized_sensitivity = np.divide(self.normalized_sensitivity,
-                                                    self.responses_scales[None, None, :,
-                                                    None])
-        if overwrite_unnormalized:
-            self.sensitivities = self.normalized_sensitivity
-            self._sensitivity_is_normalized = True
-            return self.sensitivities
-        return self.normalized_sensitivity
-
-    """ local criterion """
-
-    # calibration-oriented
     def _d_opt_criterion(self, efforts):
-        """ it is a PSD criterion, with exponential cone """
+        """ D-optimality: maximise log-det(FIM). """
         self.eval_fim(efforts)
 
         if self.fim.size == 1:
-            if self._optimization_package in ("scipy", "ipopt"):
-                d_opt = -self.fim
-                if self._fd_jac:
-                    return np.squeeze(d_opt)
-                else:
-                    jac = -np.array([
-                        1 / self.fim * m
-                        for m in self.atomic_fims
-                    ])
-                    return d_opt, jac
-            elif self._optimization_package == 'cvxpy':
-                return -self.fim
-
-        if self._optimization_package in ("scipy", "ipopt"):
-            sign, d_opt = np.linalg.slogdet(self.fim)
+            d_opt = -self.fim
             if self._fd_jac:
-                if sign == 1:
-                    return -d_opt
-                else:
-                    return np.inf
+                return np.squeeze(d_opt)
             else:
-                fim_inv = np.linalg.inv(self.fim)
-                jac = -np.array([
-                    np.sum(fim_inv.T * m)
-                    for m in self.atomic_fims
-                ])
-                if sign == 1:
-                    return -d_opt, jac
-                else:
-                    return np.inf, jac
+                jac = -np.array([1 / self.fim * m for m in self.atomic_fims])
+                return d_opt, jac
 
-        elif self._optimization_package == 'cvxpy':
-            return -cp.log_det(self.fim)
+        sign, d_opt = np.linalg.slogdet(self.fim)
+        if self._fd_jac:
+            return -d_opt if sign == 1 else np.inf
+        else:
+            fim_inv = np.linalg.inv(self.fim)
+            jac = -np.array([np.sum(fim_inv.T * m) for m in self.atomic_fims])
+            return (-d_opt, jac) if sign == 1 else (np.inf, jac)
 
     def _a_opt_criterion(self, efforts):
-        """ it is a PSD criterion """
+        """ A-optimality: minimise trace(FIM^{-1}). """
         self.eval_fim(efforts)
 
         if self.fim.size == 1:
-            if self._optimization_package in ("scipy", "ipopt"):
-                if self._fd_jac:
-                    return -self.fim
-                else:
-                    jac = np.array([
-                        m for m in self.atomic_fims
-                    ])
-                    return -self.fim, jac
-            elif self._optimization_package == "cvxpy":
-                return -self.fim
-
-        if self._optimization_package in ("scipy", "ipopt"):
             if self._fd_jac:
-                eigvals = np.linalg.eigvalsh(self.fim)
-                if np.all(eigvals > 0):
-                    a_opt = np.sum(1 / eigvals)
-                else:
-                    a_opt = 0
-                return a_opt
+                return -self.fim
             else:
-                jac = np.zeros(self.n_e)
-                try:
-                    fim_inv = np.linalg.inv(self.fim)
-                    a_opt = fim_inv.trace()
-                    if not self._fd_jac:
-                        jac = -np.array([
-                            np.sum((fim_inv @ fim_inv) * m) for m in self.atomic_fims
-                        ])
-                except np.linalg.LinAlgError:
-                    a_opt = 0
-                return a_opt, jac
+                jac = np.array([m for m in self.atomic_fims])
+                return -self.fim, jac
 
-        elif self._optimization_package == 'cvxpy':
+        if self._fd_jac:
+            eigvals = np.linalg.eigvalsh(self.fim)
+            return np.sum(1 / eigvals) if np.all(eigvals > 0) else 0
+        else:
+            jac = np.zeros(self.n_e)
             try:
-                return cp.matrix_frac(np.identity(self.fim.shape[0]), self.fim)
-            except ValueError:
-                return cp.matrix_frac(np.identity(self.fim.shape[0]).tolist(), self.fim.tolist())
+                fim_inv = np.linalg.inv(self.fim)
+                a_opt = fim_inv.trace()
+                jac = -np.array([
+                    np.sum((fim_inv @ fim_inv) * m) for m in self.atomic_fims
+                ])
+            except np.linalg.LinAlgError:
+                a_opt = 0
+            return a_opt, jac
 
     def _e_opt_criterion(self, efforts):
-        """ it is a PSD criterion """
+        """ E-optimality: maximise minimum eigenvalue of FIM. """
         self.eval_fim(efforts)
 
         if self.fim.size == 1:
             return -self.fim
 
-        if self._optimization_package in ("scipy", "ipopt"):
-            if self._fd_jac:
-                return -np.linalg.eigvalsh(self.fim).min()
-            else:
-                raise NotImplementedError  # TODO: implement analytic jac for e-opt
-        elif self._optimization_package == 'cvxpy':
-            return -cp.lambda_min(self.fim)
+        if self._fd_jac:
+            return -np.linalg.eigvalsh(self.fim).min()
+        else:
+            raise NotImplementedError  # TODO: implement analytic jac for e-opt
 
     # prediction-oriented
     def _dg_opt_criterion(self, efforts):
-        if self._optimization_package == "cvxpy":
-            raise NotImplementedError("CVXPY unavailable for dg_opt.")
 
         self.eval_pim(efforts)
         # dg_opt: max det of the pvar matrix over candidates and sampling times
@@ -5629,8 +5643,6 @@ class Designer:
             raise NotImplementedError("Analytic Jacobian for dg_opt unavailable.")
 
     def _di_opt_criterion(self, efforts):
-        if self._optimization_package == "cvxpy":
-            raise NotImplementedError("CVXPY unavailable for di_opt.")
 
         self.eval_pim(efforts)
         # di_opt: average det of the pvar matrix over candidates and sampling times
@@ -5649,8 +5661,6 @@ class Designer:
             raise NotImplementedError("Analytic Jacobian for di_opt unavailable.")
 
     def _ag_opt_criterion(self, efforts):
-        if self._optimization_package == "cvxpy":
-            raise NotImplementedError("CVXPY unavailable for ag_opt.")
 
         self.eval_pim(efforts)
         # ag_opt: max trace of the pvar matrix over candidates and sampling times
@@ -5667,8 +5677,6 @@ class Designer:
             raise NotImplementedError("Analytic Jacobian for ag_opt unavailable.")
 
     def _ai_opt_criterion(self, efforts):
-        if self._optimization_package == "cvxpy":
-            raise NotImplementedError("CVXPY unavailable for ai_opt.")
 
         self.eval_pim(efforts)
         # ai_opt: average trace of the pvar matrix over candidates and sampling times
@@ -5685,8 +5693,6 @@ class Designer:
             raise NotImplementedError("Analytic Jacobian for ai_opt unavailable.")
 
     def _eg_opt_criterion(self, efforts):
-        if self._optimization_package == "cvxpy":
-            raise NotImplementedError("CVXPY unavailable for eg_opt.")
 
         self.eval_pim(efforts)
         # eg_opt: max of the max_eigenval of the pvar matrix over candidates and sampling times
@@ -5703,8 +5709,6 @@ class Designer:
             raise NotImplementedError("Analytic Jacobian for eg_opt unavailable.")
 
     def _ei_opt_criterion(self, efforts):
-        if self._optimization_package == "cvxpy":
-            raise NotImplementedError("CVXPY unavailable for ei_opt.")
 
         self.eval_pim(efforts)
         # ei_opts: average of the max_eigenval of the pvar matrix over candidates and sampling times
@@ -5724,109 +5728,42 @@ class Designer:
 
     # calibration-oriented
     def _pb_d_opt_criterion(self, efforts):
-        """ it is a PSD criterion, with exponential cone """
+        """ Pseudo-Bayesian D-optimality. """
         self.eval_fim(efforts)
 
-        if self._optimization_package in ("scipy", "ipopt"):
-            if self._fd_jac:
-                if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
-                    avg_fim = np.mean([fim for fim in self.scr_fims], axis=0)
-                    sign, d_opt = np.linalg.slogdet(avg_fim)
-                    if sign != 1:
-                        return np.inf
-                    else:
-                        return -d_opt
-                elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
-                    d_opt = 0
-                    for fim in self.scr_fims:
-                        sign, scr_d_opt = np.linalg.slogdet(fim)
-                        if sign != 1:
-                            scr_d_opt = np.inf
-                        d_opt += scr_d_opt
-                    return -d_opt / self.n_scr
-            else:
-                raise NotImplementedError(
-                    "Analytical Jacobian unimplemented for Pseudo-bayesian D-optimal."
-                )
-
-        elif self._optimization_package == 'cvxpy':
-            if np.any([fim.shape == (1, 1) for fim in self.scr_fims]):
-                return cp.sum([-fim for fim in self.scr_fims]) / self.n_scr
-            else:
-                if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
-                    avg_fim = cp.sum([fim for fim in self.scr_fims], axis=0) / self.n_scr
-                    return -cp.log_det(avg_fim)
-                elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
-                    return cp.sum([
-                        -cp.log_det(fim) for fim in self.scr_fims
-                    ],
-                    axis=0,
-                    ) / self.n_scr
+        if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
+            avg_fim = np.mean([fim for fim in self.scr_fims], axis=0)
+            sign, d_opt = np.linalg.slogdet(avg_fim)
+            return np.inf if sign != 1 else -d_opt
+        elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
+            d_opt = 0
+            for fim in self.scr_fims:
+                sign, scr_d_opt = np.linalg.slogdet(fim)
+                d_opt += scr_d_opt if sign == 1 else np.inf
+            return -d_opt / self.n_scr
 
     def _pb_a_opt_criterion(self, efforts):
-        """ it is a PSD criterion """
+        """ Pseudo-Bayesian A-optimality. """
         self.eval_fim(efforts)
 
-        if self._optimization_package in ("scipy", "ipopt"):
-            if self._fd_jac:
-                if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
-                    a_opt = np.linalg.inv(
-                        np.mean([fim for fim in self.scr_fims], axis=0)
-                    ).trace()
-                elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
-                    return np.mean([
-                        np.linalg.inv(fim).trace()
-                        for fim in self.scr_fims
-                    ])
-            else:
-                raise NotImplementedError(
-                    "Analytical Jacobian unimplemented for Pseudo-bayesian D-optimal."
-                )
-
-        elif self._optimization_package == 'cvxpy':
-            if np.any([fim.shape == (1, 1) for fim in self.scr_fims]):
-                return cp.sum([-fim for fim in self.scr_fims]) / self.n_scr
-            else:
-                if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
-                    avg_fim = cp.sum([fim for fim in self.scr_fims], axis=0) / self.n_scr
-                    return cp.matrix_frac(np.identity(avg_fim.shape[0]), avg_fim)
-                elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
-                    return cp.sum([
-                        cp.matrix_frac(np.identity(fim.shape[0]), fim)
-                        for fim in self.scr_fims
-                    ]) / self.n_scr
+        if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
+            return np.linalg.inv(
+                np.mean([fim for fim in self.scr_fims], axis=0)
+            ).trace()
+        elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
+            return np.mean([np.linalg.inv(fim).trace() for fim in self.scr_fims])
 
     def _pb_e_opt_criterion(self, efforts):
-        """ it is a PSD criterion """
+        """ Pseudo-Bayesian E-optimality. """
         self.eval_fim(efforts)
 
-        if self._optimization_package in ("scipy", "ipopt"):
-            if self._fd_jac:
-                if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
-                    avg_fim = np.sum([fim for fim in self.scr_fims], axis=0) / self.n_scr
-                    return -np.linalg.eigvalsh(avg_fim).min()
-                elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
-                    return np.sum([
-                        -np.linalg.eigvalsh(fim).min()
-                        for fim in self.scr_fims
-                    ]) / self.n_scr
-            else:
-                raise NotImplementedError(
-                    "Analytical Jacobian unimplemented for Pseudo-bayesian D-optimal."
-                )
-
-        elif self._optimization_package == 'cvxpy':
-            if np.any([fim.shape == (1, 1) for fim in self.scr_fims]):
-                return cp.sum([-fim for fim in self.scr_fims])
-            else:
-                if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
-                    avg_fim = cp.sum([fim for fim in self.scr_fims], axis=0) / self.n_scr
-                    return -cp.lambda_min(avg_fim)
-                elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
-                    return cp.sum([
-                        -cp.lambda_min(fim)
-                        for fim in self.scr_fims
-                    ]) / self.n_scr
+        if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
+            avg_fim = np.mean([fim for fim in self.scr_fims], axis=0)
+            return -np.linalg.eigvalsh(avg_fim).min()
+        elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
+            return np.mean([
+                -np.linalg.eigvalsh(fim).min() for fim in self.scr_fims
+            ])
 
     # prediction-oriented
     def _pb_dg_opt_criterion(self, efforts):
@@ -5996,9 +5933,9 @@ class Designer:
                     if self.response_names is None or self.model_parameter_names is None:
                         pass
                     else:
-                        ylabel = "$\partial$"
+                        ylabel = r"$\partial$"
                         ylabel += self.response_names[self.measurable_responses[row]]
-                        ylabel += "/$\partial$"
+                        ylabel += r"/$\partial$"
                         ylabel += self.model_parameter_names[col]
                         if self.response_unit_names is None or self.model_parameter_unit_names is None:
                             pass
@@ -6199,6 +6136,142 @@ class Designer:
         fig.tight_layout()
         plt.show()
         return fig
+
+
+    def _eval_sensitivities_pyomo_ift(self, ti_controls, model_parameters,
+                                      store_predictions=True):
+        """
+        Compute response and exact parametric sensitivities via the
+        Implicit-Function Theorem (IFT) applied to a user-supplied Pyomo DAE model.
+
+        Two Jacobian backends, selected automatically:
+        1. PyomoNLP / ASL (fast, compiled C) — when pynumero_ASL is available.
+           Parameters must be temporarily unfixed so the NL writer includes them.
+        2. Pyomo differentiate() (pure Python fallback) — always available.
+
+        In both cases the IFT linear solve is identical:
+            J = [J_p | J_z]  where J_p = dc/dp, J_z = dc/dz
+            S = lstsq(J_z, -J_p)   shape (n_state, n_mp)
+
+        Returns
+        -------
+        responses : ndarray shape (n_spt, n_m_r)
+        sens      : ndarray shape (n_spt, n_m_r, n_mp)
+        """
+        import pyomo.environ as _pyo
+        import scipy.sparse as _sp
+
+        theta = np.asarray(model_parameters, dtype=float)
+        n_mp  = len(theta)
+        n_mr  = self.n_m_r
+
+        # 1. Build and initialise the Pyomo model
+        m, all_vars, all_bodies, t_sorted = self.pyomo_model_fn(
+            ti_controls, theta
+        )
+
+        # 2. Resolve output variable name(s)
+        out_names = getattr(self, 'pyomo_output_var_name', None)
+        if out_names is None:
+            out_names = [str(all_vars[n_mp + r]) for r in range(n_mr)]
+        elif isinstance(out_names, str):
+            out_names = [out_names]
+
+        state_var_strs = [str(v) for v in all_vars[n_mp:]]
+
+        def _find_state_idx(base_name, t_val):
+            t_key = min(t_sorted, key=lambda tt: abs(tt - t_val))
+            for target in (f"{base_name}[{t_key}]", base_name):
+                for idx, vname in enumerate(state_var_strs):
+                    if vname == target or vname.endswith(target):
+                        return idx
+            raise RuntimeError(
+                f"[Pyomo IFT] Cannot find state variable '{base_name}[{t_key}]' "
+                f"or scalar '{base_name}'.\n"
+                f"Available: {state_var_strs}"
+            )
+
+        # 3. Build Jacobian — choose backend
+        _has_free_vars = any(
+            not v.is_fixed()
+            for v in m.component_data_objects(_pyo.Var, active=True)
+        )
+        if _PYNUMERO_ASL_AVAILABLE and _has_free_vars:
+            # Fast: unfix param vars, get ASL Jacobian, re-fix
+            param_vars = all_vars[:n_mp]
+            for pv in param_vars:
+                pv.unfix()
+            try:
+                nlp      = _PyomoNLP(m)
+                J_sparse = nlp.evaluate_jacobian_eq()
+                J_dense  = J_sparse.toarray()
+                nlp_var_names = nlp.primals_names()
+            finally:
+                for pv in param_vars:
+                    pv.fix()
+
+            all_var_strs = [str(v) for v in all_vars]
+            col_order = []
+            for vname in all_var_strs:
+                matched = next(
+                    (i for i, n in enumerate(nlp_var_names)
+                     if n == vname or n.endswith("." + vname) or vname.endswith("." + n)),
+                    None
+                )
+                if matched is None:
+                    raise RuntimeError(
+                        f"[Pyomo IFT / ASL] Cannot match variable '{vname}' "
+                        f"in NLP variable list.\nNLP vars: {nlp_var_names}"
+                    )
+                col_order.append(matched)
+            J = J_dense[:, col_order]
+
+        else:
+            # Fallback: pure-Python differentiate() loop
+            n_v = len(all_vars)
+            n_c = len(all_bodies)
+            J   = np.zeros((n_c, n_v))
+            for ci, body in enumerate(all_bodies):
+                for vi, var in enumerate(all_vars):
+                    try:
+                        J[ci, vi] = _pyo.value(_pyomo_differentiate(body, wrt=var))
+                    except Exception:
+                        J[ci, vi] = 0.0
+
+        # 4. Split J into parameter and state columns
+        J_p = J[:, :n_mp]
+        J_z = J[:, n_mp:]
+
+        # 5. Solve J_z * S = -J_p
+        S, *_ = _scipy_linalg.lstsq(J_z, -J_p)
+
+        # 6. Extract responses and sensitivities
+        responses = np.zeros((len(self._current_spt), n_mr))
+        sens      = np.zeros((len(self._current_spt), n_mr, n_mp))
+        for spt_i, t_val in enumerate(self._current_spt):
+            t_key = min(t_sorted, key=lambda tt: abs(tt - t_val))
+            for r_i, out_name in enumerate(out_names):
+                base_name = out_name.split("[")[0]
+                var_comp  = m.find_component(base_name)
+                if var_comp is None:
+                    var_comp = m.find_component(out_name)
+                if var_comp is None:
+                    raise RuntimeError(
+                        f"[Pyomo IFT] Output variable '{out_name}' not found in model."
+                    )
+                if hasattr(var_comp, 'is_indexed') and var_comp.is_indexed():
+                    val = _pyo.value(var_comp[t_key])
+                else:
+                    val = _pyo.value(var_comp)
+                responses[spt_i, r_i] = val
+                sens[spt_i, r_i, :]   = S[_find_state_idx(base_name, t_key), :]
+
+        # 7. Store responses
+        if store_predictions:
+            self._current_res = responses
+            self._store_current_response()
+
+        return responses, sens
 
     def _sensitivity_sim_wrapper(self, theta_try, store_responses=True):
         if self.use_finite_difference:
@@ -6412,35 +6485,6 @@ class Designer:
             print('Storing response took %.6f CPU ms.' % (1000 * (end - start)))
         return self.response
 
-    def _residuals_wrapper_f(self, model_parameters):
-        if self.responses_scales is None:
-            if self._dynamic_system:
-                self.responses_scales = np.nanmean(self.data, axis=(0, 1))
-            else:
-                self.responses_scales = np.nanmean(self.data, axis=0)
-
-        self.eval_residuals(model_parameters)
-        if self._dynamic_system:
-            res = self.residuals / self.responses_scales[None, None, :]
-        else:
-            res = self.residuals / self.responses_scales[None, :]
-        if self._dynamic_system:
-            res = res.reshape(self.n_c * self.n_spt, self.n_m_r)
-        else:
-            res = res.reshape(self.n_c, self.n_m_r)
-        return res[~np.isnan(res)]
-
-    def _residuals_wrapper_f_old(self, model_parameters):
-        if self.responses_scales is None:
-            if self._dynamic_system:
-                self.responses_scales = np.nanmean(self.data, axis=(0, 1))
-            else:
-                self.responses_scales = np.nanmean(self.data, axis=0)
-        self.eval_residuals(model_parameters)
-        res = self.residuals / self.responses_scales[None, None, :]
-        res = res[~np.isnan(res)]
-        return np.squeeze(res[None, :] @ res[:, None])
-
     def _simulate_internal(self, ti_controls, tv_controls, theta, sampling_times):
         raise SyntaxError(
             "Make sure you have initialized the designer, and specified the simulate "
@@ -6504,27 +6548,6 @@ class Designer:
                         "Simulate function suggests time-varying controls are needed, "
                         "but tv_controls_candidates is empty."
                     )
-
-    def _data_type_check(self):
-        self.model_parameters = np.asarray(self.model_parameters)
-        self.ti_controls_candidates = np.asarray(self.ti_controls_candidates)
-        self.tv_controls_candidates = np.asarray(self.tv_controls_candidates)
-        self.sampling_times_candidates = np.asarray(self.sampling_times_candidates)
-        if not isinstance(self.model_parameters, (list, np.ndarray)):
-            raise SyntaxError('model_parameters must be supplied as a numpy array.')
-        if self._invariant_controls:
-            if not isinstance(self.ti_controls_candidates, np.ndarray):
-                raise SyntaxError(
-                    'ti_controls_candidates must be supplied as a numpy array.'
-                )
-        if self._dynamic_system:
-            if not isinstance(self.sampling_times_candidates, np.ndarray):
-                raise SyntaxError("sampling_times_candidates must be supplied as a "
-                                  "numpy array.")
-            if self._dynamic_controls:
-                if not isinstance(self.tv_controls_candidates, np.ndarray):
-                    raise SyntaxError("tv_controls_candidates must be supplied as a "
-                                      "numpy array.")
 
     def _handle_simulate_sig(self):
         """
