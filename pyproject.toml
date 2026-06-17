@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydex"
-version = "0.0.9"
+version = "0.1.0"
 description = "A Python package for optimal experiment design."
 readme = "README.md"
 license = {text = "MIT"}
@@ -26,15 +26,26 @@ dependencies = [
     "scipy",
     "matplotlib",
     "numdifftools",
-    "cvxpy",
+    "pyomo",
+    "joblib",
     "dill",
-    "corner",
-    "emcee",
 ]
 
 [project.optional-dependencies]
+# cyipopt is optional: it accelerates the V-optimal operating-point step
+# (Stage 1) when present, but the code falls back to scipy SLSQP without it.
+# NOTE: the main NLP design solves use Pyomo's SolverFactory("ipopt"), which
+# requires the IPOPT *executable* on PATH (e.g. via conda or IDAES), not this
+# Python package.
 ipopt = ["cyipopt"]
 
 [project.urls]
 Homepage = "https://github.com/KennedyPutraKusumo/pydex"
 Fork = "https://github.com/salvadorgarciamunoz/pydex"
+
+[tool.setuptools.packages.find]
+# Ship only the pydex package (and its subpackages: pydex.core, pydex.utils).
+# Scoping discovery explicitly prevents examples/, testing_scripts/, docs/,
+# etc. from ever being picked up as importable packages.
+include = ["pydex*"]
+namespaces = false
