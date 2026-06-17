@@ -16,7 +16,6 @@ import itertools
 import __main__ as main
 import dill
 import sys
-import corner
 
 from matplotlib import pyplot as plt
 from matplotlib import cm
