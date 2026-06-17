@@ -74,9 +74,6 @@ Good starting points:
 - `examples/jupyter/pydex_quickstart.ipynb` — introductory notebook on
   basic features
 
-> The Jupyter notebooks predate this fork's Pyomo-centric rewrite and
-> illustrate the original concepts and API.
-
 ---
 
 ## Features
@@ -306,11 +303,13 @@ controls `[CA0, T]`, responses `[CA, CB]`): `case_2.py`,
 
 ### `examples/jupyter/` — introductory notebooks
 
-- `pydex_quickstart.ipynb` — basic features
-- `pydex_ode_model.ipynb` — experimental design for ODE models
+Both notebooks use the current API.
 
-> These notebooks predate the Pyomo-centric rewrite and illustrate the
-> original concepts and API.
+- `pydex_quickstart.ipynb` — introductory D-optimal design for a
+  steady-state system, fitting an order-1 polynomial response-surface
+  model in two control variables
+- `pydex_ode_model.ipynb` — D-optimal design for an ODE model: a batch
+  reactor with an `A→νB` reaction, integrated via scipy
 
 ### `examples/ASL Elimination/` — IFT ASL-elimination demos
 
