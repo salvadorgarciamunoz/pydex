@@ -107,8 +107,6 @@ Good starting points:
 | pyomo          | OED problem formulation, DAE modelling, IFT Jacobian |
 | joblib         | Parallel sensitivity evaluation                      |
 | dill           | Saving objects with weak references                  |
-| corner         | Corner plots for high-dimensional parameter spaces   |
-| emcee          | Bayesian MCMC inference                              |
 
 ### Solvers
 
