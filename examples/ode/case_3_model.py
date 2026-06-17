@@ -1,102 +1,151 @@
-from pyomo import environ as po
-from pyomo import dae as pod
+"""
+case_3_model.py
+===============
+Scipy ODE integration model for the Michaelis-Menten-style reaction network,
+used by the finite-difference (FD) sensitivity path in case_3.py.
+
+Reaction system
+---------------
+    A → B    (irreversible, inhibited power-law rate)
+
+    dCA/dt = -τ * r
+    dCB/dt =  τ * ν * r
+
+    r(CA, T) = k1(T) * CA^α / (k2(T) + k3(T) * CA^β)
+
+    ki(T) = exp(θ_i0 + θ_i1 * (T - 273.15) / T)    i = 1, 2, 3
+
+State variables : CA(t), CB(t)   [mol/L]   (normalised time t ∈ [0, 1])
+Parameters      : θ = [θ_10, θ_11, θ_20, θ_21, θ_30, θ_31, ν, α, β]
+Controls        : ti_controls = [CA0 (mol/L), T (K), τ]
+
+Dependencies
+------------
+    numpy, scipy, matplotlib (for __main__ sanity check only)
+"""
+
+import numpy as np
+from scipy.integrate import solve_ivp
 from matplotlib import pyplot as plt
 from time import time
-import numpy as np
 
-def create_model(spt):
-    model = po.ConcreteModel()
+# ---------------------------------------------------------------------------
+# Integration settings
+# ---------------------------------------------------------------------------
+_RTOL   = 1e-10
+_ATOL   = 1e-12
+_METHOD = 'Radau'   # implicit RK5 — handles stiff kinetics robustly
 
-    model.t = pod.ContinuousSet(bounds=(0, 1), initialize=spt)
-    model.tau = po.Var(bounds=(0, None))
 
-    model.cA = po.Var(model.t, bounds=(0, None))
-    model.cB = po.Var(model.t, bounds=(0, None))
-
-    model.dcAdt = pod.DerivativeVar(model.cA, wrt=model.t)
-    model.dcBdt = pod.DerivativeVar(model.cB, wrt=model.t)
-
-    model.nu = po.Var(bounds=(0, None))
-    model.alpha = po.Var(bounds=(0, None))
-    model.beta = po.Var(bounds=(0, None))
-
-    model.T = po.Var(bounds=(0, None))
-
-    model.theta_10 = po.Var()
-    model.theta_11 = po.Var()
-    model.theta_20 = po.Var()
-    model.theta_21 = po.Var()
-    model.theta_30 = po.Var()
-    model.theta_31 = po.Var()
-
-    def _A_mol_bal(m, t):
-        k1 = po.exp(m.theta_10 + m.theta_11 * (m.T - 273.15) / m.T)
-        k2 = po.exp(m.theta_20 + m.theta_21 * (m.T - 273.15) / m.T)
-        k3 = po.exp(m.theta_30 + m.theta_31 * (m.T - 273.15) / m.T)
-        r = k1 * m.cA[t] ** m.alpha / (k2 + k3 * m.cA[t] ** m.beta)
-        return m.dcAdt[t] == m.tau * - r
-    model.A_mol_bal = po.Constraint(model.t, rule=_A_mol_bal)
-
-    def _B_mol_bal(m, t):
-        k1 = po.exp(m.theta_10 + m.theta_11 * (m.T - 273.15) / m.T)
-        k2 = po.exp(m.theta_20 + m.theta_21 * (m.T - 273.15) / m.T)
-        k3 = po.exp(m.theta_30 + m.theta_31 * (m.T - 273.15) / m.T)
-        r = k1 * m.cA[t] ** m.alpha / (k2 + k3 * m.cA[t] ** m.beta)
-        return m.dcBdt[t] == m.tau * m.nu * r
-    model.B_mol_bal = po.Constraint(model.t, rule=_B_mol_bal)
-    simulator = pod.Simulator(model, package="casadi")
-
-    return model, simulator
+# =============================================================================
+# simulate — pydex signature 2
+# =============================================================================
 
 def simulate(ti_controls, sampling_times, model_parameters):
-    model, simulator = create_model(sampling_times)
+    """
+    Evaluate the Michaelis-Menten reaction model by direct ODE integration
+    and return concentrations at each requested sampling time.
 
-    # model parameters
-    model.theta_10.fix(model_parameters[0])
-    model.theta_11.fix(model_parameters[1])
-    model.theta_20.fix(model_parameters[2])
-    model.theta_21.fix(model_parameters[3])
-    model.theta_30.fix(model_parameters[4])
-    model.theta_31.fix(model_parameters[5])
+    Pydex signature type 2: simulate(ti_controls, sampling_times, model_parameters)
 
-    model.nu.fix(model_parameters[6])
+    Parameters
+    ----------
+    ti_controls : array-like, length 3
+        [CA0 (mol/L), T (K), τ]
 
-    model.alpha.fix(model_parameters[7])
-    model.beta.fix(model_parameters[8])
+    sampling_times : array-like
+        Normalised measurement times in [0, 1].  pydex may pad shorter
+        candidate rows with NaN — these are stripped before integration.
 
-    # initial conditions
-    model.cA[0].fix(ti_controls[0])
-    model.cB[0].fix(0)
+    model_parameters : array-like, length 9
+        [θ_10, θ_11, θ_20, θ_21, θ_30, θ_31, ν, α, β]
 
-    # experimental controls
-    model.T.fix(ti_controls[1])
-    model.tau.fix(ti_controls[2])
+    Returns
+    -------
+    y : np.ndarray, shape (n_spt, 2)
+        Columns: [CA (mol/L), CB (mol/L)] at each sampling time.
+        Returns an array of NaN if integration fails, allowing
+        numdifftools Richardson extrapolation to skip the evaluation.
+    """
+    # ── Unpack controls ───────────────────────────────────────────────────
+    CA0 = float(ti_controls[0])
+    T   = float(ti_controls[1])
+    tau = float(ti_controls[2])
 
-    t_sim, profile = simulator.simulate(integrator="idas", numpoints=100)
-    simulator.initialize_model()
+    # ── Unpack parameters ─────────────────────────────────────────────────
+    theta_10, theta_11 = float(model_parameters[0]), float(model_parameters[1])
+    theta_20, theta_21 = float(model_parameters[2]), float(model_parameters[3])
+    theta_30, theta_31 = float(model_parameters[4]), float(model_parameters[5])
+    nu                 = float(model_parameters[6])
+    alpha              = float(model_parameters[7])
+    beta               = float(model_parameters[8])
 
-    cA = [po.value(model.cA[t]) for t in model.t]
-    cB = [po.value(model.cB[t]) for t in model.t]
+    # ── Pre-compute Arrhenius rate constants (isothermal) ─────────────────
+    T_shift = (T - 273.15) / T
+    k1 = np.exp(theta_10 + theta_11 * T_shift)
+    k2 = np.exp(theta_20 + theta_21 * T_shift)
+    k3 = np.exp(theta_30 + theta_31 * T_shift)
 
-    return np.array([cA, cB]).T
+    # ── Sampling time processing ──────────────────────────────────────────
+    spt = np.asarray(sampling_times, dtype=float).flatten()
+    spt = spt[np.isfinite(spt) & (spt >= 0)]
+    n_spt = len(spt)
+    t_end = float(np.max(spt))
 
+    # ── ODE right-hand side ───────────────────────────────────────────────
+    def rhs(t, y):
+        CA, CB = y
+        CA_pos = max(CA, 0.0)
+        if CA_pos == 0.0:
+            r = 0.0
+        else:
+            r = k1 * (CA_pos ** alpha) / (k2 + k3 * (CA_pos ** beta))
+        dCA = -tau * r
+        dCB =  tau * nu * r
+        return [dCA, dCB]
+
+    # ── Integrate ─────────────────────────────────────────────────────────
+    try:
+        sol = solve_ivp(
+            rhs,
+            t_span       = (0.0, t_end),
+            y0           = [CA0, 0.0],
+            method       = _METHOD,
+            t_eval       = spt,
+            rtol         = _RTOL,
+            atol         = _ATOL,
+            dense_output = False,
+        )
+    except Exception:
+        return np.full((n_spt, 2), np.nan)
+
+    if not sol.success:
+        return np.full((n_spt, 2), np.nan)
+
+    # sol.y shape: (2, n_spt) → transpose to (n_spt, 2)
+    return sol.y.T
+
+
+# =============================================================================
+# Sanity check
+# =============================================================================
 
 if __name__ == '__main__':
-    times = []
     start = time()
     tic = [10, 303.15, 10]
-    mp = [5.4, 5.0, 6.2, 0.5, 1.4, 2.5, 7/3, 3, 5]
-    spt = np.linspace(0, 1, 201)
+    mp  = [5.4, 5.0, 6.2, 0.5, 1.4, 2.5, 7/3, 3, 5]
+    spt = np.linspace(0.001, 1, 201)
 
-    c = simulate(tic, spt, mp)
+    c  = simulate(tic, spt, mp)
     cA, cB = c[:, 0], c[:, 1]
-    print(f"One simulation took {time() - start} CPU seconds.")
+    print(f"One simulation took {time() - start:.3f} CPU seconds.")
 
-    fig = plt.figure()
-    axes = fig.add_subplot(111)
-    axes.plot(spt, cA, label="$c_A$")
-    axes.plot(spt, cB, label="$c_B$")
-    axes.set_xlabel("Time (units)")
-    axes.set_ylabel("Concentration (mol/L)")
-    axes.legend()
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(spt, cA, label="$c_A$")
+    ax.plot(spt, cB, label="$c_B$")
+    ax.set_xlabel("Normalised time")
+    ax.set_ylabel("Concentration (mol/L)")
+    ax.set_title("Michaelis-Menten reaction  (scipy Radau, FD sensitivity path)")
+    ax.legend()
+    fig.tight_layout()
     plt.show()

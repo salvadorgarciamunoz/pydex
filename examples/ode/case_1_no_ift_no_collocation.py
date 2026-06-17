@@ -1,17 +1,39 @@
 from pydex.core.designer import Designer
-from case_1_model import simulate, build_pyomo_model
+from case_1_no_ift_no_collocation_model import simulate, build_pyomo_model
 import numpy as np
 
-""" computing experiment with a scipy's integrator """
+"""
+case_1_no_ift_no_collocation.py
+================================
+D-optimal design for the first-order reaction using finite-difference
+sensitivities.  No IFT, no orthogonal collocation.
+
+The Pyomo Simulator (scipy/vode) integrates the DAE forward in time.
+simulate() is a thin wrapper around build_pyomo_model(), so pydex's
+finite differences perturb k and re-integrate each time.
+
+The commented-out block below demonstrates what happens if
+build_pyomo_model is also assigned to designer.pyomo_model_fn:
+the safety check in designer.py detects active DerivativeVar components
+(the model was never discretised) and raises a RuntimeError before
+any IFT computation is attempted.
+
+The optimal design should match case_1_no_ift.py — same FD path,
+same model, different solver backend (Simulator vs collocation+IPOPT).
+"""
+
 designer_1 = Designer()
 designer_1.simulate = simulate
-designer_1.pyomo_model_fn = build_pyomo_model  # IFT sensitivities via Pyomo
-# use_pyomo_ift and n_jobs are auto-set by initialize() when pyomo_model_fn is provided
+# pyomo_model_fn is intentionally NOT assigned — finite differences only.
+#
+# Uncommenting the line below would trigger the safety switch in designer.py:
+# designer_1.pyomo_model_fn = build_pyomo_model  # ← triggers RuntimeError
 
-print("IFT path: Collocation + IPOPT (PyomoNLP)")
+print("Sensitivity path: finite differences (Pyomo Simulator wrapper)")
 
-theta_nom = np.array([0.25])  # value of k, a 1D np.array with size = 1
-designer_1.model_parameters = theta_nom  # assigning it to the designer's theta
+theta_nom = np.array([0.25])  # value of k
+designer_1.model_parameters = theta_nom
+
 tic = designer_1.enumerate_candidates(
     bounds=[
         [0.1, 5],

@@ -1,31 +1,38 @@
 """
-case_1_model.py
-===============
-First-order reaction:  A -> B,   dA/dt = -k * CA,   CA(0) = CA0
+case_1_no_ift_model.py
+======================
+First-order reaction:  A -> B,   dCA/dt = -k * CA,   CA(0) = CA0
 
-Two functions are provided:
+Variant of case_1_model.py that does NOT use the IFT path.
+
+One function is provided:
 
   build_pyomo_model()
       Pyomo.DAE model with Lagrange-Radau orthogonal collocation, solved by
-      IPOPT.  Assigned to designer.pyomo_model_fn — provides exact IFT
-      sensitivities via PyomoNLP.
-
-      NOTE: The Pyomo.DAE Simulator (scipy/vode) is intentionally NOT used
-      here.  The Simulator integrates numerically but does not discretise the
-      DAE into algebraic form, so PyomoNLP cannot produce a correct Jacobian.
-      IFT requires a fully discretised algebraic system — collocation provides
-      this; the Simulator does not.
+      IPOPT.  Returns the full IFT contract tuple — but is NOT assigned to
+      designer.pyomo_model_fn.
 
   simulate()
-      scipy solve_ivp (RK45).  Assigned to designer.simulate — used only for
-      fast response evaluation.  Sensitivities always come from
-      build_pyomo_model / PyomoNLP IFT, never from this function.
+      Thin wrapper around build_pyomo_model() that extracts the response
+      array from the solved Pyomo model and returns it in the format
+      designer.simulate expects.  Assigned to designer.simulate only.
+
+      Sensitivities are computed by pydex via finite differences on top of
+      simulate() — no IFT, no PyomoNLP Jacobian.
+
+This example demonstrates the wrapper pattern: a single Pyomo collocation
+model serves as the sole source of truth for both response evaluation and
+(indirectly) sensitivities, with no scipy integrator involved.
+
+NOTE: Finite-difference sensitivities are less accurate and slower than IFT
+for stiff or high-dimensional models.  For production use, prefer
+case_1_model.py (IFT path).  This file exists to illustrate the architecture.
 """
 
 import numpy as np
 import pyomo.environ as pyo
 import pyomo.dae as dae
-from scipy.integrate import solve_ivp
+from scipy.interpolate import interp1d
 from matplotlib import pyplot as plt
 
 # Collocation settings
@@ -35,7 +42,7 @@ NCP = 3    # collocation points per element (Lagrange-Radau)
 
 # =============================================================================
 # build_pyomo_model — collocation + IPOPT
-# Assign to designer.pyomo_model_fn
+# NOT assigned to designer.pyomo_model_fn in this variant
 # =============================================================================
 
 def build_pyomo_model(ti_controls, model_parameters, sampling_times=None,
@@ -44,17 +51,17 @@ def build_pyomo_model(ti_controls, model_parameters, sampling_times=None,
     Build and solve a Pyomo.DAE model for dCA/dt = -k*CA using
     Lagrange-Radau orthogonal collocation, solved by IPOPT.
 
-    Sampling times are embedded as finite-element boundaries so the
-    collocation grid hits them exactly, enabling the IFT to extract
-    sensitivities at the correct time points.
+    Sampling times are embedded as finite-element boundaries so they appear
+    as exact members of the collocation grid after disc.apply_to().
 
     Parameters are declared as fixed Var (not Param) so PyomoNLP includes
-    them in the primal vector once temporarily unfixed, providing the
-    dc/dk Jacobian column needed for the IFT.
+    them in the primal vector once temporarily unfixed — this is only
+    relevant when IFT is active (case_1_model.py).  Here the fixed Var
+    declaration is kept for consistency and future reuse.
 
     CA0 is a ti_control, not a model parameter — encoded via the ic
     equality constraint (ca[0] == CA0_val) so that ca[0.0] remains free
-    in the NLP and is included by PyomoNLP.
+    in the NLP.
 
     Parameters
     ----------
@@ -64,7 +71,7 @@ def build_pyomo_model(ti_controls, model_parameters, sampling_times=None,
     nfe              : int  — finite elements
     ncp              : int  — collocation points per element
 
-    Returns  (pydex IFT contract)
+    Returns  (pydex IFT contract — unused in this variant)
     -------
     m           : solved ConcreteModel
     all_vars    : [k,  ca[t]...,  dca_dt[t]...]   parameter var FIRST
@@ -75,14 +82,8 @@ def build_pyomo_model(ti_controls, model_parameters, sampling_times=None,
     k_val   = float(model_parameters[0])
     CA0_val = float(ti_controls[0])
 
-    if sampling_times is None or len(sampling_times) == 0:
-        t_final = 10.0
-        spt_abs = np.array([t_final])
-    else:
-        spt_abs = np.asarray(sampling_times, dtype=float)
-        spt_abs = spt_abs[np.isfinite(spt_abs) & (spt_abs > 0)]
-        t_final = float(np.max(spt_abs)) if len(spt_abs) > 0 else 10.0
-        spt_abs = np.array([t_final]) if len(spt_abs) == 0 else spt_abs
+    spt_abs = np.asarray(sampling_times, dtype=float)
+    t_final = float(np.max(spt_abs))
 
     # Embed sampling times as finite-element boundaries so they appear
     # exactly in the collocation grid after disc.apply_to()
@@ -93,29 +94,22 @@ def build_pyomo_model(ti_controls, model_parameters, sampling_times=None,
     m = pyo.ConcreteModel()
     m.t = dae.ContinuousSet(initialize=t_grid)
 
-    # k is the only model parameter — fixed Var so PyomoNLP sees it as a
-    # primal once temporarily unfixed (gives dc/dk column in Jacobian)
     m.k = pyo.Var(initialize=k_val);  m.k.fix(k_val)
 
     m.ca     = pyo.Var(m.t, initialize=CA0_val, bounds=(0, None))
     m.dca_dt = dae.DerivativeVar(m.ca, wrt=m.t)
 
-    @m.Constraint(m.t)
-    def material_balance(m, t):
+    def material_balance_rule(m, t):
         return m.dca_dt[t] == -m.k * m.ca[t]
 
-    # IC as equality constraint with numeric RHS — keeps ca[0.0] free in
-    # the NLP so PyomoNLP includes it (fixing ca[0] would drop it)
-    m.ic = pyo.Constraint(expr=m.ca[0] == CA0_val)
+    m.material_balance = pyo.Constraint(m.t, rule=material_balance_rule)
 
-    # Dummy objective (square feasibility problem — zero has no effect)
+    m.ic = pyo.Constraint(expr=m.ca[0] == CA0_val)
     m.obj = pyo.Objective(expr=0.0)
 
-    # ── Discretise with Lagrange-Radau collocation ────────────────────────
     disc = pyo.TransformationFactory('dae.collocation')
     disc.apply_to(m, nfe=nfe, ncp=ncp, scheme='LAGRANGE-RADAU')
 
-    # ── Solve with IPOPT ──────────────────────────────────────────────────
     solver = pyo.SolverFactory('ipopt')
     solver.options['print_level'] = 0
     solver.options['tol']         = 1e-12
@@ -125,11 +119,8 @@ def build_pyomo_model(ti_controls, model_parameters, sampling_times=None,
             f"IPOPT did not converge: {result.solver.termination_condition}"
         )
 
-    # ── Assemble IFT contract ─────────────────────────────────────────────
     t_sorted_full = sorted(m.t)
 
-    # Sampling times were embedded as FE boundaries in t_grid, so they
-    # appear as exact members of the collocation grid — no approximation.
     all_vars = (
         [m.k]
         + [m.ca[t]     for t in t_sorted_full]
@@ -147,15 +138,23 @@ def build_pyomo_model(ti_controls, model_parameters, sampling_times=None,
 
 
 # =============================================================================
-# simulate — scipy solve_ivp
-# Assign to designer.simulate  (pydex signature 2)
+# simulate — wrapper around build_pyomo_model
+# Assigned to designer.simulate  (pydex signature 2)
 # =============================================================================
 
 def simulate(ti_controls, sampling_times, model_parameters):
     """
-    Fast response evaluation using scipy solve_ivp (RK45).
-    Used by pydex for response storage and plotting only.
-    Sensitivities come from build_pyomo_model / PyomoNLP IFT.
+    Thin wrapper around build_pyomo_model().
+
+    Calls the collocation model and extracts CA at each requested sampling
+    time from the solved Pyomo model.  This makes build_pyomo_model() the
+    single source of truth for both response evaluation and (via finite
+    differences) sensitivities — no separate scipy integrator needed.
+
+    pydex calls this function to:
+      - evaluate responses for all candidates during initialize()
+      - compute finite-difference sensitivities during design_experiment()
+      - extract predictions for plotting
 
     Parameters
     ----------
@@ -167,20 +166,20 @@ def simulate(ti_controls, sampling_times, model_parameters):
     -------
     ca : np.ndarray, shape (n_spt,)
     """
-    k   = float(model_parameters[0])
-    CA0 = float(ti_controls[0])
-    spt = np.asarray(sampling_times, dtype=float)
+    # Flatten to 1D and strip non-finite values (pydex may pass NaN padding)
+    spt = np.asarray(sampling_times, dtype=float).flatten()
+    spt = spt[np.isfinite(spt)]
 
-    sol = solve_ivp(
-        fun=lambda t, y: [-k * y[0]],
-        t_span=(0.0, float(np.max(spt))),
-        y0=[CA0],
-        t_eval=spt,
-        method='RK45',
-        rtol=1e-9,
-        atol=1e-11,
-    )
-    return sol.y[0]
+    m, _, _, t_sorted_full = build_pyomo_model(ti_controls, model_parameters, spt)
+
+    # Extract CA at every collocation point, then interpolate to the
+    # requested sampling times.  Sampling times were embedded as FE
+    # boundaries so interpolation error is at most machine epsilon —
+    # but interpolation is cleaner than snapping to the nearest key.
+    t_grid  = np.array(t_sorted_full)
+    ca_grid = np.array([pyo.value(m.ca[t]) for t in t_sorted_full])
+    ca_interp = interp1d(t_grid, ca_grid, kind='cubic', assume_sorted=True)
+    return ca_interp(spt)
 
 
 # =============================================================================
@@ -198,8 +197,9 @@ if __name__ == '__main__':
 
     fig = plt.figure()
     axes = fig.add_subplot(111)
-    axes.plot(spt, y)
+    axes.plot(spt, y, label='Pyomo collocation')
     axes.set_xlabel('Time')
     axes.set_ylabel('$C_A$')
-    axes.set_title('First-order reaction  (k=0.25, CA0=1)')
+    axes.set_title('First-order reaction  (k=0.25, CA0=1)  —  no IFT')
+    axes.legend()
     plt.show()

@@ -1,3 +1,11 @@
+# pydex designer.py
+# Last patched: 2026-05-11
+# Fix: parallel IFT worker fake namespace was missing _dynamic_system=True,
+#      causing _spt=None and pyomo_model_fn to be called without sampling_times
+#      in every subprocess worker. All 160 candidates were built with the same
+#      wrong (or default) spt, making the assembled FIM rank-deficient (rank 4/6
+#      instead of 6/6) and producing grossly inflated A-optimal J_V values.
+#      Fix: add _dynamic_system=True to the SimpleNamespace in _worker().
 from datetime import datetime
 from inspect import signature
 from os import getcwd, path, makedirs
@@ -36,9 +44,79 @@ try:
 except Exception:
     _PYNUMERO_ASL_AVAILABLE = False
 
+# ── ASL variable ordering diagnostic ─────────────────────────────────────────
+# Optional: gracefully absent if pydex.utils is not installed / importable.
+# When available, diagnose_asl_elimination() is called during initialize()
+# to verify that every parameter Var is reachable (present, by name) in the
+# ASL primal vector — the precondition pydex IFT column-matching relies on.
+# This is the single source of truth: the same tool users run by hand to vet
+# a model is the one initialize() enforces.
+try:
+    from pydex.utils.diagnose_asl_elimination import (
+        diagnose_asl_elimination as _diagnose_asl,
+    )
+    _DIAGNOSE_ASL_AVAILABLE = True
+except ImportError:
+    _diagnose_asl = None
+    _DIAGNOSE_ASL_AVAILABLE = False
+
+
+def _match_nlp_var(vname, nlp_var_names):
+    """
+    Find the index of an all_vars name within an ASL primals_names() list.
+
+    This is how pydex IFT maps a model Var (e.g. 'k', 'A0', 'A[1.0]') onto its
+    column in the ASL Jacobian.  Matching is purely by NAME (and qualified-name
+    suffix / final dotted segment), never by position — ASL is free to
+    reorder/displace variables in the primal vector; the column reordering
+    downstream handles any permutation.  Returns the matched index, or None if
+    the name is absent entirely (true ASL elimination — Failure Mode B).
+
+    EXACT MATCH WINS.  The lookup runs in two passes: an exact-equality pass
+    first, then a qualified-name fallback pass.  This matters when a model has
+    both a top-level Var and a block-nested Var that share a leaf name (e.g.
+    'theta' and 'b.theta'): a single-pass scan that accepted any clause in list
+    order could alias 'theta' onto 'b.theta' (or vice versa) depending purely
+    on how ASL happened to order its primal list — a silent wrong-column bug.
+    Running the exact pass first removes that order dependence: if a primal
+    equals the name verbatim it is always chosen, and the suffix/leaf clauses
+    only ever resolve names that have NO exact counterpart.
+
+    In normal pydex use the suffix clauses are rarely exercised: the model
+    builder places the model's own VarData objects into all_vars, and both
+    str(var) and PyomoNLP.primals_names() derive from getname(fully_qualified=
+    True), so an exact match almost always exists.  The fallbacks exist for
+    builders that synthesise names by hand or through a renaming transformation.
+
+    The predicate here is the SINGLE SOURCE OF TRUTH for IFT name matching and
+    must stay identical (including the exact-first ordering) to the one used by
+    pydex.utils.diagnose_asl_elimination._match_param_name (the gate users run
+    before handing a model to the Designer).  If the gate matched differently
+    from this matcher, a model could pass the gate and then crash mid-run with
+    'Cannot match variable', or worse, bind to a different column silently.
+
+    Defined at module level (not as a method) so it works regardless of whether
+    the caller is a real Designer instance or the lightweight SimpleNamespace
+    stand-in used inside parallel (loky) sensitivity workers.
+    """
+    # Pass 1 — exact equality wins, independent of position.
+    for i, n in enumerate(nlp_var_names):
+        if n == vname:
+            return i
+    # Pass 2 — qualified-name suffix / final-segment fallbacks.
+    leaf = vname.split(".")[-1]
+    for i, n in enumerate(nlp_var_names):
+        if (n.endswith("." + vname)
+                or vname.endswith("." + n)
+                or n == leaf):
+            return i
+    return None
+
 
 class Designer:
     """
+    version = 20260511200000
+
     An experiment designer with capabilities to do parameter estimation, parameter
     estimability study, and computes both continuous and exact experimental designs.
 
@@ -231,7 +309,7 @@ class Designer:
         The designer comes with various built-in plotting capabilities through
         matplotlib's plotting features.
         """
-        self.__version__ = "0.0.9"
+        self.__version__ = "0.0.11"
 
         """ In Silico Experiments """
         self._bayes_pe_time = None
@@ -492,19 +570,38 @@ class Designer:
             dw_sense : str, "minimize" or "maximize"
                 Direction of the process objective optimisation.
 
-        Stage 1 results (set automatically by find_optimal_operating_point,
-        fixed thereafter — do not overwrite manually):
+        Operating point (dw) — the condition(s) at which prediction accuracy
+        is desired.  Can be set in two ways:
+
+          Option A — via find_optimal_operating_point() (Stage 1):
+            The designer solves a process optimisation and stores the result
+            in dw_tic / dw_tvc automatically.  Use this when dw is the
+            economically optimal operating condition.
+
+          Option B — direct assignment (any point of interest):
+            Assign dw_tic (and optionally dw_tvc) directly before calling
+            design_v_optimal().  Use this when dw is known from domain
+            knowledge, a regulatory specification, or a prior study.
+
+                designer.dw_tic = np.array([[T0, Tjacket, cat_load]])
+                designer.dw_tvc = np.array([[]])   # empty if no tvc
+                designer.dw_spt = np.array([t_final])
+                designer.design_v_optimal(...)
 
             dw_tic : np.ndarray, shape (r_w, n_tic)
-                Optimal ti_controls at the operating point(s) of interest.
-                r_w > 1 when multiple starting points find distinct optima.
+                ti_controls at the operating point(s) of interest.
+                r_w > 1 when multiple points are provided simultaneously.
+                Setting this attribute automatically sets _dw_fixed = True
+                and invalidates any cached W matrix.
 
             dw_tvc : np.ndarray, shape (r_w, n_tvc)
-                Optimal tv_controls at the operating point(s) of interest.
+                tv_controls at the operating point(s) of interest.
+                Defaults to an array of empty rows when not set explicitly.
 
             _dw_fixed : bool
-                Set to True by find_optimal_operating_point. Guards against
-                calling design_v_optimal before Stage 1 has been run.
+                True once dw_tic has been assigned (either via
+                find_optimal_operating_point or direct assignment).
+                Guards against calling design_v_optimal with no dw.
 
         Stage 2 — V-optimal MBDoE (user sets before calling design_v_optimal):
 
@@ -532,10 +629,10 @@ class Designer:
         self.dw_bounds_tvc = None           # list of (lb, ub), length n_tvc
         self.dw_sense = "minimize"          # "minimize" or "maximize"
 
-        # results of Stage 1 (fixed once computed)
-        self.dw_tic = None                  # shape (r_w, n_tic)
-        self.dw_tvc = None                  # shape (r_w, n_tvc)
-        self._dw_fixed = False
+        # operating point of interest (set via property setters or find_optimal_operating_point)
+        self._dw_tic   = None               # backing store for dw_tic property
+        self._dw_tvc   = None               # backing store for dw_tvc property
+        self._dw_fixed = False              # True once dw_tic has been assigned
 
         # W matrix and associated spt for sensitivity evaluation at dw
         self.dw_spt = None                  # shape (n_spt_dw,) — time points for W eval
@@ -577,6 +674,62 @@ class Designer:
         self._candidates_changed = True
         self._sptc = sptc
 
+    @property
+    def dw_tic(self):
+        return self._dw_tic
+
+    @dw_tic.setter
+    def dw_tic(self, value):
+        """
+        Set the operating point(s) of interest for V-optimal design.
+
+        Accepts a 1-D array (single point) or 2-D array (multiple points).
+        Setting this attribute:
+          - stores the value as shape (r_w, n_tic)
+          - sets _dw_fixed = True so design_v_optimal() can proceed
+          - invalidates the cached W matrix (self.W = None) so it will be
+            recomputed at the new dw on the next call to design_v_optimal()
+
+        Setting to None resets dw to the unspecified state.
+
+        Examples
+        --------
+        # Single operating point (direct assignment, no Stage 1 needed):
+        designer.dw_tic = np.array([[45.72, 80.07, 2.0]])
+
+        # Multiple points of interest:
+        designer.dw_tic = np.array([[45.0, 78.0, 1.5],
+                                    [50.0, 80.0, 2.0]])
+        """
+        if value is None:
+            self._dw_tic   = None
+            self._dw_fixed = False
+            self.W         = None
+            return
+        value = np.atleast_2d(np.asarray(value, dtype=float))
+        self._dw_tic   = value
+        self._dw_fixed = True
+        self.W         = None   # invalidate cached W — must be recomputed at new dw
+
+    @property
+    def dw_tvc(self):
+        return self._dw_tvc
+
+    @dw_tvc.setter
+    def dw_tvc(self, value):
+        """
+        Set the time-varying controls at the operating point(s) of interest.
+
+        For models without tv_controls, set to an empty array:
+            designer.dw_tvc = np.array([[]])
+
+        If not set explicitly, _eval_W_matrix() defaults to empty rows.
+        """
+        if value is None:
+            self._dw_tvc = None
+            return
+        self._dw_tvc = np.atleast_2d(np.asarray(value, dtype=float))
+
     @staticmethod
     def detect_sensitivity_analysis_function():
         frame = sys._getframe(1)
@@ -593,6 +746,7 @@ class Designer:
         raise SyntaxError("Don't forget to specify the simulate function.")
 
     """ core activity interfaces """
+
     def initialize(self, verbose=0, memory_threshold=int(1e9)):
         """ check for syntax errors, runs one simulation to determine n_r """
 
@@ -630,6 +784,108 @@ class Designer:
         # If user never set n_jobs and no pyomo_model_fn, default to 1
         if self.n_jobs is None:
             self.n_jobs = 1
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── IFT structural check (delegated to diagnose_asl_elimination) ──────
+        # When use_pyomo_ift=True, verify the one precondition the IFT
+        # sensitivity path relies on: every parameter Var must be reachable in
+        # the ASL primal vector (true ASL elimination — Failure Mode B — would
+        # crash eval_sensitivities() with "Cannot match variable" after a long
+        # run).  This is delegated to pydex.utils.diagnose_asl_elimination so
+        # there is a SINGLE source of truth: the exact tool users run by hand to
+        # vet a model is the one initialize() enforces — they can never disagree.
+        #
+        # The check is structural (constraint-graph topology), so it is
+        # independent of which candidate's numeric values are used, and the
+        # diagnostic owns the choice of a non-degenerate probe point internally.
+        #
+        # Result interpretation:
+        #   • errored        → could not verify (e.g. only degenerate points);
+        #                       warn and proceed, never block.
+        #   • eliminated_*   → a parameter is genuinely unreachable → raise.
+        #   • otherwise      → pass.
+        #
+        # Silently skipped when:
+        #   • use_pyomo_ift is False             (FD path — no ASL involved)
+        #   • _PYNUMERO_ASL_AVAILABLE is False   (pynumero not installed)
+        #   • _DIAGNOSE_ASL_AVAILABLE is False   (utils not installed)
+        #   • self._skip_asl_check is True       (set by unit tests)
+        if (self.use_pyomo_ift
+                and _PYNUMERO_ASL_AVAILABLE
+                and _DIAGNOSE_ASL_AVAILABLE
+                and not getattr(self, '_skip_asl_check', False)):
+
+            if verbose >= 1:
+                print("[INFO]: Running ASL parameter-reachability check "
+                      "(diagnose_asl_elimination)...")
+
+            # A representative sampling grid for the probe (at most 5 finite
+            # times); the structural verdict does not depend on these values.
+            try:
+                _spt_check = np.asarray(
+                    self.sampling_times_candidates[0], dtype=float
+                ).flatten()
+                _spt_check = _spt_check[np.isfinite(_spt_check)][:5]
+            except Exception:
+                _spt_check = np.array([])
+            if len(_spt_check) < 3:
+                _spt_check = np.array([0.001, 0.5, 1.0])
+
+            try:
+                _asl = _diagnose_asl(
+                    self.pyomo_model_fn,
+                    ti_controls      = self.ti_controls_candidates[0],
+                    model_parameters = self.model_parameters,
+                    sampling_times   = _spt_check,
+                    verbose          = False,
+                )
+            except Exception as _asl_exc:
+                # The diagnostic itself failed unexpectedly — warn, don't block.
+                if verbose >= 1:
+                    print(
+                        f"[WARNING]: ASL reachability check could not run "
+                        f"({type(_asl_exc).__name__}: {_asl_exc}). "
+                        f"IFT structure is unverified — proceeding."
+                    )
+                _asl = None
+
+            if _asl is not None:
+                if _asl.get('errored'):
+                    if verbose >= 1:
+                        print(
+                            f"[WARNING]: ASL reachability check unverified "
+                            f"({_asl.get('error')}). Proceeding."
+                        )
+                elif not _asl.get('ift_ready'):
+                    _missing = sorted({
+                        name for _, name in (_asl.get('eliminated_full', [])
+                                             + _asl.get('eliminated_single', []))
+                    })
+                    _sep = "=" * 70
+                    _body = (
+                        "\n" + _sep + "\n"
+                        + "  IFT MODEL STRUCTURE ERROR — parameter not reachable in ASL NLP\n"
+                        + _sep + "\n"
+                        + "  The pyomo_model_fn does not satisfy pydex IFT requirements.\n"
+                        + "  One or more parameter Vars are absent from the ASL primal\n"
+                        + "  vector (true ASL elimination), so eval_sensitivities()\n"
+                        + "  would crash with 'Cannot match variable' after a long run.\n"
+                        + "\n"
+                        + f"  Unreachable parameter(s): {_missing}\n"
+                        + "\n"
+                        + "  Root cause: the parameter appears only in singleton equality\n"
+                        + "  constraints whose RHS is fully determined by other fixed\n"
+                        + "  quantities, so ASL substitutes it away before IPOPT sees it.\n"
+                        + "  Ensure each parameter Var participates in at least one\n"
+                        + "  constraint involving a free (unfixed) state Var.\n"
+                        + "\n"
+                        + "  Run diagnose_asl_elimination(verbose=True) for a full report.\n"
+                        + _sep
+                    )
+                    raise RuntimeError(_body)
+                elif verbose >= 1:
+                    print("[INFO]: ASL reachability check passed — "
+                          "all parameters reachable.")
         # ─────────────────────────────────────────────────────────────────────
 
         if self.error_cov is None:
@@ -1419,8 +1675,12 @@ class Designer:
         min_eff = getattr(self, '_min_effort', 0.0) or 0.0
         use_minlp = (min_eff > 0.0)
 
-        # Ensure atomic FIMs are available
-        if self.atomic_fims is None:
+        # Ensure atomic FIMs are available and correctly sized for the current
+        # effort vector.  The cache may be stale when n_spt has changed since
+        # the last design_experiment call (e.g. n_spt=1 followed by n_spt=2):
+        # n_e = e0.size reflects the new n_spt_comb but atomic_fims still has
+        # the old count, causing an IndexError at A[i,j,k] below.
+        if self.atomic_fims is None or len(self.atomic_fims) != n_e:
             self._fd_jac = True
             self._compute_atomics = True
             self.eval_fim(e0)
@@ -1616,7 +1876,8 @@ class Designer:
             if self.W is None:
                 raise RuntimeError(
                     "V-optimal criterion requires W matrix. "
-                    "Call find_optimal_operating_point() first."
+                    "Assign designer.dw_tic (and designer.dw_spt), or call "
+                    "find_optimal_operating_point() first."
                 )
             W = np.asarray(self.W)   # (n_pred, n_mp)
             n_pred = W.shape[0]
@@ -2122,10 +2383,9 @@ class Designer:
                 print(f"  dw_tic[{w}] = {best_x[:n_tic]}")
                 print(f"  dw_tvc[{w}] = {best_x[n_tic:]}")
 
-          self.dw_tic      = np.array(results_tic)   # (r_w, n_tic)
-          self.dw_tvc      = np.array(results_tvc)   # (r_w, n_tvc)
-          self._dw_obj_vals = np.array(results_obj)  # (r_w,) objective at each point
-          self._dw_fixed   = True
+          self.dw_tic       = np.array(results_tic)   # (r_w, n_tic)  — also sets _dw_fixed
+          self.dw_tvc       = np.array(results_tvc)   # (r_w, n_tvc)
+          self._dw_obj_vals = np.array(results_obj)   # (r_w,) objective at each point
 
         finally:
             self._solver = old_solver
@@ -2733,14 +2993,78 @@ class Designer:
     def apportion(self, n_exp, method="adams", trimmed=True, compute_actual_efficiency=True):
         self.n_exp = n_exp
 
-        if self._dynamic_system and self._specified_n_spt:
-            print(
-                "[WARNING]: The apportion method does not support experimental design "
-                "problems with specified n_spt yet. Skipping the apportionment."
-            )
-            return
         _original_save_atomics = np.copy(self._save_atomics)
         self._save_atomics = False
+
+        if self._dynamic_system and self._specified_n_spt:
+            # Adams apportionment over the flat (candidate × variant) effort vector.
+            # Each optimal candidate has n_variants = len(opt_cand[4]) sampling time
+            # combinations; we flatten all (candidate, variant) pairs into a single
+            # effort vector, run Adams rounding on it, then scatter the integer counts
+            # back per candidate for reporting.
+            self.get_optimal_candidates()
+
+            # Build flat effort vector and index map
+            flat_efforts = []
+            flat_index   = []   # (candidate_pos, variant_pos) in optimal_candidates
+            for i, opt_cand in enumerate(self.optimal_candidates):
+                variant_efforts = opt_cand[4]   # list of arrays, one per variant
+                for j, e in enumerate(variant_efforts):
+                    # e may be a scalar or a small array — use nansum to collapse
+                    val = float(np.nansum(e))
+                    flat_efforts.append(val)
+                    flat_index.append((i, j))
+            flat_efforts = np.array(flat_efforts)
+
+            # Normalise (should already sum to ~1 but guard against floating point)
+            total = flat_efforts.sum()
+            if total > 0:
+                flat_efforts = flat_efforts / total
+
+            # Adams apportionment on the flat vector
+            if len(flat_efforts) < n_exp:
+                app_flat = self._greatest_effort_apportionment(flat_efforts, n_exp)
+            else:
+                app_flat = self._adams_apportionment(flat_efforts, n_exp)
+
+            # Scatter back into per-candidate apportionment arrays
+            self.apportionments = []
+            for i, opt_cand in enumerate(self.optimal_candidates):
+                n_variants = len(opt_cand[4])
+                cand_app = np.zeros(n_variants)
+                for j in range(n_variants):
+                    flat_pos = flat_index.index((i, j))
+                    cand_app[j] = app_flat[flat_pos]
+                self.apportionments.append(cand_app)
+            self.apportionments = np.array(self.apportionments, dtype=object)
+
+            # Report
+            if self._verbose >= 1:
+                print(f" Optimal Experiment for {n_exp:d} Runs ".center(100, "#"))
+                print(f"{'Obtained on':<40}: {datetime.now()}")
+                print(f"{'Criterion':<40}: {self._current_criterion}")
+                print(f"{'Criterion Value':<40}: {self._criterion_value}")
+                print(f"{'Dynamic':<40}: {self._dynamic_system}")
+                print(f"{'Number of Candidates':<40}: {self.n_c}")
+                print(f"{'Number of Optimal Candidates':<40}: {self.n_opt_c}")
+                print(f"{'Sampling Times Optimized':<40}: {self._opt_sampling_times}")
+                print(f"{'Number of Samples Per Experiment':<40}: {self._n_spt_spec}")
+                for i, (app_eff, opt_cand) in enumerate(zip(self.apportionments, self.optimal_candidates)):
+                    print(f"{f'[Candidate {opt_cand[0] + 1:d}]':-^100}")
+                    print(f"{f'Recommended Apportionment: Run {np.nansum(app_eff):.0f}/{n_exp:d} Experiments':^100}")
+                    if self._invariant_controls:
+                        print("Time-invariant Controls:")
+                        print(opt_cand[1])
+                    print("Sampling Time Variants:")
+                    for comb, (spt_comb, app) in enumerate(zip(opt_cand[3], app_eff)):
+                        print(f"  Variant {comb + 1} ~ [", end='')
+                        for sp_time in spt_comb:
+                            print(f"{f'{sp_time:.2f}':>10}", end='')
+                        print(f"]: Run {f'{app:.0f}/{np.nansum(app_eff):.0f}':>6} experiments, "
+                              f"collecting {self._n_spt_spec} samples at given times")
+                print(f"".center(100, "-"))
+            self._save_atomics = _original_save_atomics
+            return
         self.get_optimal_candidates()
 
         """ Initialize opt_eff shape """
@@ -4119,8 +4443,8 @@ class Designer:
     def _v_opt_criterion(self, efforts):
         if not self._dw_fixed:
             raise SyntaxError(
-                "dw has not been fixed. Call find_optimal_operating_point() "
-                "before running V-optimal design."
+                "dw has not been set. Assign designer.dw_tic before running "
+                "V-optimal design, or call find_optimal_operating_point() first."
             )
 
         # build W once per design call (cached in self.W)
@@ -4227,9 +4551,10 @@ class Designer:
         W : np.ndarray, shape (r_w * n_spt_dw * n_m_r, n_mp)
             Scaled sensitivity matrix at dw.  Set by this method.
         """
-        if self.dw_tic is None or self.dw_tvc is None:
+        if self.dw_tic is None:
             raise SyntaxError(
-                "dw_tic / dw_tvc are not set. Call find_optimal_operating_point() first."
+                "dw_tic is not set. Assign designer.dw_tic directly, or call "
+                "find_optimal_operating_point() first."
             )
         if self.dw_spt is None:
             raise SyntaxError(
@@ -4238,8 +4563,14 @@ class Designer:
                 "e.g. designer.dw_spt = np.array([t_final])."
             )
 
+        # dw_tvc defaults to empty rows when not set (models with no tv_controls)
+        r_w = self.dw_tic.shape[0]
+        if self.dw_tvc is None:
+            dw_tvc = np.empty((r_w, 0))
+        else:
+            dw_tvc = self.dw_tvc
+
         dw_spt = np.atleast_1d(self.dw_spt)
-        r_w    = self.dw_tic.shape[0]
 
         # for non-dynamic systems sampling times are irrelevant — force a single
         # dummy spt so the loop runs once and shape arithmetic stays consistent
@@ -4262,7 +4593,7 @@ class Designer:
 
         for w in range(r_w):
             tic_w = self.dw_tic[w]
-            tvc_w = self.dw_tvc[w]
+            tvc_w = dw_tvc[w]
 
             def model_at_dw(mp, _tic=tic_w, _tvc=tvc_w, _spt=dw_spt):
                 """
@@ -4327,7 +4658,8 @@ class Designer:
         """
         if not self._dw_fixed:
             raise SyntaxError(
-                "dw has not been fixed. Call find_optimal_operating_point() first."
+                "dw has not been set. Assign designer.dw_tic directly, or call "
+                "find_optimal_operating_point() first."
             )
 
         if self.dw_spt is None:
@@ -4612,10 +4944,11 @@ class Designer:
                 )
             ]
 
-            pyomo_fn   = self.pyomo_model_fn
-            scr_mp     = self._current_scr_mp
-            out_names  = getattr(self, 'pyomo_output_var_name', None)
-            n_mr       = self.n_m_r
+            pyomo_fn    = self.pyomo_model_fn
+            scr_mp      = self._current_scr_mp
+            out_names   = getattr(self, 'pyomo_output_var_name', None)
+            n_mr        = self.n_m_r
+            is_dynamic  = self._dynamic_system   # preserve static/dynamic flag
 
             # Use loky (subprocess) workers to fully isolate Pyomo global state
             # (LoggingIntercept, C-extension caches) between workers.
@@ -4624,13 +4957,31 @@ class Designer:
                 import types, numpy as _np
                 fake = types.SimpleNamespace(
                     _current_spt          = spt,
+                    _dynamic_system       = is_dynamic,  # inherit: False for static models
                     pyomo_model_fn        = pyomo_fn,
                     pyomo_output_var_name = out_names,
                     n_m_r                 = n_mr,
                 )
-                return Designer._eval_sensitivities_pyomo_ift(
-                    fake, tic, scr_mp, store_predictions=False
-                )
+                try:
+                    return Designer._eval_sensitivities_pyomo_ift(
+                        fake, tic, scr_mp, store_predictions=False
+                    )
+                except (RuntimeError, ValueError) as _worker_err:
+                    # Candidate failed (IPOPT error or rank-deficient Jacobian).
+                    # Return NaN sensitivities so the remaining candidates can
+                    # complete — the failed candidate will get zero FIM weight.
+                    import warnings as _w
+                    _w.warn(
+                        f"[IFT worker] candidate {tic} failed: {_worker_err}. "
+                        f"Sensitivity set to NaN (candidate excluded from FIM).",
+                        RuntimeWarning, stacklevel=2
+                    )
+                    _n_r   = n_mr
+                    _n_spt = len(spt) if hasattr(spt, '__len__') else 1
+                    _n_mp  = len(scr_mp)
+                    _nan_resp = _np.zeros((_n_spt, _n_r))
+                    _nan_sens = _np.zeros((_n_spt, _n_r, _n_mp))
+                    return _nan_resp, _nan_sens
 
             if self._verbose >= 1:
                 print(
@@ -4729,19 +5080,42 @@ class Designer:
                 # Pyomo IFT already returns (n_spt, n_mr, n_mp) — no reshaping needed.
                 # Only apply the FD axis-reordering logic for the finite-difference path.
                 if self.use_finite_difference and not _use_pyomo_ift:
+                    # numdifftools returns the Jacobian with shape depending on
+                    # the output dimension of _sensitivity_sim_wrapper:
+                    #   scalar output (n_spt=1, n_r=1) → 1D (n_mp,)
+                    #   vector output                  → 2D (n_out, n_mp)
+                    #   or 3D (n_mp, n_spt, n_r) in some cases
+                    # We need (n_spt, n_r, n_mp) to match sensitivities[i,:].
                     n_dim = len(temp_sens.shape)
-                    if n_dim == 3:
-                        temp_sens = np.moveaxis(temp_sens, 1, 2)
-                    elif self.n_spt == 1:
-                        if self.n_mp == 1:
-                            temp_sens = temp_sens[:, :, np.newaxis]
+                    if n_dim == 1:
+                        # scalar-valued function of n_mp parameters → (n_mp,)
+                        # target: (1, 1, n_mp)
+                        temp_sens = temp_sens[np.newaxis, np.newaxis, :]
+                    elif n_dim == 3:
+                        n_spt_actual = temp_sens.shape[1]
+                        if self.n_mp == 1 and n_spt_actual > 1:
+                            # (1, n_spt, n_r) → (n_spt, n_r, 1)
+                            temp_sens = np.moveaxis(temp_sens, 0, -1)
                         else:
-                            temp_sens = temp_sens[np.newaxis]
-                    elif self.n_mp == 1:
-                        temp_sens = np.moveaxis(temp_sens, 0, 1)
-                        temp_sens = temp_sens[:, :, np.newaxis]
-                    elif self.n_r == 1:
-                        temp_sens = temp_sens[:, np.newaxis, :]
+                            temp_sens = np.moveaxis(temp_sens, 1, 2)
+                    elif n_dim == 2:
+                        n_rows, n_cols = temp_sens.shape
+                        if self.n_mp == 1 and n_rows > 1:
+                            # (n_spt, 1) with n_r=1 → (n_spt, 1, 1)
+                            temp_sens = temp_sens[:, np.newaxis, :]
+                        elif n_rows == 1:
+                            # (1, n_mp) with n_spt=1, n_r=1 → (1, 1, n_mp)
+                            temp_sens = temp_sens[np.newaxis, :, :]  # (1, 1, n_mp)
+                        elif self.n_spt == 1:
+                            if self.n_mp == 1:
+                                temp_sens = temp_sens[:, :, np.newaxis]
+                            else:
+                                temp_sens = temp_sens[np.newaxis]
+                        elif self.n_mp == 1:
+                            temp_sens = np.moveaxis(temp_sens, 0, 1)
+                            temp_sens = temp_sens[:, :, np.newaxis]
+                        elif self.n_r == 1:
+                            temp_sens = temp_sens[:, np.newaxis, :]
                     self.sensitivities[i, :] = temp_sens
                 if self._save_txt and i == self._save_txt_nc - 1:
                     self._save_sensitivities_to_txt()
@@ -5195,6 +5569,22 @@ class Designer:
         self._compute_atomics = self._model_parameters_changed
         self._compute_atomics = self._compute_atomics or self._candidates_changed
         self._compute_atomics = self._compute_atomics or self.atomic_fims is None
+
+        # Invalidate cached atomic FIMs when the number of effort variables has
+        # changed since they were last built.  This happens when design_experiment
+        # is called with a different n_spt argument (e.g. n_spt=1 then n_spt=2):
+        # n_spt_comb = C(n_spt_candidates, n_spt) changes, so the expected number
+        # of atomics is n_c * n_spt_comb — different from the cached n_c * old_n_spt_comb.
+        # Without this guard, _solve_pyomo indexes A[i,j,k] up to n_e-1 = n_c*n_spt_comb-1
+        # while A only has n_c*old_n_spt_comb entries, causing an IndexError.
+        if not self._compute_atomics and self.atomic_fims is not None:
+            expected_n_atomics = (
+                self.n_c * self.n_spt_comb
+                if self._specified_n_spt
+                else self.n_c * self.n_spt
+            )
+            if len(self.atomic_fims) != expected_n_atomics:
+                self._compute_atomics = True
 
         if self._pseudo_bayesian:
             self._compute_sensitivities = self._compute_atomics or self.scr_fims is None
@@ -6165,10 +6555,30 @@ class Designer:
         n_mp  = len(theta)
         n_mr  = self.n_m_r
 
-        # 1. Build and initialise the Pyomo model
-        m, all_vars, all_bodies, t_sorted = self.pyomo_model_fn(
-            ti_controls, theta
-        )
+        # 1. Build and initialise the Pyomo model.
+        # Pass _current_spt as sampling_times so the model embeds the requested
+        # measurement times into the collocation grid.  The IFT Jacobian is then
+        # evaluated at collocation points that coincide with (or are very close to)
+        # the actual sampling times, enabling correct sensitivity discrimination
+        # across different sampling times when optimize_sampling_times=True.
+        #
+        # For static/signature-1 systems, _current_spt holds the ti_controls
+        # value (not a sampling time), so we guard with _is_dynamic to avoid
+        # passing nonsensical time arguments to the model builder.
+        #
+        # pyomo_model_fn must accept sampling_times as a keyword argument;
+        # if it doesn't (older model builders), the TypeError is caught and
+        # we fall back to the original two-argument call unchanged.
+        _is_dynamic = getattr(self, '_dynamic_system', False)
+        _spt = getattr(self, '_current_spt', None) if _is_dynamic else None
+        try:
+            m, all_vars, all_bodies, t_sorted = self.pyomo_model_fn(
+                ti_controls, theta, sampling_times=_spt
+            )
+        except TypeError:
+            m, all_vars, all_bodies, t_sorted = self.pyomo_model_fn(
+                ti_controls, theta
+            )
 
         # 2. Resolve output variable name(s)
         out_names = getattr(self, 'pyomo_output_var_name', None)
@@ -6180,15 +6590,44 @@ class Designer:
         state_var_strs = [str(v) for v in all_vars[n_mp:]]
 
         def _find_state_idx(base_name, t_val):
+            # Snap to the nearest time in t_sorted
             t_key = min(t_sorted, key=lambda tt: abs(tt - t_val))
-            for target in (f"{base_name}[{t_key}]", base_name):
+            # Build candidate string targets.  Pyomo renders indexed variables
+            # as "VarName[t]" where t is formatted by Python's str() — which
+            # may differ from the float repr used in t_key (e.g. "0.37" vs
+            # "0.37000000000000004").  We therefore try several formats and
+            # also fall back to a substring search as a last resort.
+            for target in (
+                f"{base_name}[{t_key}]",
+                f"{base_name}[{t_key:.10g}]",
+                f"{base_name}[{t_key:.6g}]",
+                base_name,
+            ):
                 for idx, vname in enumerate(state_var_strs):
-                    if vname == target or vname.endswith(target):
+                    if vname == target or (
+                        vname.startswith(base_name) and
+                        vname.endswith(f"[{t_key}]")
+                    ):
                         return idx
+            # Last resort: find the state variable whose time index is
+            # numerically closest to t_key, using string parsing
+            best_idx, best_dist = None, float('inf')
+            prefix = f"{base_name}["
+            for idx, vname in enumerate(state_var_strs):
+                if vname.startswith(prefix) and vname.endswith("]"):
+                    try:
+                        t_var = float(vname[len(prefix):-1])
+                        dist = abs(t_var - t_key)
+                        if dist < best_dist:
+                            best_dist, best_idx = dist, idx
+                    except ValueError:
+                        pass
+            if best_idx is not None:
+                return best_idx
             raise RuntimeError(
                 f"[Pyomo IFT] Cannot find state variable '{base_name}[{t_key}]' "
                 f"or scalar '{base_name}'.\n"
-                f"Available: {state_var_strs}"
+                f"Available: {state_var_strs[:10]}..."
             )
 
         # 3. Build Jacobian — choose backend
@@ -6213,11 +6652,7 @@ class Designer:
             all_var_strs = [str(v) for v in all_vars]
             col_order = []
             for vname in all_var_strs:
-                matched = next(
-                    (i for i, n in enumerate(nlp_var_names)
-                     if n == vname or n.endswith("." + vname) or vname.endswith("." + n)),
-                    None
-                )
+                matched = _match_nlp_var(vname, nlp_var_names)
                 if matched is None:
                     raise RuntimeError(
                         f"[Pyomo IFT / ASL] Cannot match variable '{vname}' "
@@ -6245,26 +6680,136 @@ class Designer:
         # 5. Solve J_z * S = -J_p
         S, *_ = _scipy_linalg.lstsq(J_z, -J_p)
 
-        # 6. Extract responses and sensitivities
+        # 6. Extract responses and sensitivities.
+        # For causal (sequential) sensitivities each sampling time needs its
+        # own model integrated from 0 to t_i.  We therefore loop over the
+        # requested sampling times and, when there are multiple distinct times,
+        # rebuild + re-solve the model for each one so that dCB(t_i)/dθ
+        # reflects only the history up to t_i — exactly matching FD behaviour.
+        # When all sampling times are the same (e.g. single endpoint), the
+        # model is built only once (the S from above is reused).
         responses = np.zeros((len(self._current_spt), n_mr))
         sens      = np.zeros((len(self._current_spt), n_mr, n_mp))
+
+        unique_spt = sorted(set(float(t) for t in self._current_spt))
+        # Cache: maps t_val → (S_t, t_sorted_t, m_t) to avoid rebuilding
+        # the same model twice if the same time appears more than once.
+        _spt_cache = {}
+
         for spt_i, t_val in enumerate(self._current_spt):
-            t_key = min(t_sorted, key=lambda tt: abs(tt - t_val))
+            t_val_f = float(t_val)
+            if t_val_f not in _spt_cache:
+                if len(unique_spt) > 1:
+                    # Rebuild model integrated only to t_val for causal sens.
+                    m_t, all_vars_t, all_bodies_t, t_sorted_t = \
+                        self.pyomo_model_fn(
+                            ti_controls, theta,
+                            sampling_times=[t_val_f]
+                        )
+                    n_mp_t = n_mp   # same number of parameters
+                    state_var_strs_t = [str(v) for v in all_vars_t[n_mp_t:]]
+                    # Build Jacobian for this sub-model
+                    if _PYNUMERO_ASL_AVAILABLE:
+                        param_vars_t = all_vars_t[:n_mp_t]
+                        for pv in param_vars_t:
+                            pv.unfix()
+                        try:
+                            nlp_t      = _PyomoNLP(m_t)
+                            J_sparse_t = nlp_t.evaluate_jacobian_eq()
+                            J_dense_t  = J_sparse_t.toarray()
+                            nlp_vars_t = nlp_t.primals_names()
+                        finally:
+                            for pv in param_vars_t:
+                                pv.fix()
+                        all_var_strs_t = [str(v) for v in all_vars_t]
+                        col_order_t = []
+                        for vname in all_var_strs_t:
+                            matched = _match_nlp_var(vname, nlp_vars_t)
+                            if matched is None:
+                                raise RuntimeError(
+                                    f"[Pyomo IFT causal] Cannot match '{vname}'"
+                                )
+                            col_order_t.append(matched)
+                        J_t = J_dense_t[:, col_order_t]
+                    else:
+                        n_v_t = len(all_vars_t)
+                        n_c_t = len(all_bodies_t)
+                        J_t   = np.zeros((n_c_t, n_v_t))
+                        for ci, body in enumerate(all_bodies_t):
+                            for vi, var in enumerate(all_vars_t):
+                                try:
+                                    J_t[ci, vi] = _pyo.value(
+                                        _pyomo_differentiate(body, wrt=var))
+                                except Exception:
+                                    J_t[ci, vi] = 0.0
+                    J_p_t = J_t[:, :n_mp_t]
+                    J_z_t = J_t[:, n_mp_t:]
+                    try:
+                        S_t, *_ = _scipy_linalg.lstsq(J_z_t, -J_p_t)
+                    except np.linalg.LinAlgError as _lae:
+                        raise RuntimeError(
+                            f"IFT lstsq failed (SVD did not converge) — "
+                            f"J_z_t is rank-deficient for this candidate."
+                        ) from _lae
+                    _spt_cache[t_val_f] = (S_t, t_sorted_t,
+                                           state_var_strs_t, m_t,
+                                           all_vars_t)
+                else:
+                    # Single unique spt — reuse the already-solved model
+                    _spt_cache[t_val_f] = (S, t_sorted, state_var_strs,
+                                           m, all_vars)
+
+            S_use, t_sorted_use, sv_strs_use, m_use, av_use = \
+                _spt_cache[t_val_f]
+            t_key = min(t_sorted_use, key=lambda tt: abs(tt - t_val_f))
+
+            def _find_state_idx_t(base_name, t_v, _sv=sv_strs_use):
+                t_k = min(t_sorted_use, key=lambda tt: abs(tt - t_v))
+                for target in (
+                    f"{base_name}[{t_k}]",
+                    f"{base_name}[{t_k:.10g}]",
+                    f"{base_name}[{t_k:.6g}]",
+                    base_name,
+                ):
+                    for idx, vname in enumerate(_sv):
+                        if vname == target or (
+                            vname.startswith(base_name) and
+                            vname.endswith(f"[{t_k}]")
+                        ):
+                            return idx
+                prefix = f"{base_name}["
+                best_idx2, best_dist2 = None, float('inf')
+                for idx, vname in enumerate(_sv):
+                    if vname.startswith(prefix) and vname.endswith("]"):
+                        try:
+                            t_v2  = float(vname[len(prefix):-1])
+                            dist2 = abs(t_v2 - t_k)
+                            if dist2 < best_dist2:
+                                best_dist2, best_idx2 = dist2, idx
+                        except ValueError:
+                            pass
+                if best_idx2 is not None:
+                    return best_idx2
+                raise RuntimeError(
+                    f"[Pyomo IFT causal] Cannot find '{base_name}[{t_k}]'"
+                )
+
             for r_i, out_name in enumerate(out_names):
                 base_name = out_name.split("[")[0]
-                var_comp  = m.find_component(base_name)
+                var_comp  = m_use.find_component(base_name)
                 if var_comp is None:
-                    var_comp = m.find_component(out_name)
+                    var_comp = m_use.find_component(out_name)
                 if var_comp is None:
                     raise RuntimeError(
-                        f"[Pyomo IFT] Output variable '{out_name}' not found in model."
+                        f"[Pyomo IFT] Output variable '{out_name}' not found."
                     )
                 if hasattr(var_comp, 'is_indexed') and var_comp.is_indexed():
                     val = _pyo.value(var_comp[t_key])
                 else:
                     val = _pyo.value(var_comp)
                 responses[spt_i, r_i] = val
-                sens[spt_i, r_i, :]   = S[_find_state_idx(base_name, t_key), :]
+                sens[spt_i, r_i, :]   = S_use[
+                    _find_state_idx_t(base_name, t_val_f), :]
 
         # 7. Store responses
         if store_predictions:
@@ -6291,7 +6836,7 @@ class Designer:
             self._current_res = response
             self._store_current_response()
         if self.use_finite_difference:
-            if self.n_m_r == 1 and self.n_spt == 1:
+            if self.n_m_r == 1 and len(response.flatten()) == 1:
                 return response[0]
             else:
                 return response
@@ -6348,8 +6893,67 @@ class Designer:
         self.get_optimal_candidates(tol=tol)
 
         if self._specified_n_spt:
-            print(f"Warning, plot_optimal_efforts not implemented for specified n_spt.")
-            return
+            # For n_spt designs each candidate has sampling-time variants
+            # (combinations of n_spt_spec times).  Plot one bar per variant,
+            # positioned at the mean sampling time of that combination, with
+            # height = total effort allocated to that variant.
+            if self._verbose >= 2:
+                print("Plotting current continuous design.")
+
+            if width is None:
+                width = 0.7
+
+            # Collect all sampling times to compute a sensible bar depth
+            all_times = []
+            for opt_cand in self.optimal_candidates:
+                for spt_comb in opt_cand[3]:
+                    all_times.extend(spt_comb)
+            all_times  = np.array(all_times)
+            time_range = np.nanmax(all_times) - np.nanmin(all_times)
+            dy         = max(time_range * 0.02, 1.0)
+
+            if figsize is None:
+                fig = plt.figure(figsize=(12, 8))
+            else:
+                fig = plt.figure(figsize=figsize)
+            axes = fig.add_subplot(111, projection='3d')
+
+            for c_plot, opt_cand in enumerate(self.optimal_candidates):
+                for spt_comb, eff_arr in zip(opt_cand[3], opt_cand[4]):
+                    eff_total = float(np.nansum(eff_arr))
+                    if eff_total < tol:
+                        continue
+                    # Position bar at mean sampling time of this variant
+                    y_pos = float(np.mean(spt_comb))
+                    axes.bar3d(
+                        x  = c_plot - width / 2,
+                        y  = y_pos  - dy / 2,
+                        z  = 0,
+                        dx = width,
+                        dy = dy,
+                        dz = eff_total,
+                    )
+
+            axes.grid(False)
+            axes.set_xlabel('Candidate')
+            axes.set_xticks(range(len(self.optimal_candidates)))
+            axes.set_xticklabels(
+                [str(opt_c[0] + 1) for opt_c in self.optimal_candidates]
+            )
+            if self.time_unit_name is not None:
+                axes.set_ylabel(f"Sampling Times ({self.time_unit_name})")
+            else:
+                axes.set_ylabel('Sampling Times')
+            axes.set_zlabel('Experimental Effort')
+            axes.set_zlim([0, 1])
+            axes.set_zticks(np.linspace(0, 1, 6))
+            fig.tight_layout()
+
+            if write:
+                fn = f'efforts_{self.oed_result["optimality_criterion"]}'
+                fp = self._generate_result_path(fn, "png")
+                fig.savefig(fname=fp, dpi=dpi)
+            return fig
 
         if self._verbose >= 2:
             print("Plotting current continuous design.")
