@@ -11,10 +11,11 @@ model.
 This is a fork of [pydex](https://github.com/KennedyPutraKusumo/pydex)
 by Kennedy Putra Kusumo et al., originally described in:
 
-> Kusumo, K.P., Kuriyan, K., Vaidyanathan, R., Shadbahr, T., Khan, F.I.,
-> Harun, N., Sin, G. & Braatz, R.D. (2022). Explicit-Constraint-Based
-> Optimal Experiment Design for Differential Equation Models.
-> *Computers & Chemical Engineering*, 107940.
+> Kusumo, K.P., Kuriyan, K., Vaidyaraman, S., García-Muñoz, S., Shah, N.
+> & Chachuat, B. (2022). Risk mitigation in model-based experiment
+> design: a continuous-effort approach to optimal campaigns.
+> *Computers & Chemical Engineering*, 159, 107680.
+> https://doi.org/10.1016/j.compchemeng.2022.107680
 
 ### Changes in this fork
 
