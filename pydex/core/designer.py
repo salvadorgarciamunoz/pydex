@@ -28,6 +28,7 @@ from pydex.core.logger import Logger
 import matplotlib
 import numdifftools as nd
 import numpy as np
+import pandas as pd
 import pyomo.environ as _pyo
 
 try:
@@ -58,6 +59,26 @@ try:
 except ImportError:
     _diagnose_asl = None
     _DIAGNOSE_ASL_AVAILABLE = False
+
+
+def _safe_tight_layout(fig):
+    """
+    fig.tight_layout() that stays quiet on 3-D axes.
+
+    Matplotlib cannot compute a tight layout for Axes3D and emits
+        UserWarning: Tight layout not applied. The left and right margins
+        cannot be made large enough to accommodate all Axes decorations.
+    The effort/sensitivity plots use projection='3d', so the call was warning on
+    every figure while doing nothing. Skip it there; matplotlib's default 3-D
+    margins are already reasonable.
+    """
+    import warnings as _warnings
+    from mpl_toolkits.mplot3d import Axes3D as _Axes3D
+    if any(isinstance(ax, _Axes3D) for ax in fig.axes):
+        return
+    with _warnings.catch_warnings():
+        _warnings.filterwarnings("ignore", message=".*Tight layout not applied.*")
+        fig.tight_layout()
 
 
 def _match_nlp_var(vname, nlp_var_names):
@@ -114,7 +135,7 @@ def _match_nlp_var(vname, nlp_var_names):
 
 class Designer:
     """
-    version = 20260511200000
+    version = 20260804000000
 
     An experiment designer with capabilities to do parameter estimation, parameter
     estimability study, and computes both continuous and exact experimental designs.
@@ -132,12 +153,23 @@ class Designer:
 
         Calibration-oriented (minimise parameter uncertainty):
             D-optimal  — maximises det(FIM),  minimises joint confidence volume
+            Ds-optimal — maximises det of the Schur complement of the nuisance-
+                         parameter block in the FIM, i.e. D-optimal design for a
+                         chosen SUBSET of parameters (see `interest_parameters`)
+                         while marginalising out the rest
             A-optimal  — minimises trace(FIM^{-1}), minimises total param variance
             E-optimal  — minimises lambda_max(FIM^{-1}), minimises worst direction
 
         Prediction-oriented (minimise prediction uncertainty at target conditions):
             V-optimal  — minimises trace(W FIM^{-1} W^T) at user-specified dw
             G-optimal  — minimises max prediction variance over a region
+
+        Prediction-variance family, on PVAR = f·FIM^{-1}·f^T per candidate and
+        sampling time ("g" = generalised / worst case, "i" = individual / summed):
+            dg, di     — determinant of PVAR          (see the caveat below)
+            ag, ai     — trace of PVAR
+            eg, ei     — largest eigenvalue of PVAR
+            vdi        — as di, over the operating-point grid
 
         Risk-averse:
             CVaR-D/A/E — conditional value-at-risk variants for robust design
@@ -288,6 +320,158 @@ class Designer:
                 optimize_sampling_times = True,
             )
 
+    Subset (Ds-optimal) design
+    --------------------------
+    Ds-optimality designs for a chosen SUBSET of the model parameters while
+    marginalising the remainder ("nuisance" parameters) out through the Schur
+    complement of the FIM. Declare the subset BY NAME:
+
+    >>> d.model_parameter_names = ["k", "A0", "c1", "c2"]
+    >>> d.interest_parameters   = ["k", "A0"]        # c1, c2 become nuisance
+    >>> d.design_experiment(d.ds_opt_criterion, solver="ipopt")
+
+    Names are matched against `model_parameter_names` by exact string equality.
+    Numeric indices are rejected: a parameter's POSITION in the FIM follows the
+    order of `model_parameters`, which is not guaranteed to track the order in
+    which a Pyomo model declares its equations or variables, so position is not
+    a stable identifier. Unknown names raise immediately rather than binding
+    silently to the wrong parameter.
+
+    Why use it: Ds stays well defined when a nuisance parameter is
+    unidentifiable, whereas D-optimality does not. If a nuisance direction
+    carries no information then det(FIM) = 0 and D-optimality is infeasible for
+    EVERY design, but the Schur complement over the interest parameters remains
+    finite and positive definite, so there is still something to optimise.
+
+    Its limit: Ds only helps when the unidentifiable direction lies in the
+    NUISANCE subspace. If the interest parameters are themselves collinear after
+    marginalisation, the Schur complement is singular too and the criterion
+    correctly reports infeasibility. A Ds value of +inf is therefore a
+    diagnosis, not a bug: the question to ask is whether the unidentifiability
+    sits in the parameters you care about or the ones you do not.
+
+    Practical note: when the nuisance block cannot be made positive definite,
+    the native Pyomo formulation is infeasible by construction and the solve
+    falls back to SLSQP on the generalised Schur complement. If the Schur
+    complement is also non-PD at the STARTING design, SLSQP has an infinite
+    objective and no gradient with which to escape it, so the design will not
+    move. Passing regularize_fim=True to design_experiment() keeps the solve on
+    the native path, where IPOPT can make progress from an infeasible start;
+    note the resulting criterion value then depends on `_eps`.
+
+    Infeasibility conventions
+    -------------------------
+    Every criterion is MINIMISED, so an unusable information matrix must return
+    +inf — the worst attainable value — never 0, which for a minimised criterion
+    is among the best. Degenerate inputs handled uniformly (returning +inf, with
+    a correctly shaped zero gradient when an analytic Jacobian was requested):
+
+        * FIM absent, wrong shape, all-zero, or non-finite
+        * FIM not positive definite
+
+    Positive-definiteness is tested by eigenvalue or Cholesky, never by the sign
+    of the determinant: det > 0 only requires an EVEN number of negative
+    eigenvalues, so an indefinite matrix such as diag(1, 1, -1, -1) passes a
+    determinant-sign test while being meaningless as an information matrix. The
+    same test is used in the finite-difference and analytic-gradient branches of
+    a given criterion, so toggling `_fd_jac` cannot change whether a design is
+    judged feasible.
+
+    Determinant-based prediction-variance criteria (dg, di, vdi)
+    -----------------------------------------------------------
+    These take determinants of PVAR = f·FIM^{-1}·f^T. A determinant MULTIPLIES
+    all eigenvalues, so a single near-null direction in the sensitivity block f
+    collapses it to numerical noise. Two failure modes follow:
+
+        * the aggregate underflows to a magnitude below the solver's ABSOLUTE
+          convergence tolerance (scipy SLSQP defaults to ftol=1e-9), so the
+          optimiser declares convergence at iteration 1 and returns the
+          starting design untouched;
+        * a non-positive-definite block drives a summed log-determinant to +inf,
+          destroying all design information.
+
+    When that is detected, a log-PSEUDO-determinant is substituted: the sum of
+    log-eigenvalues above a relative cutoff (`_pvar_rcond`). This is well
+    defined for a near-singular PSD matrix, is a monotone transform of the
+    determinant where both exist, and lives on an O(1) scale the optimiser can
+    work with.
+
+    The decision is BEHAVIOURAL — "did the determinant form produce a usable
+    number?" — rather than rank-based, because the numerical rank of PVAR is
+    tolerance-dependent and can flip between values across effort vectors for
+    blocks sitting on the cutoff. It is made once per design run and LATCHED,
+    because a branch that flipped mid-solve would make the objective
+    discontinuous and break SLSQP. `design_experiment()` clears the latch;
+    `reset_pvar_logdet_mode()` clears it manually.
+
+    Consequences worth knowing:
+
+        * where the determinant form IS usable, values are bit-identical to
+          previous releases (the same slogdet call is used);
+        * where the fallback engages, the reported value is on a LOG scale and
+          is NOT comparable with a determinant from a well-conditioned problem;
+        * trace-based (ag, ai) and eigenvalue-based (eg, ei) criteria are
+          unaffected, being dominated by the healthy directions rather than the
+          near-null one. If dg/di are unusable for your model, those are the
+          natural alternatives.
+
+    A near-singular f is a MODELLING signal, not merely a numerical one: it
+    means the measurable responses are close to linearly dependent in
+    sensitivity space, so the response set carries fewer independent directions
+    than its size suggests. A warning reports the measured worst
+    sv_min/sv_max over all candidate/sampling-time pairs.
+
+    Which solver actually runs
+    --------------------------
+    Criteria expressible as static Pyomo expressions are built symbolically and
+    handed to the solver named by design_experiment(solver=...) — any
+    AMPL-compatible NLP solver (IPOPT, BONMIN, BARON via GAMS, ...). These are
+    D, A, E, V, Ds, and pseudo-Bayesian "average information" (type 0).
+
+    Everything else is optimised by scipy's SLSQP acting on the criterion
+    callable as a black box, because the criterion receives per-scenario or
+    per-block matrices at runtime and cannot be written symbolically. On that
+    path:
+
+        * the `solver=` argument is NOT used;
+        * `solver_options` is filtered to ftol / maxiter / disp, so IPOPT-style
+          options (linear_solver, tol, max_iter) are silently dropped;
+        * gradients are finite-differenced by scipy, so the analytic Jacobians
+          implemented by several criteria are unused.
+
+    Pseudo-Bayesian type 0 is solved natively because the scenario-averaged
+    information matrix is linear in the efforts,
+
+        mean_s FIM_s(e) = mean_s sum_i e_i A_i^(s) = sum_i e_i (mean_s A_i^(s))
+
+    so it has exactly the structure of a local FIM assembled from
+    scenario-averaged atomic FIMs, and the existing formulations apply verbatim.
+    Type 1 ("average criterion") is mean_s f(FIM_s), which does not reduce this
+    way and keeps the SLSQP fallback.
+
+    Numerical controls
+    ------------------
+    Attributes, with defaults, grouped by what they govern:
+
+        Ds-optimality (Schur complement)
+            _ds_rcond       1e-12  singular-value cutoff for the nuisance solve
+            _ds_resid_tol   1e-8   relative residual above which the nuisance
+                                   solve is judged inconsistent (non-PSD FIM)
+            _ds_cond_warn   1e10   cond(S) above which a warning is emitted
+
+        Prediction-variance determinants (dg / di / vdi)
+            _pvar_rcond       1e-10  eigenvalue cutoff for the pseudo-determinant
+            _pvar_scale_floor 1e-12  |aggregate| below this is treated as noise
+            _pvar_cond_warn   1e-8   sv_min/sv_max below this warns that f is
+                                     near-singular
+
+        Regularisation
+            _eps                   magnitude of the eps*I added to the FIM when
+                                   design_experiment(regularize_fim=True). NOTE
+                                   design_experiment overwrites _regularize_fim
+                                   from its keyword argument, so setting that
+                                   attribute directly is silently discarded.
+
     References
     ----------
     Shahmohammadi, A. & McAuley, K.B. (2019). Sequential model-based A- and
@@ -321,6 +505,7 @@ class Designer:
 
 
         self.error_cov = None
+        self._error_cov_defaulted = False
         self.error_fim = None
 
         """ goal_oriented_ds"""
@@ -357,6 +542,56 @@ class Designer:
         self.scr_fims = None
         self.scr_criterion_val = None
         self._current_scr_mp = None
+
+        """ Ds-optimality exclusive """
+        # NAMES (into model_parameter_names) of the "interest" parameter
+        # subset. The complementary parameters are treated as nuisance
+        # parameters that are marginalised out via the Schur complement of
+        # the FIM. Set via the `interest_parameters` property, e.g.:
+        #     designer.interest_parameters = ["Ka", "A0"]
+        # Resolved to positional indices lazily (by name, not by position)
+        # in _resolve_ds_idx() the first time a Ds-optimal criterion is
+        # evaluated, since model_parameter_names may not be populated yet
+        # (defaulted in initialize()) at the point interest_parameters is
+        # assigned.
+        self.ds_interest_names = None
+        self.ds_interest_idx = None
+        self.ds_nuisance_idx = None
+        # Numerical tolerances for the Schur-complement evaluation.
+        #   _ds_rcond     : relative singular-value cutoff used when solving
+        #                   M_nn W = M_ns. Singular values below
+        #                   rcond * max(sv) are treated as zero, which yields
+        #                   the minimum-norm (generalised) Schur complement
+        #                   when the nuisance block is rank-deficient.
+        #   _ds_resid_tol : relative residual above which the nuisance solve
+        #                   is judged inconsistent (=> Ds genuinely diverges;
+        #                   only possible for a non-PSD FIM).
+        #   _ds_cond_warn : cond(S) above which a warning is emitted.
+        self._ds_rcond     = 1e-12
+        self._ds_resid_tol = 1e-8
+        self._ds_cond_warn = 1e10
+        self._ds_warned    = set()
+
+        """ Prediction-variance (dg / di / vdi) numerical controls """
+        # These criteria take determinants of PVAR = f·FIM^-1·f^T. A determinant
+        # MULTIPLIES all eigenvalues, so a single near-null direction in f
+        # collapses it to numerical noise -- unlike trace (ag/ai) or lambda_max
+        # (eg/ei), which are dominated by the healthy directions and are
+        # unaffected. When that happens the determinant form is unusable and a
+        # log-pseudo-determinant is substituted; see _pvar_decide_logdet_mode.
+        #   _pvar_rcond      : relative eigenvalue cutoff for the pseudo-determinant
+        #   _pvar_scale_floor: |aggregate| below this is treated as numerical
+        #                      noise. Referenced to scipy SLSQP's default
+        #                      ftol=1e-9, which is an ABSOLUTE tolerance on the
+        #                      objective: an objective smaller than ftol makes
+        #                      the solver declare convergence at iteration 1.
+        #   _pvar_cond_warn  : warn when sv_min/sv_max of a sensitivity block
+        #                      falls below this (f is near-singular)
+        self._pvar_rcond       = 1e-10
+        self._pvar_scale_floor = 1e-12
+        self._pvar_cond_warn   = 1e-8
+        self._pvar_logdet_mode = None     # None | 'det' | 'pdet'  (latched)
+        self._pvar_warned      = set()
 
         """ Logging """
         # options
@@ -639,6 +874,17 @@ class Designer:
 
     @property
     def model_parameters(self):
+        """numpy.ndarray: Nominal model parameter values.
+
+        A 1-D array of length ``n_mp`` for a local design, or a 2-D array of
+        shape ``(n_scr, n_mp)`` to make the design PSEUDO-BAYESIAN — each row is
+        one scenario drawn from the prior, and :meth:`initialize` sets
+        ``_pseudo_bayesian`` and ``n_scr`` accordingly.
+
+        Sensitivities are evaluated at these values, so a design is only as good
+        as the guess it was built on. Assigning marks the sensitivities stale;
+        they are recomputed on the next :meth:`eval_sensitivities`.
+        """
         return self._model_parameters
 
     @model_parameters.setter
@@ -648,6 +894,17 @@ class Designer:
 
     @property
     def ti_controls_candidates(self):
+        """numpy.ndarray: Candidate time-invariant controls, ``(n_c, n_tic)``.
+
+        One row per candidate experiment, one column per control held constant
+        for the duration of that experiment — initial concentrations, reactor
+        temperature, catalyst loading. The optimiser allocates effort ACROSS
+        these rows; it cannot invent conditions between them, so the grid bounds
+        what any design can achieve.
+
+        :meth:`enumerate_candidates` builds a full factorial grid. Assigning
+        marks the candidate set changed.
+        """
         return self._ticc
 
     @ti_controls_candidates.setter
@@ -657,6 +914,17 @@ class Designer:
 
     @property
     def tv_controls_candidates(self):
+        """numpy.ndarray: Candidate time-varying controls, ``(n_c, n_tvc)``.
+
+        One row per candidate, one column per control that varies during the
+        experiment — a temperature ramp rate, a feed profile parameter. pydex
+        passes the row to :attr:`simulate` as a flat vector and places no
+        interpretation on it: how those numbers become a trajectory is entirely
+        the model's business.
+
+        Only used by simulate signatures 3 and 4. Assigning marks the candidate
+        set changed.
+        """
         return self._tvcc
 
     @tv_controls_candidates.setter
@@ -666,6 +934,19 @@ class Designer:
 
     @property
     def sampling_times_candidates(self):
+        """numpy.ndarray: Candidate sampling times, ``(n_c, n_spt)``.
+
+        One row per candidate giving the times at which that experiment may be
+        measured. Rows may be padded with ``numpy.nan`` when candidates have
+        different numbers of usable times.
+
+        With ``optimize_sampling_times=False`` every listed time is measured.
+        With it True the optimiser also chooses WHICH of them to use, and
+        ``n_spt=k`` restricts each experiment to k samples — the same candidate
+        may then appear under several sampling schedules.
+
+        Assigning marks the candidate set changed.
+        """
         return self._sptc
 
     @sampling_times_candidates.setter
@@ -675,6 +956,19 @@ class Designer:
 
     @property
     def dw_tic(self):
+        """numpy.ndarray: Time-invariant controls at the operating point(s) of
+        interest, shape ``(r_w, n_tic)``.
+
+        Where you intend to OPERATE, as opposed to where you intend to
+        experiment. V-optimal design minimises prediction variance here rather
+        than parameter variance everywhere, so these are the conditions the
+        design is ultimately serving.
+
+        Either set directly, or obtained from
+        :meth:`find_optimal_operating_point`. The setter stores it as 2-D,
+        marks ``_dw_fixed``, and invalidates the cached ``W`` matrix so it is
+        rebuilt at the new point. Setting ``None`` clears all three.
+        """
         return self._dw_tic
 
     @dw_tic.setter
@@ -712,6 +1006,14 @@ class Designer:
 
     @property
     def dw_tvc(self):
+        """numpy.ndarray: Time-varying controls at the operating point(s) of
+        interest, shape ``(r_w, n_tvc)``.
+
+        The time-varying counterpart of :attr:`dw_tic`. Leave as an empty array
+        for models without time-varying controls, which is the common case —
+        :meth:`design_v_optimal` handles an empty ``dw_tvc`` and only requires
+        :attr:`dw_tic`.
+        """
         return self._dw_tvc
 
     @dw_tvc.setter
@@ -729,8 +1031,102 @@ class Designer:
             return
         self._dw_tvc = np.atleast_2d(np.asarray(value, dtype=float))
 
+    @property
+    def interest_parameters(self):
+        """ Names of the model parameters of interest for Ds-optimal design. """
+        if self.ds_interest_names is None:
+            return None
+        return list(self.ds_interest_names)
+
+    @interest_parameters.setter
+    def interest_parameters(self, names):
+        """
+        Set the SUBSET of model parameters that are of interest for
+        Ds-optimal design (ds_opt_criterion), given BY NAME.
+
+        Parameters are matched against designer.model_parameter_names by
+        exact string equality — never by index/position. This matters
+        because the position of a parameter in the FIM, in a Pyomo model's
+        internal variable ordering, or in the ASL primal vector can shift
+        depending on how the model's equations happen to be declared;
+        position is not a stable identifier. Name matching is the same
+        principle already used for IFT column-matching elsewhere in this
+        file (see _match_nlp_var): the name is the single source of truth,
+        position is not assumed.
+
+        The lookup itself is deferred to first use (inside
+        _resolve_ds_idx()), because model_parameter_names is only
+        guaranteed to be populated once initialize() has run (or the user
+        has assigned it explicitly) — interest_parameters may be set before
+        that point.
+
+        The complementary parameters (by name) are treated as nuisance
+        parameters and marginalised out via the Schur complement of the
+        FIM.
+
+        Parameters
+        ----------
+        names : list[str] or None
+            Must match entries of designer.model_parameter_names exactly.
+            Set to None to reset (invalidates ds_opt_criterion until re-set).
+
+        Examples
+        --------
+        designer.model_parameter_names = ["Ka", "A0", "k1", "k2"]
+        designer.interest_parameters = ["Ka", "A0"]   # k1, k2 are nuisance
+        """
+        if names is None:
+            self.ds_interest_names = None
+            self.ds_interest_idx   = None
+            self.ds_nuisance_idx   = None
+            return
+        names = list(np.atleast_1d(np.asarray(names, dtype=object)))
+        if not names or not all(isinstance(nm, str) for nm in names):
+            raise TypeError(
+                "interest_parameters must be given as a list of parameter "
+                "NAMES (str) matching designer.model_parameter_names, e.g. "
+                "designer.interest_parameters = ['Ka', 'A0']. Selecting "
+                "parameters by numeric index/position is not supported: "
+                "position is not guaranteed to be stable across different "
+                "orderings of a Pyomo model's equations/variables."
+            )
+        deduped = list(dict.fromkeys(names))  # de-dup, order-preserving
+
+        # Fail fast: if model_parameter_names is already known at assignment
+        # time, validate the subset relationship immediately — BEFORE
+        # committing any state — rather than waiting for _resolve_ds_idx()
+        # to be reached inside a criterion evaluation (e.g. mid-solve). This
+        # also ensures a rejected assignment leaves interest_parameters
+        # unchanged rather than partially applied. If model_parameter_names
+        # isn't set yet, this check is skipped here and deferred to
+        # _resolve_ds_idx().
+        if self.model_parameter_names is not None:
+            known = set(self.model_parameter_names)
+            unknown = [nm for nm in deduped if nm not in known]
+            if unknown:
+                raise ValueError(
+                    f"interest_parameters {unknown} not found in "
+                    f"model_parameter_names {list(self.model_parameter_names)}. "
+                    f"interest_parameters must be a SUBSET of "
+                    f"model_parameter_names, matched by exact name."
+                )
+
+        self.ds_interest_names = deduped
+        # invalidate any previously resolved positions; re-resolved lazily
+        # (by name) the next time a Ds-optimal criterion is evaluated.
+        self.ds_interest_idx = None
+        self.ds_nuisance_idx = None
+
     @staticmethod
     def detect_sensitivity_analysis_function():
+        """Identify which sensitivity routine is on the call stack.
+
+        Walks the frames to find the caller, so warnings and diagnostics can
+        name the routine they came from. Internal utility.
+
+        Returns:
+            str: Name of the detected sensitivity function.
+        """
         frame = sys._getframe(1)
         while frame:
             if "numdifftools" in frame.f_code.co_filename:
@@ -742,6 +1138,38 @@ class Designer:
 
     """ user-defined methods: must be overwritten by user to work """
     def simulate(self, unspecified):
+        """Your model. Assign a callable to this attribute before use.
+
+        pydex calls it once per candidate (and once per parameter perturbation
+        when finite-differencing), and infers the model type from the ARGUMENT
+        NAMES — so use exactly these, in this order:
+
+        1. ``simulate(ti_controls, model_parameters)`` — static
+        2. ``simulate(ti_controls, sampling_times, model_parameters)`` — dynamic
+        3. ``simulate(tv_controls, sampling_times, model_parameters)`` — dynamic,
+           time-varying controls only
+        4. ``simulate(ti_controls, tv_controls, sampling_times, model_parameters)``
+        5. ``simulate(sampling_times, model_parameters)`` — no controls
+
+        Return a numpy array: shape ``(n_r,)`` for a static model, or
+        ``(n_spt, n_r)`` for a dynamic one. ``n_r`` is inferred from the first
+        call during :meth:`initialize`.
+
+        For Pyomo models, also set :attr:`pyomo_model_fn` to get exact implicit
+        function theorem derivatives instead of finite differences — faster and
+        several orders of magnitude more accurate.
+
+        Raises:
+            SyntaxError: If called while still unassigned.
+
+        Example:
+            >>> def simulate(ti_controls, sampling_times, model_parameters):
+            ...     CA0 = ti_controls[0]
+            ...     k = model_parameters[0]
+            ...     t = np.asarray(sampling_times)
+            ...     return (CA0 * np.exp(-k * t)).reshape(-1, 1)
+            >>> designer.simulate = simulate
+        """
         raise SyntaxError("Don't forget to specify the simulate function.")
 
     """ core activity interfaces """
@@ -892,6 +1320,12 @@ class Designer:
                 f"[WARNING]: because the error_cov is not given, Pydex defaults to the "
                 f"identity matrix of size {self.n_m_r}x{self.n_m_r}.")
             self.error_cov = np.eye(self.n_m_r)
+            # Remember that this was a default, not a user statement. Downstream
+            # code cannot otherwise tell "the noise really is unit variance"
+            # from "nothing was supplied" -- run_estimability() needs the
+            # difference to decide whether a noise-weighted ranking is
+            # meaningful or fabricated.
+            self._error_cov_defaulted = True
         try:
             self.error_fim = np.linalg.inv(self.error_cov)
         except np.linalg.LinAlgError:
@@ -927,6 +1361,16 @@ class Designer:
 
     def simulate_candidates(self, store_predictions=True,
                             plot_simulation_times=False):
+        """Run :attr:`simulate` at every candidate and store the responses.
+
+        Populates :attr:`response`, which the prediction plots need. Does not
+        compute sensitivities.
+
+        Args:
+            store_predictions (bool): Keep the responses on the designer.
+            plot_simulation_times (bool): Plot per-candidate wall-clock time —
+                useful for spotting candidates where the model struggles.
+        """
         self.response = None  # resets response every time simulation is invoked
         self.feval_simulation = 0
         time_list = []
@@ -969,6 +1413,11 @@ class Designer:
         return self.response
 
     def simulate_optimal_candidates(self):
+        """Run :attr:`simulate` at the SELECTED candidates only.
+
+        Cheaper than :meth:`simulate_candidates` once a design exists. Prompts
+        before overwriting stored responses.
+        """
         if self.response is not None:
             overwrite = input("Previously stored responses data detected. "
                               "Running this will overwrite stored responses for the "
@@ -1555,8 +2004,8 @@ class Designer:
                 cdf, pdf = fig[0], fig[1]
                 cdf.axes[0].set_xlim(xlims[:, 0].min(), xlims[:, 1].max())
                 pdf.axes[0].set_xlim(xlims[:, 0].min(), xlims[:, 1].max())
-                cdf.tight_layout()
-                pdf.tight_layout()
+                _safe_tight_layout(cdf)
+                _safe_tight_layout(pdf)
                 if write:
                     fn_cdf = f"iter_{i + 1}_cdf_{self.beta}_beta_{self.n_scr}_scr"
                     fp_cdf = self._generate_result_path(fn_cdf, "png")
@@ -1674,38 +2123,191 @@ class Designer:
         min_eff = getattr(self, '_min_effort', 0.0) or 0.0
         use_minlp = (min_eff > 0.0)
 
-        # Ensure atomic FIMs are available and correctly sized for the current
-        # effort vector.  The cache may be stale when n_spt has changed since
-        # the last design_experiment call (e.g. n_spt=1 followed by n_spt=2):
-        # n_e = e0.size reflects the new n_spt_comb but atomic_fims still has
-        # the old count, causing an IndexError at A[i,j,k] below.
-        if self.atomic_fims is None or len(self.atomic_fims) != n_e:
-            self._fd_jac = True
-            self._compute_atomics = True
-            self.eval_fim(e0)
-
-        A = np.asarray(self.atomic_fims)   # (n_e, n_mp, n_mp)
-        n_mp = self.n_mp
+        # Identify criterion type. This must happen BEFORE the atomic-FIM
+        # guard below, because the pseudo-Bayesian type-0 path draws its
+        # atomics from a different array.
         crit_name = getattr(criterion, '__name__', '')
-
-        # Identify criterion type
-        crit_name = getattr(criterion, '__name__', '')
-        is_d   = 'd_opt'  in crit_name and 'pb' not in crit_name
+        is_ds  = 'ds_opt' in crit_name and 'pb' not in crit_name
+        is_d   = 'd_opt'  in crit_name and 'pb' not in crit_name and not is_ds
         is_a   = 'a_opt'  in crit_name and 'pb' not in crit_name
         is_e   = 'e_opt'  in crit_name and 'pb' not in crit_name
         is_v   = 'v_opt'  in crit_name
         is_pb  = self._pseudo_bayesian   # set by design_experiment() before we get here
 
-        # Pseudo-Bayesian problems: criterion callable receives per-scenario FIMs at
-        # runtime — cannot be expressed as static Pyomo expressions. Use SLSQP.
-        # Also fall back for any criterion not recognised as a native Pyomo type.
-        is_native = (is_d or is_a or is_e or is_v) and not is_pb
+        # Pseudo-Bayesian "average information" (type 0) evaluates the criterion
+        # at the SCENARIO-AVERAGED information matrix, f(meanₛ FIMₛ(e)). Since
+        # every scenario FIM is linear in the efforts,
+        #
+        #     meanₛ FIMₛ(e) = meanₛ Σᵢ eᵢ·Aᵢ⁽ˢ⁾ = Σᵢ eᵢ·(meanₛ Aᵢ⁽ˢ⁾)
+        #
+        # the averaged FIM has exactly the same linear-in-e structure as a local
+        # FIM assembled from scenario-averaged atomic FIMs. The existing native
+        # formulations therefore apply verbatim — no per-scenario Cholesky
+        # blocks, no extra variables — so type-0 can be solved symbolically
+        # instead of by finite-difference SLSQP. Verified numerically for
+        # d/a/e/ds: the type-0 criterion value and the corresponding local
+        # criterion on averaged atomics agree to machine precision.
+        #
+        # Type 1 ("average criterion") is meanₛ f(FIMₛ) and does NOT reduce this
+        # way — it needs one lifted block per scenario — so it keeps the SLSQP
+        # fallback.
+        #
+        # V-optimality is excluded deliberately: v_opt_criterion has no
+        # pseudo-Bayesian branch at all (there is no _pb_v_opt_criterion), so
+        # there is no reference behaviour to validate a native pb-V solve
+        # against, and the semantics of the W matrix under scenario averaging
+        # are unspecified.
+        #
+        # CVaR reaches _solve_pyomo_cvar before this point, but is excluded
+        # explicitly so this stays correct if that dispatch ever changes.
+        _pb_type0 = (
+            is_pb
+            and not getattr(self, '_cvar_problem', False)
+            and self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]
+            and (is_d or is_a or is_e or is_ds)
+        )
+
+        # Any criterion not recognised as a native Pyomo type — and any
+        # pseudo-Bayesian problem other than the type-0 case above — falls back
+        # to scipy SLSQP on the criterion callable.
+        is_native = (
+            (is_d or is_a or is_e or is_v or is_ds) and (not is_pb or _pb_type0)
+        )
 
         # For non-native criteria fall back to scipy SLSQP
         if not is_native:
             return self._solve_scipy_slsqp(
                 criterion, e0, fix_effort, solver_options, **kwargs
             )
+
+        # Ensure atomic FIMs are available and correctly sized for the current
+        # effort vector.  The cache may be stale when n_spt has changed since
+        # the last design_experiment call (e.g. n_spt=1 followed by n_spt=2):
+        # n_e = e0.size reflects the new n_spt_comb but atomic_fims still has
+        # the old count, causing an IndexError at A[i,j,k] below.
+        if _pb_type0:
+            _pb_atoms = self.pb_atomic_fims
+            _stale = (
+                _pb_atoms is None
+                or np.asarray(_pb_atoms).ndim != 4
+                or np.asarray(_pb_atoms).shape[0] != self.n_scr
+                or np.asarray(_pb_atoms).shape[1] != n_e
+            )
+            if _stale:
+                self._fd_jac = True
+                self._compute_pb_atomics = True
+                self.eval_fim(e0)
+                _pb_atoms = self.pb_atomic_fims
+            if _pb_atoms is None:
+                # atomics unavailable (e.g. large-memory mode) — the symbolic
+                # model cannot be built, so use the callable-based fallback
+                return self._solve_scipy_slsqp(
+                    criterion, e0, fix_effort, solver_options, **kwargs
+                )
+            # (n_scr, n_e, n_mp, n_mp) -> (n_e, n_mp, n_mp)
+            A = np.asarray(_pb_atoms, dtype=float).mean(axis=0)
+            if self._verbose >= 2:
+                print(
+                    f"[_solve_pyomo] pseudo-Bayesian type 0: averaged "
+                    f"{self.n_scr} scenario atomic FIMs; solving natively "
+                    f"with {crit_name} instead of the SLSQP fallback."
+                )
+        else:
+            if self.atomic_fims is None or len(self.atomic_fims) != n_e:
+                self._fd_jac = True
+                self._compute_atomics = True
+                self.eval_fim(e0)
+            A = np.asarray(self.atomic_fims)   # (n_e, n_mp, n_mp)
+        n_mp = self.n_mp
+
+        # ── structural-singularity gate ───────────────────────────────────────
+        # A FIM that is rank-deficient at the FULLY-SUPPORTED design is singular
+        # for every admissible design. The solve may still "succeed" -- the
+        # Cholesky-lifted log-det has a floored diagonal, so an interior-point
+        # method can report optimality at a point propped up by that floor --
+        # but the resulting criterion value rests on information the data does
+        # not contain. Downstream symptoms are apportion() reporting the rounded
+        # design as a fraction of a percent as informative as the continuous
+        # one, with a Kiefer bound of 0.00%.
+        #
+        # Ds-optimality is the exception: it is DESIGNED for this situation and
+        # is well posed as long as the deficiency stays inside the nuisance
+        # block, which _ds_eval_schur() checks directly. So it is exempt here.
+        if not getattr(self, "_allow_singular_fim", False) and not is_ds:
+            _diag = self.diagnose_fim_structure(report=False)
+            if _diag["singular"]:
+                self.diagnose_fim_structure(report=True)
+                raise ValueError(
+                    f"The Fisher information matrix is STRUCTURALLY singular: "
+                    f"rank {_diag['rank']} of {_diag['n_mp']} even at the "
+                    f"fully-supported design, so no allocation of effort can "
+                    f"repair it. Parameters implicated: {_diag['culprits']}. "
+                    f"See the table above for the unidentifiable direction(s).\n\n"
+                    f"This criterion asks for the precision of ALL parameters, "
+                    f"which this data cannot deliver. Options:\n"
+                    f"  * reparameterise so the unidentifiable combination "
+                    f"becomes one parameter;\n"
+                    f"  * add measurements that inform the direction;\n"
+                    f"  * fix the offending parameter(s);\n"
+                    f"  * design for a SUBSET instead: set "
+                    f"designer.interest_parameters = [...] (excluding "
+                    f"{_diag['culprits']}) and use designer.ds_opt_criterion;\n"
+                    f"  * or, to proceed anyway and accept a criterion value "
+                    f"that depends on the Cholesky floor, pass "
+                    f"design_experiment(..., allow_singular_fim=True)."
+                )
+
+        # --- Ds-optimal feasibility pre-check ------------------------------
+        # The native Ds formulation lifts BOTH log-det(FIM) and log-det(M_nn)
+        # through Cholesky factors, which requires FIM ≻ 0 and M_nn ≻ 0 at
+        # every iterate. If the nuisance block is rank-deficient even at the
+        # most informative attainable design (all efforts on, i.e. the sum of
+        # every atomic FIM plus any prior), then no feasible effort vector can
+        # make M_nn positive definite and the Pyomo model is infeasible by
+        # construction — IPOPT would report "restoration failed" rather than
+        # anything interpretable.
+        #
+        # This is not a pathological corner: an unidentifiable nuisance
+        # parameter is a normal and well-posed situation for Ds-optimal design,
+        # because the criterion only needs the Schur complement S to be
+        # positive definite, not M_nn. The numpy criterion path handles it via
+        # the generalised (minimum-norm) Schur complement, so fall back to
+        # SLSQP driving that path instead of emitting an infeasible NLP.
+        if is_ds:
+            _idx_s, _idx_n = self._resolve_ds_idx()
+            if len(_idx_n) > 0:
+                _fim_max = np.asarray(A).sum(axis=0)
+                if self._prior_fim is not None:
+                    _fim_max = _fim_max + np.asarray(self._prior_fim)
+                if self._regularize_fim:
+                    _fim_max = _fim_max + self._eps * np.identity(n_mp)
+                _m_nn_max = _fim_max[np.ix_(_idx_n, _idx_n)]
+                _eig = np.linalg.eigvalsh(0.5 * (_m_nn_max + _m_nn_max.T))
+                _tol = max(1.0, float(np.abs(_eig).max())) * 1e-12
+                if _eig.min() <= _tol:
+                    if self._verbose >= 1:
+                        print(
+                            f"[INFO][ds_opt] nuisance block is rank-deficient "
+                            f"even for the fully-supported design "
+                            f"(lambda_min = {_eig.min():.3e}). The native "
+                            f"Cholesky-lifted Pyomo formulation cannot be "
+                            f"feasible, so falling back to SLSQP on the "
+                            f"generalised Schur complement. This is a normal "
+                            f"situation for Ds-optimal design and the result "
+                            f"remains valid IF the Schur complement is "
+                            f"positive definite at the starting design. If it "
+                            f"is not, SLSQP has an infinite objective at the "
+                            f"initial point and no gradient with which to "
+                            f"escape it, so the design will not move and the "
+                            f"criterion will stay infinite -- in that case "
+                            f"enable regularize_fim, which keeps the solve on "
+                            f"the native Cholesky-lifted path where IPOPT can "
+                            f"make progress from an infeasible start. Note the "
+                            f"resulting criterion value then depends on _eps."
+                        )
+                    return self._solve_scipy_slsqp(
+                        criterion, e0, fix_effort, solver_options, **kwargs
+                    )
 
         # --- build Pyomo model ---
         m = pyo.ConcreteModel()
@@ -1804,6 +2406,115 @@ class Designer:
             except np.linalg.LinAlgError:
                 for j in range(n_mp):
                     m.L[j, j].set_value(1.0)
+
+        elif is_ds:
+            # Ds-optimal: maximise log-det(Schur complement of the
+            # nuisance-parameter block), i.e. D-optimality restricted to a
+            # subset of "interest" parameters (indices idx_s) while
+            # marginalising out the "nuisance" parameters (indices idx_n):
+            #
+            #   log-det(S) = log-det(FIM) - log-det(M_nn)
+            #
+            # where M_nn is the FIM sub-block over idx_n and S is the Schur
+            # complement of M_nn in the FIM (Schur determinant identity).
+            #
+            # Both log-dets are lifted via their own Cholesky factors (L for
+            # the full FIM, Ln for M_nn), giving an exact, symbolic Pyomo
+            # formulation — IPOPT differentiates it natively, no finite
+            # differences and no Python callbacks are involved. When there
+            # are no nuisance parameters this reduces exactly to the D-optimal
+            # formulation above.
+            #
+            # The determinant identity is safe to use HERE (unlike in the
+            # numpy criterion path) precisely because the pre-check above has
+            # already established that M_nn can be made positive definite, so
+            # the 0/0 indeterminacy that motivates the direct Schur route in
+            # _ds_eval_schur() cannot arise on this branch.
+            #
+            # Note on convexity: -log-det(S) is convex in the efforts (verified
+            # numerically; S is matrix-concave in the FIM and the FIM is linear
+            # in e), so the underlying problem is convex and the optimum is
+            # global. The lifted form below presents it to IPOPT as convex plus
+            # concave (-2Σlog L_jj + 2Σlog Ln_jj), which can slow convergence
+            # but does not introduce spurious local optima in the design.
+            idx_s, idx_n = self._resolve_ds_idx()
+            n_n = len(idx_n)
+
+            # Scale-aware floor on the Cholesky diagonals. A hard-coded 1e-8
+            # is not scale-free: for a badly scaled FIM whose true Cholesky
+            # diagonal entries are legitimately smaller than the floor, the
+            # bound makes the NLP INFEASIBLE rather than merely regularised.
+            # Referencing the floor to the magnitude of the FIM keeps it a
+            # strictly-positive guard without ever excluding the true solution.
+            _fim_scale = float(np.abs(np.asarray(A).sum(axis=0)).max())
+            _chol_lb = max(1e-12, 1e-10 * np.sqrt(max(_fim_scale, 1e-30)))
+
+            m.L = pyo.Var(m.P, m.P, initialize=0.0)
+            for j in range(n_mp):
+                for k in range(j + 1, n_mp):
+                    m.L[j, k].fix(0.0)
+                m.L[j, j].setlb(_chol_lb)
+
+            def chol_rule(m, j, k):
+                if k > j:
+                    return pyo.Constraint.Skip
+                lhs = fim_expr[j, k]
+                rhs = sum(m.L[j, r] * m.L[k, r] for r in range(k + 1))
+                return lhs == rhs
+            m.chol_con = pyo.Constraint(m.P, m.P, rule=chol_rule)
+
+            if n_n > 0:
+                m.PN = pyo.RangeSet(0, n_n - 1)
+                m.Ln = pyo.Var(m.PN, m.PN, initialize=0.0)
+                for j in range(n_n):
+                    for k in range(j + 1, n_n):
+                        m.Ln[j, k].fix(0.0)
+                    m.Ln[j, j].setlb(_chol_lb)
+
+                def chol_n_rule(m, j, k):
+                    if k > j:
+                        return pyo.Constraint.Skip
+                    jj, kk = int(idx_n[j]), int(idx_n[k])
+                    lhs = fim_expr[jj, kk]
+                    rhs = sum(m.Ln[j, r] * m.Ln[k, r] for r in range(k + 1))
+                    return lhs == rhs
+                m.chol_n_con = pyo.Constraint(m.PN, m.PN, rule=chol_n_rule)
+
+                # minimise -[2*Σ log(L_jj) - 2*Σ log(Ln_jj)]
+                #        = -2*Σ log(L_jj) + 2*Σ log(Ln_jj)
+                m.obj = pyo.Objective(
+                    expr=-2.0 * sum(pyo.log(m.L[j, j]) for j in m.P)
+                         + 2.0 * sum(pyo.log(m.Ln[j, j]) for j in m.PN),
+                    sense=pyo.minimize,
+                )
+            else:
+                # no nuisance parameters: Ds reduces to D-optimality
+                m.obj = pyo.Objective(
+                    expr=-2.0 * sum(pyo.log(m.L[j, j]) for j in m.P),
+                    sense=pyo.minimize,
+                )
+
+            # warm-start L (and Ln) from Cholesky of the initial FIM
+            try:
+                FIM0 = sum(float(e0_flat[i]) * A[i] for i in range(n_e))
+                if self._prior_fim is not None:
+                    FIM0 = FIM0 + prior
+                L0 = np.linalg.cholesky(FIM0 + 1e-6 * np.eye(n_mp))
+                for j in range(n_mp):
+                    for k in range(j + 1):
+                        m.L[j, k].set_value(float(L0[j, k]))
+                if n_n > 0:
+                    M_nn0 = FIM0[np.ix_(idx_n, idx_n)]
+                    Ln0 = np.linalg.cholesky(M_nn0 + 1e-6 * np.eye(n_n))
+                    for j in range(n_n):
+                        for k in range(j + 1):
+                            m.Ln[j, k].set_value(float(Ln0[j, k]))
+            except np.linalg.LinAlgError:
+                for j in range(n_mp):
+                    m.L[j, j].set_value(1.0)
+                if n_n > 0:
+                    for j in range(n_n):
+                        m.Ln[j, j].set_value(1.0)
 
         elif is_a:
             # A-optimal: minimise trace(FIM⁻¹)
@@ -2065,19 +2776,25 @@ class Designer:
 
         class _OpModel(ExternalGreyBoxModel):
             def input_names(self):
+                """list of str: Primal variable names, for the cyipopt interface."""
                 return [f"x{i}" for i in range(n_x)]
             def equality_constraint_names(self):
+                """list of str: Equality constraint names, for cyipopt."""
                 return [f"eq{k}" for k in range(n_eq)]
             def output_names(self):
+                """list of str: Output names, for cyipopt."""
                 return []
             def set_input_values(self_, x):
+                """Set the primal values at which the callbacks are evaluated."""
                 self_._x = np.array(x)
             def evaluate_equality_constraints(self_):
+                """Return the equality constraint residuals at the current point."""
                 eq_vals = [float(c["fun"](
                     self_._x[:n_tic], self_._x[n_tic:], dr.model_parameters
                 )) for c in raw_cons if c["type"] == "eq"]
                 return np.array(eq_vals)
             def evaluate_jacobian_equality_constraints(self_):
+                """Return the Jacobian of the equality constraints, sparse."""
                 import scipy.sparse as sp
                 rows, cols, vals = [], [], []
                 eq_idx = 0
@@ -2599,9 +3316,81 @@ class Designer:
                           save_sensitivities=False, trim_fim=False,
                           pseudo_bayesian_type=None, regularize_fim=False, beta=0.90,
                           min_expected_value=None, fix_effort=None, save_atomics=False,
-                          min_effort=None, **kwargs):
+                          min_effort=None, allow_singular_fim=False, **kwargs):
+        """Solve for the optimal continuous experimental design.
+
+        The central method of the package. Allocates a unit budget of
+        experimental effort across the candidate grid so as to optimise
+        ``criterion``, returning a CONTINUOUS design — a weight in [0, 1] per
+        candidate, summing to one. Use :meth:`apportion` to turn that into whole
+        experimental runs.
+
+        Which solver actually runs depends on the criterion. D, A, E, V, Ds and
+        pseudo-Bayesian type 0 are built as symbolic Pyomo programs and passed to
+        ``solver``. Everything else — the generalized/individual family, CVaR,
+        and pseudo-Bayesian type 1 — is handed to scipy's SLSQP as a black box,
+        in which case ``solver`` is IGNORED and ``solver_options`` is filtered to
+        ``ftol``/``maxiter``/``disp``. See the class docstring, "Which solver
+        actually runs".
+
+        Args:
+            criterion (callable): A bound criterion method such as
+                ``designer.d_opt_criterion``, or any callable taking the effort
+                vector and returning a scalar to MINIMISE.
+            n_spt (int, optional): Restrict each experiment to exactly this many
+                samples. Requires ``optimize_sampling_times=True``. Clear
+                :attr:`atomic_fims` first if changing it between runs.
+            n_exp (int, optional): Solve for a discrete design of this many
+                experiments instead of a continuous one.
+            optimize_sampling_times (bool): Also choose WHEN to sample, rather
+                than measuring every listed time.
+            solver (str): NLP solver for the native Pyomo path — any
+                AMPL-compatible solver. Ignored on the SLSQP path.
+            solver_options (dict, optional): Passed to the solver. On the SLSQP
+                path all but ``ftol``/``maxiter``/``disp`` are silently dropped.
+            e0 (numpy.ndarray, optional): Initial effort vector.
+            write (bool): Write the result to the result directory.
+            save_sensitivities (bool): Cache sensitivities to disk.
+            trim_fim (bool): Drop uninformative rows/columns from the FIM.
+            pseudo_bayesian_type (int or str, optional): 0 or ``'avg_inf'`` to
+                average the information matrices, 1 or ``'avg_crit'`` to average
+                the criterion. Required when :attr:`model_parameters` is a
+                scenario array.
+            regularize_fim (bool): Add ``_eps * I`` to the FIM. NOTE this
+                OVERWRITES ``self._regularize_fim`` from the keyword, so setting
+                that attribute directly has no effect.
+            beta (float): CVaR confidence level.
+            min_expected_value (float, optional): CVaR constraint.
+            fix_effort (numpy.ndarray, optional): Fix part of the effort vector.
+            save_atomics (bool): Cache the atomic FIMs to disk.
+            min_effort (float, optional): Enforce a minimum non-zero effort,
+                turning the problem into an MINLP and giving a sparser design.
+            allow_singular_fim (bool): Proceed even when the FIM is
+                structurally singular. By default the solve is refused with a
+                diagnosis naming the responsible parameters, because a criterion
+                value obtained from a rank-deficient FIM rests on the Cholesky
+                floor rather than on information the data contains.
+            **kwargs: Forwarded to the solver interface.
+
+        Returns:
+            The optimisation result object. The design itself is on the
+            designer: :attr:`efforts`, and ``_criterion_value``.
+
+        Raises:
+            ValueError: If the FIM is structurally singular and
+                ``allow_singular_fim`` is False.
+
+        Note:
+            Ds-optimality is exempt from the singularity gate — it is designed
+            for that case and checks its own Schur complement instead.
+        """
         # storing user choices
         self._regularize_fim = regularize_fim
+        # Clear the latched det/pseudo-det decision for dg/di/vdi so each design
+        # run re-decides from scratch (the choice must be fixed WITHIN a run, but
+        # not carried across runs whose sensitivities may differ).
+        self.reset_pvar_logdet_mode()
+        self._allow_singular_fim = bool(allow_singular_fim)
         self._solver         = solver
         self._fd_jac         = True          # always True; gradient strategy is internal
         self._unconstrained_form = False     # no longer a user concern
@@ -2830,6 +3619,18 @@ class Designer:
         return self.oed_result
 
     def plot_criterion_cdf(self, write=False, iteration=None, dpi=360, figsize=(4.5, 3.5), annotate=False, minor_ticks=False, legend=False, grid=False):
+        """Plot the cumulative distribution of the criterion across scenarios.
+
+        Pseudo-Bayesian only. Shows how the design performs over the parameter
+        prior rather than at a single nominal — what a CVaR design targets.
+
+        Args:
+            write (bool): Save to the result directory.
+            iteration (int, optional): Label for a CVaR iteration.
+            dpi (int): Resolution when writing.
+            figsize (tuple): Figure size.
+            annotate (bool): Annotate the quantiles.
+        """
         if not self._pseudo_bayesian or not self._cvar_problem:
             raise SyntaxError(
                 "Plotting cumulative distribution function only valid for pseudo-"
@@ -2934,7 +3735,7 @@ class Designer:
                         "edgecolor": "k",
                     },
                 )
-            fig.tight_layout()
+            _safe_tight_layout(fig)
         else:
             raise NotImplementedError(
                 "Plotting cumulative distribution function not implemented for pseudo-"
@@ -2949,6 +3750,19 @@ class Designer:
         return fig
 
     def plot_criterion_pdf(self, n_bins=20, write=False, iteration=None, dpi=360):
+        """Plot the criterion distribution across scenarios as a histogram.
+
+        Pseudo-Bayesian counterpart of :meth:`plot_criterion_cdf`.
+
+        Args:
+            n_bins (int): Histogram bins.
+            write (bool): Save to the result directory.
+            iteration (int, optional): Label for a CVaR iteration.
+            dpi (int): Resolution when writing.
+
+        Raises:
+            SyntaxError: For non-pseudo-Bayesian designs.
+        """
         if not self._pseudo_bayesian or not self._cvar_problem:
             raise SyntaxError(
                 "Plotting probability density function only valid for pseudo-"
@@ -2966,7 +3780,7 @@ class Designer:
             axes.set_xlabel(f"{self._current_criterion}")
             axes.set_ylabel("Frequency")
             axes.legend()
-            fig.tight_layout()
+            _safe_tight_layout(fig)
         else:
             raise NotImplementedError(
                 "Plotting probability density function not implemented for pseudo-"
@@ -2981,6 +3795,19 @@ class Designer:
         return fig
 
     def compute_criterion_value(self, criterion, decimal_places=3):
+        """Evaluate a criterion at the design currently held in :attr:`efforts`.
+
+        Useful for scoring a design under a criterion other than the one it was
+        optimised for, or for scoring a hand-specified effort vector.
+
+        Args:
+            criterion (callable): A bound criterion method.
+            decimal_places (int): Rounding for the printed value.
+
+        Returns:
+            float: The criterion value. Note criteria are MINIMISED, so lower is
+            better and ``+inf`` marks an unusable information matrix.
+        """
         crit_val = criterion(self.efforts)
         if isinstance(crit_val, tuple):
             crit_val = crit_val[0]
@@ -2990,6 +3817,31 @@ class Designer:
         return crit_val
 
     def apportion(self, n_exp, method="adams", trimmed=True, compute_actual_efficiency=True):
+        """Round a continuous design into a whole number of experimental runs.
+
+        A continuous design gives fractional effort per candidate, which cannot
+        be performed. This converts it into integer run counts totalling
+        ``n_exp``, and reports how much information the rounding costs.
+
+        Two rules are used depending on the budget. When ``n_exp`` exceeds the
+        number of supports every support gets at least one run and the remainder
+        is shared proportionally (Adams divisor method); when it does not, the
+        ``n_exp`` largest-effort supports are selected and run once each.
+
+        Args:
+            n_exp (int): Number of experimental runs to allocate.
+            method (str): Divisor method for the proportional case.
+            trimmed (bool): Drop zero-effort candidates before apportioning.
+            compute_actual_efficiency (bool): Also evaluate the criterion at the
+                rounded design and report it as a percentage of the continuous
+                one.
+
+        Note:
+            Read the reported efficiency, not just the run counts. A rounded
+            design worth a fraction of a percent of the continuous one usually
+            means the continuous optimum rests on a near-singular direction that
+            rounding destroys — check :meth:`diagnose_fim_structure` if so.
+        """
         self.n_exp = n_exp
 
         _original_save_atomics = np.copy(self._save_atomics)
@@ -3020,8 +3872,25 @@ class Designer:
             if total > 0:
                 flat_efforts = flat_efforts / total
 
-            # Adams apportionment on the flat vector
-            if len(flat_efforts) < n_exp:
+            # Choose the rounding rule by comparing the budget with the number
+            # of supports.
+            #
+            # The condition here used to be  len(flat_efforts) < n_exp,  which is
+            # backwards and under-allocated the budget badly. Worked example:
+            # 2 optimal candidates x 2 sampling schedules = 4 supports with
+            # apportion(12) took the greatest-effort branch, and that routine
+            # assigns AT MOST ONE run per support (it zeroes each chosen effort
+            # and writes  = 1  rather than  += 1). The result was 4 experiments
+            # allocated out of 12 requested, reported as "Run 2/12" per
+            # candidate, with 8 runs silently dropped.
+            #
+            #   n_exp <= n_supports : cannot run every support even once, so pick
+            #                         the n_exp largest and run each once
+            #                         -> greatest-effort selection
+            #   n_exp >  n_supports : every support gets at least one run and the
+            #                         remainder must be shared proportionally
+            #                         -> Adams (divisor-method) apportionment
+            if n_exp <= len(flat_efforts):
                 app_flat = self._greatest_effort_apportionment(flat_efforts, n_exp)
             else:
                 app_flat = self._adams_apportionment(flat_efforts, n_exp)
@@ -3054,9 +3923,9 @@ class Designer:
                     if self._invariant_controls:
                         print("Time-invariant Controls:")
                         print(opt_cand[1])
-                    print("Sampling Time Variants:")
+                    print("Sampling Schedules  (same experimental conditions, different sampling times):")
                     for comb, (spt_comb, app) in enumerate(zip(opt_cand[3], app_eff)):
-                        print(f"  Variant {comb + 1} ~ [", end='')
+                        print(f"  Schedule {comb + 1} ~ [", end='')
                         for sp_time in spt_comb:
                             print(f"{f'{sp_time:.2f}':>10}", end='')
                         print(f"]: Run {f'{app:.0f}/{np.nansum(app_eff):.0f}':>6} experiments, "
@@ -3139,9 +4008,9 @@ class Designer:
                 if self._dynamic_system:
                     if self._opt_sampling_times:
                         if self._specified_n_spt:
-                            print("Sampling Time Variants:")
+                            print("Sampling Schedules  (same experimental conditions, different sampling times):")
                             for comb, spt_comb in enumerate(opt_cand[3]):
-                                print(f"  Variant {comb + 1} ~ [", end='')
+                                print(f"  Schedule {comb + 1} ~ [", end='')
                                 for j, sp_time in enumerate(spt_comb):
                                     print(f"{f'{sp_time:.2f}':>10}", end='')
                                 print("]: ", end='')
@@ -3191,6 +4060,13 @@ class Designer:
                     rounded_criterion_value = getattr(self, self._current_criterion)(non_trimmed_rounded_efforts)
                 if self._current_criterion == "d_opt_criterion":
                     efficiency = np.exp(1 / self.n_mp * (-rounded_criterion_value - self._criterion_value))
+                elif self._current_criterion == "ds_opt_criterion":
+                    # same D-efficiency formula, but referenced to the number
+                    # of INTEREST parameters (n_s), since Ds-optimality is
+                    # D-optimality on the Schur-complement subspace of size n_s
+                    idx_s, _ = self._resolve_ds_idx()
+                    n_s = len(idx_s)
+                    efficiency = np.exp(1 / n_s * (-rounded_criterion_value - self._criterion_value))
                 elif self._current_criterion == "a_opt_criterion":
                     efficiency = -self._criterion_value / rounded_criterion_value
                 elif self._current_criterion == "e_opt_criterion":
@@ -3242,15 +4118,34 @@ class Designer:
                 self.apportionments[candidate_to_increase] += 1
 
     def _greatest_effort_apportionment(self, efforts, n_exp):
-        self.apportionments = np.zeros_like(efforts)
-        chosen_supports = []
-        for _ in range(n_exp):
-            chosen_support = np.where(efforts == np.nanmax(efforts))[0]
-            chosen_support = np.random.choice(chosen_support)
-            efforts[chosen_support] = 0
-            chosen_supports.append(chosen_support)
-        for support in chosen_supports:
-            self.apportionments[support] = 1
+        """
+        Select the n_exp largest-effort supports and run each exactly ONCE.
+
+        This is a SELECTION rule, not an apportionment rule: it can never
+        allocate more than one run per support, so it is only meaningful when
+        n_exp <= len(efforts). Use _adams_apportionment when the budget exceeds
+        the number of supports. Calling it outside that regime silently
+        under-allocates, which is what a previously inverted branch condition in
+        apportion() did.
+
+        Works on a COPY: the original implementation zeroed entries of the
+        caller's array as it went, corrupting the effort vector for anything
+        that used it afterwards.
+        """
+        work = np.array(efforts, dtype=float).copy()
+        self.apportionments = np.zeros_like(work)
+        n_avail = int(np.sum(np.isfinite(work)))
+        if n_exp > n_avail:
+            print(f"[WARNING][apportion] greatest-effort selection can assign at "
+                  f"most one run per support, but {n_exp} runs were requested for "
+                  f"{n_avail} support(s). Only {n_avail} will be allocated; use "
+                  f"Adams apportionment for budgets larger than the support "
+                  f"count.")
+        for _ in range(min(int(n_exp), n_avail)):
+            candidates = np.where(work == np.nanmax(work))[0]
+            chosen = int(np.random.choice(candidates))
+            work[chosen] = -np.inf          # exclude without pretending it is 0
+            self.apportionments[chosen] = 1
         return self.apportionments
 
     @staticmethod
@@ -3273,6 +4168,24 @@ class Designer:
         return self.grid
 
     def enumerate_candidates(self, bounds, levels, switching_times=None):
+        """Build a full factorial grid of candidate experiments.
+
+        Args:
+            bounds (list): ``[[lo, hi], ...]``, one pair per control.
+            levels (list): ``[n, ...]``, how many evenly spaced values to take
+                for each control. The grid has ``prod(levels)`` rows.
+            switching_times (list, optional): For time-varying controls, the
+                times at which each control may change value.
+
+        Returns:
+            numpy.ndarray: The candidate grid, ready to assign to
+            :attr:`ti_controls_candidates`.
+
+        Note:
+            The grid bounds what any design can achieve — the optimiser
+            allocates effort across these rows and cannot interpolate between
+            them. A denser grid costs sensitivity evaluations linearly.
+        """
         # use create_grid if only time-invariant controls
         if switching_times is None:
             return self.create_grid(bounds, levels)
@@ -3357,6 +4270,22 @@ class Designer:
     # visualization and result retrieval
     def plot_optimal_efforts(self, width=None, write=False, dpi=720,
                              force_3d=False, tol=1e-4, heatmap=False, figsize=None):
+        """Plot the optimal effort allocation across candidates.
+
+        A 2-D bar chart for static designs, 3-D (candidate x sampling time) when
+        sampling times were optimised, or a heat map on request.
+
+        Args:
+            width (float, optional): Bar width.
+            write (bool): Save to the result directory.
+            dpi (int): Resolution when writing.
+            force_3d (bool): Use the 3-D view even for a static design.
+            tol (float): Effort below which a candidate is omitted.
+            heatmap (bool): Draw a heat map instead of bars.
+
+        Returns:
+            matplotlib.figure.Figure
+        """
         if self.optimal_candidates is None:
             self.get_optimal_candidates()
         if self.n_opt_c == 0:
@@ -3518,7 +4447,7 @@ class Designer:
         im, cbar = self._heatmap(eff * 100, c_id, spt_id, ax=ax, cmap="YlGn")
         texts = self._annotate_heatmap(im, valfmt="{x:.2f}%")
 
-        fig.tight_layout()
+        _safe_tight_layout(fig)
         if write:
             fn = f'efforts_heatmap_{self._current_criterion}'
             fp = self._generate_result_path(fn, "png")
@@ -3529,6 +4458,20 @@ class Designer:
     def plot_optimal_controls(self, alpha=0.3, markersize=3, non_opt_candidates=False,
                               n_ticks=3, visualize_efforts=True, tol=1e-4,
                               intervals=None, title=False, write=False, dpi=720):
+        """Plot where the optimal experiments sit in control space.
+
+        Scatters the selected candidates over the control variables, so the
+        design reads as a region rather than a list of indices.
+
+        Args:
+            alpha (float): Opacity of non-selected candidate markers.
+            markersize (float): Marker size.
+            non_opt_candidates (bool): Also show candidates carrying no effort.
+            n_ticks (int): Ticks per control axis.
+
+        Returns:
+            matplotlib.figure.Figure
+        """
         if self._dynamic_system:
             print(
                 "[Warning]: Plot optimal controls is not implemented for dynamic "
@@ -3609,7 +4552,7 @@ class Designer:
                     n_ticks,
                 )
             )
-            fig.tight_layout()
+            _safe_tight_layout(fig)
         elif self.n_tic == 3:
             fig = plt.figure()
             axes = fig.add_subplot(111, projection="3d")
@@ -3636,7 +4579,7 @@ class Designer:
                 axes.set_ylabel(f"{self.ti_controls_names[1]}")
                 axes.set_zlabel(f"{self.ti_controls_names[2]}")
             axes.grid(False)
-            fig.tight_layout()
+            _safe_tight_layout(fig)
         elif self.n_tic == 4:
             trellis_plotter = TrellisPlotter()
             trellis_plotter.data = self.ti_controls_candidates
@@ -3654,6 +4597,17 @@ class Designer:
         return fig
 
     def plot_predictions(self, figsize=None, label_candidates=True):
+        """Plot predicted responses over time for every candidate.
+
+        Requires a dynamic model and a prior :meth:`simulate_candidates`.
+
+        Args:
+            figsize (tuple, optional): Figure size.
+            label_candidates (bool): Label each trajectory.
+
+        Raises:
+            NotImplementedError: For static models.
+        """
         if not self._dynamic_system:
             raise NotImplementedError(
                 f"Plot predictions not supported for non-dynamic systems."
@@ -3704,11 +4658,22 @@ class Designer:
                             axes.set_title(f"{self.candidate_names[cand]}")
             if self.response_names is not None:
                 fig.suptitle(f"Response: {self.response_names[res]}")
-            fig.tight_layout()
+            _safe_tight_layout(fig)
             figs.append(fig)
         return figs
 
     def plot_sensitivities(self, absolute=False, legend=None, figsize=None):
+        """Plot parameter sensitivities over time for every candidate.
+
+        One panel per response, one line per parameter — useful for seeing which
+        parameters are excited when, and therefore where samples are worth
+        taking.
+
+        Args:
+            absolute (bool): Plot magnitudes rather than signed values.
+            legend (bool, optional): Show the legend.
+            figsize (tuple, optional): Figure size.
+        """
         # n_c, n_s_times, n_res, n_theta = self.sensitivity.shape
         if self.sensitivities is None:
             self.eval_sensitivities()
@@ -3769,12 +4734,28 @@ class Designer:
                 axes[row, col].set_ylabel(ylabel)
                 if legend and self.n_c <= 10:
                     axes[row, col].legend()
-        fig.tight_layout()
+        _safe_tight_layout(fig)
         return [fig]
 
     def plot_optimal_predictions(self, legend=None, figsize=None, markersize=10,
                                  fontsize=10, legend_size=8, colour_map="jet",
                                  write=False, dpi=720):
+        """Plot predicted responses for the SELECTED candidates, with markers at
+        the sampling times.
+
+        Marker size is proportional to the effort allocated there. When sampling
+        times were optimised the legend gains one entry per SAMPLING SCHEDULE —
+        one set of times for that candidate, each with its own marker shape. Two
+        schedules on one candidate mean running that condition more than once,
+        sampling at different times.
+
+        Args:
+            legend (bool, optional): Show the legend.
+            figsize (tuple, optional): Figure size.
+            markersize (float): Base marker size.
+            fontsize (int): Axis label size.
+            legend_size (int): Legend font size.
+        """
         if not self._dynamic_system:
             raise SyntaxError("Prediction plots are only for dynamic systems.")
 
@@ -3913,7 +4894,11 @@ class Designer:
                             marker=marker,
                             s=markersize * 50 * np.array(eff),
                             color=color,
-                            label=f"Variant {i + 1}",
+                            # A "sampling schedule" is one set of sampling
+                            # times for this candidate. The times themselves are
+                            # not repeated here -- the marker positions on the
+                            # time axis already show them.
+                            label=f"Sampling schedule {i + 1}",
                             facecolors="none",
                         )
                 ax.set_xlim(
@@ -3942,7 +4927,7 @@ class Designer:
         if legend and len(self.optimal_candidates) > 1:
             axes[-1].legend(prop={"size": legend_size})
 
-        fig.tight_layout()
+        _safe_tight_layout(fig)
 
         if write:
             fn = f"response_plot_{self.oed_result['optimality_criterion']}"
@@ -3953,6 +4938,15 @@ class Designer:
 
     def plot_optimal_sensitivities(self, figsize=None, markersize=10, colour_map="jet",
                                    write=False, dpi=720, interactive=False):
+        """Plot sensitivities for the selected candidates only.
+
+        Args:
+            figsize (tuple, optional): Figure size.
+            markersize (float): Marker size.
+            colour_map (str): Matplotlib colormap name.
+            write (bool): Save to the result directory.
+            dpi (int): Resolution when writing.
+        """
         if interactive:
             self._plot_optimal_sensitivities_interactive(
                 figsize=figsize,
@@ -3969,6 +4963,18 @@ class Designer:
             )
 
     def plot_pareto_frontier(self, write=False, dpi=720):
+        """Plot the CVaR bi-objective Pareto frontier.
+
+        Meaningful only after a CVaR problem has been solved across several
+        confidence levels.
+
+        Args:
+            write (bool): Save to the result directory.
+            dpi (int): Resolution when writing.
+
+        Raises:
+            SyntaxError: If no CVaR problem has been solved.
+        """
         if not self._cvar_problem:
             raise SyntaxError(
                 "Pareto Frontier can only be plotted after solution of a CVaR problem."
@@ -3983,7 +4989,7 @@ class Designer:
         axes.set_xlabel("Mean Criterion Value")
         axes.set_ylabel(f"CVaR of Bottom {100 * (1 - self.beta):.2f}%")
 
-        fig.tight_layout()
+        _safe_tight_layout(fig)
 
         if write:
             fn = f"optimal_controls_{self.oed_result['optimality_criterion']}"
@@ -3991,6 +4997,17 @@ class Designer:
             fig.savefig(fname=fp, dpi=dpi)
 
     def print_optimal_candidates(self, tol=1e-4):
+        """Print the optimal design as a readable experimental protocol.
+
+        For each supported candidate: its control values, and either the
+        sampling times or — when sampling times were optimised — the SAMPLING
+        SCHEDULES. A schedule is one set of sampling times for that candidate;
+        two schedules on the same candidate mean running that condition more
+        than once, sampling at different times each time.
+
+        Args:
+            tol (float): Effort below which a candidate is omitted.
+        """
         if self.optimal_candidates is None:
             self.get_optimal_candidates(tol)
         if self.n_opt_c == 0:
@@ -4048,9 +5065,9 @@ class Designer:
             if self._dynamic_system:
                 if self._opt_sampling_times:
                     if self._specified_n_spt:
-                        print("Sampling Time Variants:")
+                        print("Sampling Schedules  (same experimental conditions, different sampling times):")
                         for comb, spt_comb in enumerate(opt_cand[3]):
-                            print(f"  Variant {comb+1} ~ [", end='')
+                            print(f"  Schedule {comb+1} ~ [", end='')
                             for j, sp_time in enumerate(spt_comb):
                                 print(f"{f'{sp_time:.2f}':>10}", end='')
                             print("]: ", end='')
@@ -4066,11 +5083,17 @@ class Designer:
         print(f"{'':#^100}")
 
     def start_logging(self):
+        """Redirect stdout to a log file in the result directory.
+
+        Everything printed thereafter — solver output, reports — is captured.
+        Pair with :meth:`stop_logging`.
+        """
         fn = f"log"
         fp = self._generate_result_path(fn, "txt")
         sys.stdout = Logger(file_path=fp)
 
     def stop_logging(self):
+        """Restore stdout after :meth:`start_logging`."""
         sys.stdout = sys.__stdout__
 
     def plot_prediction_variance(self, reso=None, bounds=None, alpha=0.5):
@@ -4258,10 +5281,16 @@ class Designer:
 
     @staticmethod
     def show_plots():
+        """Display all pending matplotlib figures — a thin wrapper on ``plt.show()``."""
         plt.show()
 
     # saving, loading, writing
     def load_oed_result(self, result_path):
+        """Load a design result written by :meth:`write_oed_result`.
+
+        Args:
+            result_path (str): Path relative to the current working directory.
+        """
         with open(getcwd() + result_path, "rb") as file:
             oed_result = dill.load(file)
 
@@ -4289,6 +5318,10 @@ class Designer:
         self._model_parameters_changed = False
 
     def create_result_dir(self):
+        """Create the dated result directory used by the ``write=True`` options.
+
+        Called automatically when needed; safe to call twice.
+        """
         if self.result_dir_daily is None:
             now = datetime.now()
             self.result_dir_daily = getcwd() + "/"
@@ -4302,11 +5335,24 @@ class Designer:
                 makedirs(self.result_dir_daily)
 
     def write_oed_result(self):
+        """Write the design result to the result directory as a pickle.
+
+        Lighter than :meth:`save_state`: the design and its metadata, without
+        the sensitivities.
+        """
         fn = f"{self.oed_result['optimality_criterion']:s}_oed_result"
         fp = self._generate_result_path(fn, "pkl")
         dump(self.oed_result, open(fp, "wb"))
 
     def save_state(self):
+        """Serialise the whole designer to disk with dill.
+
+        Captures candidates, parameters, sensitivities and the current design,
+        so a session can be resumed without recomputing sensitivities — usually
+        the dominant cost. Function attributes such as :attr:`simulate` are
+        stored BY REFERENCE, so the defining module must be importable when
+        loading.
+        """
         # pre-process the designer before saving
         state = [
             self.n_c,
@@ -4326,6 +5372,11 @@ class Designer:
         dill.dump(state, open(fp, "wb"))
 
     def load_state(self, designer_path):
+        """Restore a designer previously written by :meth:`save_state`.
+
+        Args:
+            designer_path (str): Path relative to the current working directory.
+        """
         state = dill.load(open(getcwd() + designer_path, 'rb'))
         self.n_c = state[0]
         self.n_spt = state[1]
@@ -4339,16 +5390,40 @@ class Designer:
         self.model_parameters = state[9]
 
     def save_responses(self):
+        """Placeholder — not implemented.
+
+        Note:
+            Currently a no-op. Predicted responses are available on
+            :attr:`response` after :meth:`simulate_candidates`.
+        """
         # TODO: implement save responses
         pass
 
     def load_sensitivity(self, sens_path):
+        """Load sensitivities cached by ``save_sensitivities=True``.
+
+        Skips the sensitivity analysis, which usually dominates runtime. The
+        cache is only valid for the SAME candidate grid and parameter values —
+        nothing checks this, so loading a mismatched file will silently design
+        against the wrong sensitivities.
+
+        Args:
+            sens_path (str): Path relative to the current working directory.
+        """
         self.sensitivities = load(open(getcwd() + "/" + sens_path, "rb"))
         self._model_parameters_changed = False
         self._candidates_changed = False
         return self.sensitivities
 
     def load_atomics(self, atomic_path):
+        """Load atomic FIMs cached by ``save_atomics=True``.
+
+        As with :meth:`load_sensitivity`, validity against the current candidate
+        grid is not checked.
+
+        Args:
+            atomic_path (str): Path relative to the current working directory.
+        """
         with open(getcwd() + atomic_path, "rb") as file:
             if self._pseudo_bayesian:
                 self.pb_atomic_fims = load(file)
@@ -4368,8 +5443,33 @@ class Designer:
         else:
             return self._d_opt_criterion(efforts)
 
+    def ds_opt_criterion(self, efforts):
+        """
+        Ds-optimality: maximise the determinant of the Schur complement of
+        the nuisance-parameter block in the FIM, i.e., D-optimality applied
+        to a chosen SUBSET of model_parameters ("interest" parameters) while
+        marginalising out the remaining ("nuisance") parameters.
+
+        Requires designer.interest_parameters to be set beforehand, BY NAME,
+        e.g.:
+            designer.interest_parameters = ["Ka", "A0"]
+        """
+        if self._pseudo_bayesian:
+            return self._pb_ds_opt_criterion(efforts)
+        else:
+            return self._ds_opt_criterion(efforts)
+
     def a_opt_criterion(self, efforts):
-        """ it is a PSD criterion """
+        """
+        A-optimality: minimises trace(FIM^{-1}), the total (summed) variance of
+        the parameter estimates.
+
+        Returns +inf for an unusable FIM (singular, indefinite, non-finite, or
+        absent). Earlier revisions returned 0 here, which is the BEST attainable
+        value for a minimised criterion and therefore attracted the optimiser
+        toward rank-deficient supports; see the "Infeasibility conventions"
+        section of the class docstring.
+        """
         if self._pseudo_bayesian:
             return self._pb_a_opt_criterion(efforts)
         else:
@@ -4384,36 +5484,134 @@ class Designer:
 
     # prediction-oriented
     def dg_opt_criterion(self, efforts):
+        """
+        dg-optimality: minimises the WORST (maximum) determinant of the
+        prediction variance matrix PVAR over all candidate / sampling-time pairs.
+
+        If the determinant form proves unusable — a near-null direction in the
+        sensitivity blocks collapses det(PVAR) to numerical noise, or blocks are
+        not positive definite — a log-pseudo-determinant is substituted and the
+        reported value moves to a LOG scale. See the "Determinant-based
+        prediction-variance criteria" section of the class docstring, and
+        reset_pvar_logdet_mode(). Consider ag_opt_criterion or eg_opt_criterion,
+        which are immune to that failure mode.
+        """
         if self._pseudo_bayesian:
             return self._pb_dg_opt_criterion(efforts)
         else:
             return self._dg_opt_criterion(efforts)
 
     def di_opt_criterion(self, efforts):
+        """
+        di-optimality: minimises the SUM of log-determinants of the prediction
+        variance matrix PVAR over all candidate / sampling-time pairs.
+
+        Carries the same determinant caveat as dg_opt_criterion: previously a
+        single non-positive-definite block forced the sum to +inf and destroyed
+        all design information. See the "Determinant-based prediction-variance
+        criteria" section of the class docstring. ai_opt_criterion and
+        ei_opt_criterion are immune to that failure mode.
+        """
         if self._pseudo_bayesian:
             return self._pb_di_opt_criterion(efforts)
         else:
             return self._di_opt_criterion(efforts)
 
     def ag_opt_criterion(self, efforts):
+        """Prediction-variance criterion: worst (maximum) trace of PVAR, minimised.
+
+        Works on ``PVAR = f @ FIM^-1 @ f.T``, the predicted-response covariance
+        at each candidate and sampling time, and minimises the worst-case total prediction variance over the
+        experimental candidates.
+
+        Unlike the determinant-based members of this family
+        (:meth:`dg_opt_criterion`, :meth:`di_opt_criterion`), trace stays well
+        behaved when PVAR is near-singular: it is dominated by the healthy
+        directions rather than collapsing on the near-null one. If dg or di
+        prove unusable on your model, these are the natural alternatives.
+
+        Args:
+            efforts (numpy.ndarray): Experimental effort vector.
+
+        Returns:
+            float: The criterion value, to be MINIMISED. ``+inf`` for an
+            unusable FIM.
+        """
         if self._pseudo_bayesian:
             return self._pb_ag_opt_criterion(efforts)
         else:
             return self._ag_opt_criterion(efforts)
 
     def ai_opt_criterion(self, efforts):
+        """Prediction-variance criterion: sum trace of PVAR, minimised.
+
+        Works on ``PVAR = f @ FIM^-1 @ f.T``, the predicted-response covariance
+        at each candidate and sampling time, and minimises the total prediction variance summed over the
+        experimental candidates.
+
+        Unlike the determinant-based members of this family
+        (:meth:`dg_opt_criterion`, :meth:`di_opt_criterion`), trace stays well
+        behaved when PVAR is near-singular: it is dominated by the healthy
+        directions rather than collapsing on the near-null one. If dg or di
+        prove unusable on your model, these are the natural alternatives.
+
+        Args:
+            efforts (numpy.ndarray): Experimental effort vector.
+
+        Returns:
+            float: The criterion value, to be MINIMISED. ``+inf`` for an
+            unusable FIM.
+        """
         if self._pseudo_bayesian:
             return self._pb_ai_opt_criterion(efforts)
         else:
             return self._ai_opt_criterion(efforts)
 
     def eg_opt_criterion(self, efforts):
+        """Prediction-variance criterion: worst (maximum) largest eigenvalue of PVAR, minimised.
+
+        Works on ``PVAR = f @ FIM^-1 @ f.T``, the predicted-response covariance
+        at each candidate and sampling time, and minimises the worst-case largest prediction variance over the
+        experimental candidates.
+
+        Unlike the determinant-based members of this family
+        (:meth:`dg_opt_criterion`, :meth:`di_opt_criterion`), largest eigenvalue stays well
+        behaved when PVAR is near-singular: it is dominated by the healthy
+        directions rather than collapsing on the near-null one. If dg or di
+        prove unusable on your model, these are the natural alternatives.
+
+        Args:
+            efforts (numpy.ndarray): Experimental effort vector.
+
+        Returns:
+            float: The criterion value, to be MINIMISED. ``+inf`` for an
+            unusable FIM.
+        """
         if self._pseudo_bayesian:
             return self._pb_eg_opt_criterion(efforts)
         else:
             return self._eg_opt_criterion(efforts)
 
     def ei_opt_criterion(self, efforts):
+        """Prediction-variance criterion: sum largest eigenvalue of PVAR, minimised.
+
+        Works on ``PVAR = f @ FIM^-1 @ f.T``, the predicted-response covariance
+        at each candidate and sampling time, and minimises the largest prediction variance summed over the
+        experimental candidates.
+
+        Unlike the determinant-based members of this family
+        (:meth:`dg_opt_criterion`, :meth:`di_opt_criterion`), largest eigenvalue stays well
+        behaved when PVAR is near-singular: it is dominated by the healthy
+        directions rather than collapsing on the near-null one. If dg or di
+        prove unusable on your model, these are the natural alternatives.
+
+        Args:
+            efforts (numpy.ndarray): Experimental effort vector.
+
+        Returns:
+            float: The criterion value, to be MINIMISED. ``+inf`` for an
+            unusable FIM.
+        """
         if self._pseudo_bayesian:
             return self._pb_ei_opt_criterion(efforts)
         else:
@@ -4607,8 +5805,26 @@ class Designer:
                     res_m = res[self.measurable_responses]       # (n_m_r,)
                 return res_m.flatten()
 
-            jac_func = nd.Jacobian(model_at_dw, step=step_gen, method='forward')
-            S_w = jac_func(self.model_parameters)
+            # numdifftools' Jacobian cannot differentiate a function whose
+            # output has length 1: finite_difference._vstack builds transpose
+            # axes for a 2-D output and applies them to 1-D steps, raising
+            #     ValueError: axes don't match array
+            # That is exactly the static single-response case
+            # (n_spt_dw = 1, n_m_r = 1), which therefore could not run
+            # V-optimal design at all. Gradient handles the scalar case and
+            # returns shape (n_mp,), which reshapes to the (1, n_mp) row the
+            # assembly below expects.
+            n_out = int(np.atleast_1d(model_at_dw(self.model_parameters)).size)
+            if n_out == 1:
+                grad_func = nd.Gradient(
+                    lambda mp: float(np.atleast_1d(model_at_dw(mp))[0]),
+                    step=step_gen, method='forward',
+                )
+                S_w = np.asarray(grad_func(self.model_parameters)).reshape(1, -1)
+            else:
+                jac_func = nd.Jacobian(model_at_dw, step=step_gen,
+                                       method='forward')
+                S_w = np.atleast_2d(np.asarray(jac_func(self.model_parameters)))
             # S_w shape: (n_spt_dw * n_m_r, n_mp)
 
             # apply McAuley scaling: W_ij = S_ij * s_yi / s_theta_j
@@ -4685,6 +5901,38 @@ class Designer:
 
     # goal-oriented for design space
     def vdi_criterion(self, efforts):
+        """vdi-optimality: summed log-determinant of PVAR over the GOAL-ORIENTED
+        grid.
+
+        The determinant analogue of V-optimality. :meth:`v_opt_criterion`
+        minimises ``trace(W FIM^-1 W^T)``, the summed prediction variance, which
+        ignores correlation between predicted responses; this minimises the
+        summed log-determinant of the prediction covariance, which accounts for
+        it. The distinction only bites with more than one predicted response.
+
+        Requires the goal-oriented block to be populated by hand —
+        :attr:`go_simulate`, ``go_tic``, ``go_spt``, ``go_error_cov`` and the
+        matching ``n_*_go`` counts — because no library routine constructs it.
+        Without them :meth:`eval_pim_for_v_opt` swaps ``None`` into
+        :attr:`simulate` and fails inside :meth:`initialize`.
+
+        Args:
+            efforts (numpy.ndarray): Experimental effort vector.
+
+        Returns:
+            float: The criterion value, to be MINIMISED. ``+inf`` for an
+            unusable PVAR.
+
+        Raises:
+            NotImplementedError: For pseudo-Bayesian designs.
+
+        Note:
+            When ``n_m_r == n_mp`` the W blocks are square, so
+            ``det(PVAR) = det(W)^2 / det(FIM)`` and vdi reduces to an affine
+            function of the D-optimal objective — it will select exactly the
+            D-optimal design. It is a distinct criterion only when there are
+            fewer measured responses than parameters.
+        """
         if self._pseudo_bayesian:
             raise NotImplementedError("Pseudo-bayesian designs for the VDI criterion not"
                                       "implemented yet, keep an eye out in future "
@@ -4693,19 +5941,45 @@ class Designer:
             return self._vdi_opt_criterion(efforts)
 
     def _vdi_opt_criterion(self, efforts):
+        """
+        vdi-optimality: as di_opt, but over the grid of operating points of
+        interest rather than the experimental candidates.
 
+        Carries the same fix as _di_opt_criterion: a single non-positive-definite
+        PVAR block previously forced the whole sum to +inf (via np.sum, which
+        unlike np.nansum does not even mask nan), destroying all design
+        information. See _pvar_decide_logdet_mode.
+        """
         self.eval_pim_for_v_opt(efforts)
-        di_opts = np.empty((self.n_c_go, self.n_spt_go))
-        for c, PVAR in enumerate(self.pvars):
-            for spt, pvar in enumerate(PVAR):
-                if np.squeeze(PVAR).size == 1:
-                    di_opts[c, spt] = np.squeeze(PVAR)
-                else:
-                    sign, temp_di = np.linalg.slogdet(pvar)
-                    if sign != 1:
-                        temp_di = np.inf
-                    di_opts[c, spt] = temp_di
-        di_opt = np.sum(di_opts)
+        if self.pvars is None:
+            if self._fd_jac:
+                return np.inf
+            raise NotImplementedError("Analytic Jacobian for vdi_opt unavailable.")
+
+        P = np.asarray(self.pvars)
+        # scalar-PVAR shortcut, preserved from the original implementation
+        if P.ndim == 4 and P.shape[2] == 1 and P.shape[3] == 1:
+            di_opt = float(np.sum(P.reshape(P.shape[0], P.shape[1])))
+            if self._fd_jac:
+                return di_opt
+            raise NotImplementedError("Analytic Jacobian for vdi_opt unavailable.")
+
+        signs, logdets = self._pvar_slogdets()
+        if signs is None:
+            if self._fd_jac:
+                return np.inf
+            raise NotImplementedError("Analytic Jacobian for vdi_opt unavailable.")
+
+        trial = float(np.sum(np.where(signs == 1, logdets, np.inf)))
+        mode = self._pvar_decide_logdet_mode(signs, trial, "vdi_opt")
+
+        if mode == "det":
+            di_opt = trial
+        else:
+            vals = [self._pvar_log_pdet(P[c, t])[0]
+                    for c in range(P.shape[0]) for t in range(P.shape[1])]
+            di_opt = np.inf if any(not np.isfinite(v) for v in vals) \
+                else float(np.sum(vals))
 
         if self._fd_jac:
             return di_opt
@@ -4717,7 +5991,10 @@ class Designer:
         """ update mp, and efforts """
         self.eval_fim(efforts)
 
-        fim_inv = np.linalg.inv(self.fim)
+        fim_inv = self._safe_fim_inverse()
+        if fim_inv is None:
+            self.pvars = None
+            return self.pvars
 
         # compute the sensitivities of the samples from design spaces
         if self.go_sample_sensitivities_done is False:
@@ -4749,24 +6026,58 @@ class Designer:
         self.simulate, self.go_simulate = self.go_simulate, self.simulate
         self.go_sensitivities, self.sensitivities = self.sensitivities, self.go_sensitivities
         self.error_cov, self.go_error_cov = self.go_error_cov, self.error_cov
+
+        # Clear the per-grid buffers before re-initialising. The two grids have
+        # different (n_c, n_spt, n_r), so a response/atomic buffer left over from
+        # the previous grid collides with the new one:
+        #     ValueError: setting an array element with a sequence. The requested
+        #     array has an inhomogeneous shape after 1 dimensions.
+        # raised from _store_current_response(). Swapping the candidate arrays
+        # without resetting what was accumulated against them was the third of
+        # three separate reasons the goal-oriented path could not run.
+        self.response = None
+        self.atomic_fims = None
+        self._candidates_changed = True
+
         self.initialize(verbose=self._verbose)
         self._model_parameters_changed = False
 
     def _revert_candidates(self):
-        self.ti_controls_candidates = self.old_tic_cands
-        self.tv_controls_candidates = self.old_tic_cands
-        self.spt_controls_candidates = self.old_tic_cands
+        """
+        Undo a goal-oriented candidate swap.
 
-        self.sensitivities = self.old_sensitivities
-        if self.go_simulate:
-            self.simulate, self.go_simulate = self.go_simulate, self.simulate
-        self.initialize(verbose=0)
+        _swap_candidates() is SELF-INVERSE — it exchanges each attribute with its
+        go_ counterpart, so calling it a second time restores the original state.
+        eval_pim_for_v_opt() already relies on that, calling it once to swap in
+        and once to swap back.
 
-        self._model_parameters_changed = False
-        self._candidates_changed = False
+        This method previously tried to restore from self.old_tic_cands and
+        self.old_sensitivities, neither of which is ever assigned anywhere in the
+        library, so it raised AttributeError on any call. It also wrote
+        old_tic_cands into the time-varying controls AND the sampling times,
+        which would have corrupted both had it ever got that far. It is kept
+        only so existing callers keep working, and now delegates to the swap.
+        """
+        if self._candidates_swapped:
+            self._swap_candidates()
 
     # experimental
     def u_opt_criterion(self, efforts):
+        """U-optimality: maximise the sum of squared FIM entries.
+
+        Minimises ``-sum(FIM * FIM)``, the squared Frobenius norm of the
+        information matrix. Unlike D, A and E this uses no matrix inverse or
+        decomposition, so it stays finite even for a singular FIM — which makes
+        it robust but also blunt: it rewards total information without regard to
+        how that information is distributed across parameters, and a design
+        scoring well here can still leave a parameter combination undetermined.
+
+        Args:
+            efforts (numpy.ndarray): Experimental effort vector.
+
+        Returns:
+            float: The criterion value, to be MINIMISED.
+        """
         self.eval_fim(efforts, self.model_parameters)
         return -np.sum(np.multiply(self.fim, self.fim))
 
@@ -5222,8 +6533,875 @@ class Designer:
             )
             return self.fim
 
-    def diagnose_sensitivity(self, tol_diag=1.0, tol_cond=1e4, plot=True,
-                             figsize=None, write=False, dpi=360):
+    def run_estimability(self, tol=None, corr_tol=0.95, plot=True,
+                         report=True):
+        """Rank the model parameters from most to least estimable.
+
+        Implements the orthogonalisation algorithm of Yao et al. (2003) as set
+        out in Table 1 of Wu, McLean, Harris and McAuley (2011).
+
+        A sensitivity matrix ``Z`` is built with one ROW per scalar measurement
+        (``n_c * n_spt * n_m_r`` of them) and one COLUMN per parameter, holding
+        the raw derivative ``d(prediction)/d(parameter)``. The algorithm then
+        picks the column with the largest Euclidean norm, projects the remaining
+        columns onto the span of those already picked, takes the residuals,
+        picks the largest again, and repeats.
+
+        Step two is what makes this more than a sensitivity ranking. A parameter
+        with a large raw sensitivity that merely duplicates the effect of one
+        already chosen gets a small residual and ranks low. That is correlation,
+        not magnitude, and the two call for different experiments.
+
+        Internally this is QR with column pivoting: the greedy pivot rule is the
+        same and ``|R_kk|`` is the residual norm at selection, so LAPACK does the
+        work in one stable call. Verified against a literal implementation of
+        Table 1 — identical ordering, norms agreeing to machine precision except
+        where the residual is numerically zero.
+
+        Three quantities are reported, answering three different questions:
+
+        * ``abs_info`` — pooled Fisher information about each parameter's
+          FRACTIONAL value. Dimensionless, because scaling by theta cancels the
+          parameter's units and dividing by sigma cancels the response's. It
+          reads ABSOLUTELY: below 1 the whole grid cannot determine the
+          parameter to within its own magnitude. This is the same quantity
+          :meth:`diagnose_sensitivity` reports per candidate, summed over the
+          grid.
+        * ``E`` and ``E_UD`` — the residual norm at selection, normalised so the
+          most estimable parameter is 1. Purely RELATIVE: ``E`` for the top
+          parameter is 1 by construction and says nothing about whether even
+          that one is well determined. That is what ``abs_info`` is for.
+        * ``group`` — which parameters are mutually correlated above
+          ``corr_tol``, and therefore interchangeable as far as the data is
+          concerned.
+
+        Two indices are given because there are two estimation problems.
+        ``E_UD`` leaves the rows unweighted and is correct for UNWEIGHTED LEAST
+        SQUARES: that objective is ``sum (y_i - g_i)^2``, so the parameter
+        reducing it most is exactly the one with the largest unweighted column
+        norm. "UD" means units-dependent — the ranking depends on the units of
+        your responses, which is a true statement about unweighted least squares
+        rather than a defect. ``E`` weights the rows by ``Sigma^(-1/2)`` from
+        ``error_cov`` and is correct for MLE / weighted least squares, which
+        coincide under Gaussian noise.
+
+        Both are reported when ``error_cov`` was supplied. When it was not,
+        pydex defaults it to the identity in :meth:`initialize`, and weighting
+        by a fabricated covariance would mislead, so only ``E_UD`` is given and
+        the report says why. The two coincide whenever the noise covariance is a
+        multiple of the identity, since that rescales every column equally; they
+        diverge exactly when the responses are measured with different
+        precision, which is when the distinction matters.
+
+        ``Z`` holds the RAW derivative. It is not multiplied by the parameter
+        value, even though :attr:`sensitivities` is — see
+        ``_norm_sens_by_params`` — and this method divides that back out.
+        Scaling columns by theta would analyse a different estimation problem,
+        the one you would be solving if you estimated ``log(theta)``, since
+        ``d(y)/d(log theta) = theta * d(y)/d(theta)``. For unweighted least
+        squares in theta the raw ``Z`` IS the residual Jacobian and ``Z^T Z`` is
+        the Gauss-Newton Hessian, so its conditioning is the conditioning of the
+        estimation problem itself rather than a proxy for it. The consequence is
+        that the ranking depends on the units of your parameters — the same
+        unit-dependence already accepted for the responses, and for the same
+        reason.
+
+        Args:
+            tol (float, optional): E index below which a parameter is flagged
+                UNRESOLVABLE. ``None`` infers it from the accuracy of the
+                sensitivity method: about ``1e-7`` for exact Pyomo IFT
+                derivatives, about ``1e-3`` for finite differences, whose
+                Richardson extrapolation degrades on strongly curved responses.
+                Below that floor the residual is indistinguishable from
+                numerical error, so the flag means "this analysis cannot resolve
+                the parameter", NOT "the parameter is inestimable".
+            corr_tol (float): ``|correlation|`` above which two parameters join
+                the same CORRELATION GROUP. Groups are the connected components
+                of the graph whose edges exceed ``corr_tol``. Within a group the
+                data can determine roughly ONE parameter: estimate or fix your
+                choice and the others become unestimable once you do. Members
+                are listed most- to least-estimable for readability, but the
+                choice is yours and is usually driven by which parameter is
+                physically meaningful or transferable. Connected components
+                rather than cliques, because at useful thresholds the two
+                coincide: if ``corr(A,B) = corr(B,C) = t`` then
+                ``corr(A,C) >= t^2 - (1 - t^2)``, which is 0.96 at ``t = 0.99``.
+                A sweep over several thresholds is printed so the stability of
+                the grouping is visible rather than argued about.
+            plot (bool): Draw the four figures — one bar chart per index and the
+                correlation heat map. Separate figures rather than panels,
+                because a fifty-parameter model needs a fifteen-inch bar chart.
+            report (bool): Print the tables.
+
+        Returns:
+            dict: With the two tables as its substance.
+
+            * ``table`` (*pandas.DataFrame*) — indexed by rank, one row per
+              parameter, with columns ``parameter``, ``abs_info``, ``E`` (NaN if
+              ``error_cov`` was not supplied), ``E_UD``, ``rank_UD``,
+              ``unresolvable``, ``underdetermined`` (``abs_info < 1``) and
+              ``group`` (0 = ungrouped).
+            * ``correlation`` (*pandas.DataFrame*) — parameter by parameter,
+              the sensitivity-direction correlation.
+            * ``ranking`` (*list*) — names, most to least estimable.
+            * ``groups`` (*list of list*) — mutually correlated names.
+            * ``corr_tol``, ``tol`` (*float*) — the thresholds used.
+            * ``corr_matrix`` (*numpy.ndarray*) — the correlation as a plain
+              array, for code that would rather not go through pandas.
+            * ``corr_names``, ``abs_info``, ``e_index``, ``e_index_ud``,
+              ``flagged``, ``order``, ``n_rows``, ``weighted`` — supporting
+              detail in plain Python types.
+
+        Raises:
+            SyntaxError: If :attr:`model_parameters` has not been set.
+
+        Note:
+            The ranking is a property of THIS CANDIDATE GRID evaluated at THESE
+            PARAMETER VALUES, not of the model in the abstract. A parameter
+            inestimable on one grid may be fine on another.
+
+            Nothing downstream reads the result. It does not set
+            :attr:`interest_parameters` and does not influence any design:
+            estimable and INTERESTING are different questions, and wiring one
+            into the other would quietly bias designs toward whatever happens to
+            be easy to estimate.
+
+            Requires no design and no criterion — run it first, before deciding
+            what to design for.
+
+        Example:
+            >>> designer.initialize()
+            >>> est = designer.run_estimability()
+            >>> est["table"]
+            >>> est["groups"]
+            [['lnA', 'Ea_R']]
+
+        References:
+            Wu, S., McLean, K.A.P., Harris, T.J. and McAuley, K.B. (2011).
+            Selection of optimal parameter set using estimability analysis and
+            MSE-based model-selection criterion. *International Journal of
+            Advanced Mechatronic Systems*, 3(3), 188-197.
+
+            Note this implements Table 1 (the ranking) only. The paper's
+            MSE-based criterion for choosing HOW MANY parameters to estimate
+            needs parameter estimation against real data, which is outside the
+            scope of a design tool.
+        """
+        from scipy.linalg import qr as _qr
+
+        if self.model_parameters is None:
+            raise SyntaxError("run_estimability() needs model_parameters.")
+        if getattr(self, "status", None) != "ready":
+            self.initialize(verbose=0)
+
+        # ── the parameter vector the derivatives are taken at ────────────────
+        mp = np.asarray(self.model_parameters, dtype=float)
+        if mp.ndim == 2:
+            # a scenario array is a setup for pseudo-Bayesian DESIGN; estimability
+            # is evaluated at a single point, so use the scenario mean and say so
+            theta = mp.mean(axis=0)
+            theta_note = (f"scenario mean of {mp.shape[0]} pseudo-Bayesian "
+                          f"scenarios")
+        else:
+            theta = mp
+            theta_note = "nominal values"
+
+        # ── build Z ──────────────────────────────────────────────────────────
+        if self.sensitivities is None:
+            self.eval_sensitivities(save_sensitivities=False)
+        S = np.asarray(self.sensitivities, dtype=float)
+        if S.ndim != 4:
+            raise RuntimeError(f"unexpected sensitivity shape {S.shape}")
+
+        # Keep the theta-scaled form before dividing theta out: the absolute
+        # information column below needs it. Scaling by theta is what makes that
+        # quantity dimensionless and gives it the "< 1" reading.
+        S_scaled = (S.copy() if getattr(self, "_norm_sens_by_params", False)
+                    else S * np.asarray(theta)[None, None, None, :])
+
+        # designer.sensitivities is stored as d(y)/d(theta) * theta when
+        # _norm_sens_by_params is on; divide it back out for the raw derivative
+        if getattr(self, "_norm_sens_by_params", False):
+            with np.errstate(divide="ignore", invalid="ignore"):
+                S = S / theta[None, None, None, :]
+            S = np.nan_to_num(S, nan=0.0, posinf=0.0, neginf=0.0)
+
+        n_c, n_spt, n_mr, n_mp = S.shape
+        Z_ud = S.reshape(n_c * n_spt * n_mr, n_mp)
+
+        weighted = self.error_cov is not None and not getattr(
+            self, "_error_cov_defaulted", False)
+        Z_w = None
+        if weighted:
+            # row weighting needs Sigma^(-1/2), NOT inv(Sigma); they coincide
+            # only when Sigma is the identity
+            C = np.asarray(self.error_cov, dtype=float)
+            ev, V = np.linalg.eigh(0.5 * (C + C.T))
+            if np.all(ev > 0):
+                C_inv_half = V @ np.diag(ev ** -0.5) @ V.T
+                Z_w = np.einsum("rm,csmp->csrp", C_inv_half,
+                                S).reshape(n_c * n_spt * n_mr, n_mp)
+            else:
+                weighted = False
+
+        # ── the tolerance ────────────────────────────────────────────────────
+        if tol is None:
+            if getattr(self, "use_pyomo_ift", False):
+                tol, tol_src = 1e-7, "exact Pyomo IFT derivatives"
+            else:
+                tol, tol_src = 1e-3, "finite-difference sensitivities"
+        else:
+            tol_src = "supplied by the caller"
+
+        # ── rank ─────────────────────────────────────────────────────────────
+        def _rank(Z):
+            _q, R, piv = _qr(Z, mode="economic", pivoting=True)
+            norms = np.abs(np.diag(R))
+            e = norms / norms[0] if norms[0] > 0 else np.zeros_like(norms)
+            return list(piv), e
+
+        # rank on the weighted matrix when it is available -- that is the
+        # ordering an MLE user acts on; otherwise the unweighted one
+        ud_order, e_ud = _rank(Z_ud)
+        if weighted:
+            order, e_w = _rank(Z_w)
+        else:
+            order, e_w = ud_order, None
+
+        # Column norms of the primary Z. Used only to normalise the columns for
+        # the correlation cosine below -- they are NOT reported. An earlier
+        # version exposed them as a "step-1 norm" column, but the quantity is
+        # ||Sigma^-1/2 . dy/dtheta||, which carries units of 1/theta and so is not
+        # comparable between parameters measured in different units. abs_info is
+        # the same information made dimensionless (abs_info = (norm * theta)^2
+        # exactly) and it is the one that can be read absolutely.
+        Z_primary = Z_w if weighted else Z_ud
+        raw_norms = np.linalg.norm(Z_primary, axis=0)
+
+        # ── sensitivity-direction correlation ────────────────────────────────
+        # cosine between the columns of Z, computed on the SAME matrix the
+        # ranking used, so the report is internally consistent: weighted when
+        # error_cov is real, unweighted otherwise.
+        nz = raw_norms.copy()
+        nz[nz == 0] = 1.0
+        Zn = Z_primary / nz      # unit columns; the cosine is scale-free
+        C = Zn.T @ Zn
+        C = np.clip(0.5 * (C + C.T), -1.0, 1.0)
+        np.fill_diagonal(C, 1.0)
+
+        def _groups(Cm, thr):
+            """Connected components of |corr| > thr; singletons dropped."""
+            pp = Cm.shape[0]
+            seen, out_g = set(), []
+            for i in range(pp):
+                if i in seen:
+                    continue
+                comp, stack = {i}, [i]
+                while stack:
+                    a = stack.pop()
+                    for b in range(pp):
+                        if b not in comp and abs(Cm[a, b]) > thr:
+                            comp.add(b)
+                            stack.append(b)
+                seen |= comp
+                if len(comp) > 1:
+                    out_g.append(sorted(comp))
+            return out_g
+
+        # ── absolute information ─────────────────────────────────────────────
+        # A_k[j,j] = sum_{t,r,q} s_scaled[k,t,r,j] * Sigma^-1[r,q] * s_scaled[k,t,q,j]
+        # is the Fisher information about theta_j's FRACTIONAL value from one
+        # experiment at candidate k -- the quantity diagnose_sensitivity() reports
+        # per candidate. Summed over the grid it answers the question the E index
+        # structurally cannot: E_1 is 1 by construction, so E says nothing about
+        # whether the BEST parameter is well determined, only how the others
+        # compare to it. Because the sensitivities are scaled by theta, this is
+        # dimensionless and reads absolutely:
+        #
+        #     pooled A < 1  ->  the whole grid cannot determine theta_j to within
+        #                       its own magnitude
+        #
+        # Costs one einsum on an array already in memory: measured at 31 us
+        # against 16.6 s of sensitivity analysis on a 9-parameter model, i.e.
+        # 0.0002% of the cost of getting here.
+        try:
+            _efim = (np.linalg.inv(np.asarray(self.error_cov, dtype=float))
+                     if self.error_cov is not None else np.eye(n_mr))
+        except np.linalg.LinAlgError:
+            _efim = np.eye(n_mr)
+        abs_info = np.einsum("ktrj,rq,ktqj->j", S_scaled, _efim, S_scaled)
+
+        grp_idx = _groups(C, corr_tol)
+        sweep = [(t, _groups(C, t)) for t in (0.99, 0.98, 0.95, 0.90, 0.80)]
+
+        names = (list(self.model_parameter_names)
+                 if self.model_parameter_names is not None
+                 else [f"parameter {i}" for i in range(n_mp)])
+
+        primary = e_w if weighted else e_ud
+        flagged = [names[j] for j, e in zip(order, primary) if e < tol]
+
+        # order each group by estimability so the list reads naturally
+        rank_of = {j: r for r, j in enumerate(order)}
+        groups = [[names[j] for j in sorted(g, key=lambda x: rank_of[x])]
+                  for g in grp_idx]
+
+        # ── assemble the output ──────────────────────────────────────────────
+        # The two tables are the substance of the method, so they are returned
+        # as DataFrames.
+        ud_rank_of = {nm: i for i, nm in enumerate(
+            [names[j] for j in ud_order], 1)}
+        rows = []
+        for r, j in enumerate(order, 1):
+            nm = names[j]
+            rows.append({
+                "rank":          r,
+                "parameter":     nm,
+                "abs_info":      float(abs_info[j]),
+                "E":             (float(e_w[r - 1]) if weighted else np.nan),
+                "E_UD":          float(e_ud[list(ud_order).index(j)]),
+                "rank_UD":       ud_rank_of[nm],
+                "unresolvable":  bool((e_w[r - 1] if weighted
+                                       else e_ud[list(ud_order).index(j)]) < tol),
+                "underdetermined": bool(abs_info[j] < 1.0),
+                "group":         next((gi for gi, g in enumerate(groups, 1)
+                                       if nm in g), 0),
+            })
+        table = pd.DataFrame(rows).set_index("rank")
+        corr_df = pd.DataFrame(C, index=names, columns=names)
+
+        out = {
+            # the two tables
+            "table":       table,        # DataFrame, indexed by rank
+            "correlation": corr_df,      # DataFrame, parameter x parameter
+            # summary
+            "ranking":    [names[j] for j in order],
+            "groups":     groups,
+            "corr_tol":   float(corr_tol),
+            # plain-array / dict forms, for code that would rather not go
+            # through pandas
+            "abs_info":   {names[j]: float(abs_info[j]) for j in order},
+            "corr_matrix": C,
+            "corr_names": list(names),
+            "_sweep":     [(t, [[names[j] for j in g] for g in gs])
+                           for t, gs in sweep],
+            "e_index":    ({names[j]: float(e) for j, e in zip(order, e_w)}
+                           if weighted else None),
+            "e_index_ud": {names[j]: float(e) for j, e in zip(ud_order, e_ud)},
+            "flagged":    flagged,
+            "tol":        float(tol),
+            "order":      [int(j) for j in order],
+            "n_rows":     int(Z_ud.shape[0]),
+            "weighted":   bool(weighted),
+        }
+
+        if report:
+            self._report_estimability(out, names, theta_note, tol_src,
+                                      n_c, n_spt, n_mr)
+        if plot:
+            self._plot_estimability(out, tol)
+        return out
+
+    def _report_estimability(self, out, names, theta_note, tol_src,
+                             n_c, n_spt, n_mr):
+        """Print the estimability table. See run_estimability()."""
+        w = out["weighted"]
+        print("\n" + "-" * 78)
+        print("  Parameter estimability ranking".ljust(52)
+              + "Yao/McAuley orthogonalisation")
+        print("-" * 78)
+        print(f"  candidate grid : {n_c} candidate(s) x {n_spt} sampling time(s) "
+              f"x {n_mr} response(s) = {out['n_rows']} rows")
+        print(f"  evaluated at   : {theta_note}")
+        print(f"  columns        : raw d(prediction)/d(parameter), no scaling "
+              f"by parameter value")
+        if w:
+            print(f"  row weighting  : error_cov as supplied — reporting BOTH "
+                  f"indices")
+        else:
+            print(f"  row weighting  : none (error_cov not supplied, or not "
+                  f"positive definite)")
+        print(f"  resolution tol : {out['tol']:.1e}   ({tol_src})")
+        print()
+        if w:
+            # Two rankings, so show BOTH positions. Listing E-UD values in the
+            # E ordering makes that column look non-monotonic and broken; it is
+            # not, it is simply sorted by the other index.
+            ud_rank = {nm: i for i, nm in enumerate(
+                sorted(out["e_index_ud"], key=lambda k: -out["e_index_ud"][k]), 1)}
+            print(f"   {'rank':>4}  {'parameter':<16} {'abs info':>12} "
+                  f"{'E':>12}   {'rank':>4}  {'E-UD':>12}")
+            print(f"   {'(E)':>4}  {'':<16} {'(absolute)':>12} "
+                  f"{'(MLE/wtd)':>12}   {'(UD)':>4}  {'(unwtd LS)':>12}")
+            print("   " + "-" * 74)
+            for r, nm in enumerate(out["ranking"], 1):
+                e_w = out["e_index"][nm]
+                ai = out["abs_info"][nm]
+                mk = []
+                if ai < 1.0:
+                    mk.append("under-determined")
+                if e_w < out["tol"]:
+                    mk.append("unresolvable")
+                mark = ("  <-- " + ", ".join(mk)) if mk else ""
+                print(f"   {r:>4}  {nm:<16} {ai:>12.4g} {e_w:>12.4e}   "
+                      f"{ud_rank[nm]:>4}  {out['e_index_ud'][nm]:>12.4e}{mark}")
+        else:
+            print(f"   {'rank':>4}  {'parameter':<18} {'abs info':>12} "
+                  f"{'E-UD':>13}")
+            print(f"   {'':>4}  {'':<18} {'(absolute)':>12} {'(unwtd LS)':>13}")
+            print("   " + "-" * 56)
+            for r, nm in enumerate(out["ranking"], 1):
+                e_ud = out["e_index_ud"][nm]
+                ai = out["abs_info"][nm]
+                mk = []
+                if ai < 1.0:
+                    mk.append("under-determined")
+                if e_ud < out["tol"]:
+                    mk.append("unresolvable")
+                mark = ("  <-- " + ", ".join(mk)) if mk else ""
+                print(f"   {r:>4}  {nm:<18} {ai:>12.4g} {e_ud:>13.4e}{mark}")
+        print()
+        if w:
+            same = out["ranking"] == sorted(
+                out["e_index_ud"], key=lambda k: -out["e_index_ud"][k])
+            print(f"  E-UD ranks for UNWEIGHTED least squares; E for MLE / "
+                  f"weighted least squares.")
+            print(f"  Rows are sorted by E; the 'rank (UD)' column gives each "
+                  f"parameter's position")
+            print(f"  under the unweighted index. result['ranking'] holds the E "
+                  f"ordering.")
+            print(f"  The two orderings {'AGREE' if same else 'DIFFER'} here. "
+                  f"They coincide whenever the noise")
+            print(f"  covariance is a multiple of the identity, and diverge when "
+                  f"the responses")
+            print(f"  are measured with different precision.")
+        else:
+            print(f"  Only E-UD is reported. error_cov was not supplied, so "
+                  f"weighting by it would")
+            print(f"  mean weighting by pydex's identity default — a fabricated "
+                  f"covariance. Supply")
+            print(f"  error_cov to get the MLE-appropriate index as well.")
+        print()
+        if out["flagged"]:
+            print(f"  BELOW THE RESOLUTION TOLERANCE: {out['flagged']}")
+            print(f"  This means the analysis CANNOT RESOLVE these parameters' "
+                  f"estimability —")
+            print(f"  their residuals are at the noise level of the sensitivity "
+                  f"calculation. It")
+            print(f"  does NOT mean they are inestimable. Pass a smaller tol to "
+                  f"override.")
+        else:
+            print(f"  No parameter falls below the resolution tolerance.")
+        print()
+        under = [nm for nm in out["ranking"] if out["abs_info"][nm] < 1.0]
+        print(f"  abs info is the Fisher information about each parameter's "
+              f"FRACTIONAL value,")
+        print(f"  pooled over the whole grid. It is the one ABSOLUTE number "
+              f"here: E is scaled")
+        print(f"  so the best parameter is always 1, which says nothing about "
+              f"whether even")
+        print(f"  that one is well determined. Below 1 means the entire grid "
+              f"cannot pin the")
+        print(f"  parameter down to within its own magnitude.")
+        if under:
+            print(f"     UNDER-DETERMINED (abs info < 1): {under}")
+        print()
+        print(f"  A parameter can rank low for either of two reasons, and they "
+              f"need different")
+        print(f"  experiments: too little information (small abs info), or "
+              f"information that")
+        print(f"  merely restates a parameter already selected (healthy abs "
+              f"info, small E).")
+        print(f"  The correlation groups below say which parameters are "
+              f"restating which.")
+
+        self._report_estimability_corr(out)
+
+        print(f"  This ranking is a property of THIS CANDIDATE GRID at THESE "
+              f"PARAMETER VALUES,")
+        print(f"  not of the model. It is advisory: nothing downstream reads it.")
+        print("-" * 78 + "\n")
+
+    def _report_estimability_corr(self, out):
+        """Correlation matrix, groups and threshold sweep. See run_estimability()."""
+        names = out["corr_names"]
+        C = np.asarray(out["corr_matrix"])   # NOT out["correlation"], which is a
+        p = len(names)                       # DataFrame -> C[i, j] raises KeyError
+        tag = ("weighted by error_cov" if out["weighted"]
+               else "unweighted (error_cov not supplied)")
+        print()
+        print(f"  PARAMETER CORRELATION   ({tag})")
+        print(f"  cosine between the sensitivity columns: +-1 means the two "
+              f"parameters have")
+        print(f"  the same effect on the measurements and the data cannot tell "
+              f"them apart.")
+        print()
+        if p <= 12:
+            # Long names (LaTeX labels such as $\theta_{10}$ run to 13
+            # characters) make the matrix hundreds of columns wide and it wraps
+            # into nonsense. Past a modest length, label the axes P0..Pn and
+            # print a legend underneath.
+            longest = max(len(n) for n in names)
+            if longest > 9:
+                short = [f"P{i}" for i in range(p)]
+                legend = [(short[i], names[i]) for i in range(p)]
+            else:
+                short, legend = list(names), None
+            w = max(8, max(len(n) for n in short) + 1)
+            # header indented by the SAME width as the row labels (2 spaces + w)
+            # or the columns do not line up
+            print(" " * (2 + w) + "".join(f"{n:>{w}}" for n in short))
+            for i, n in enumerate(short):
+                row = "".join(f"{C[i, j]:>{w}.4f}" for j in range(p))
+                print(f"  {n:<{w}}{row}")
+            if legend:
+                print()
+                per_line = max(1, 78 // (max(len(f"{a} = {b}")
+                                            for a, b in legend) + 4))
+                for k in range(0, len(legend), per_line):
+                    print("    " + "    ".join(
+                        f"{a} = {b}" for a, b in legend[k:k + per_line]))
+        else:
+            print(f"  ({p} parameters — matrix suppressed; it is in "
+                  f"result['correlation'])")
+        print()
+        if out["groups"]:
+            print(f"  CORRELATION GROUPS at |corr| > {out['corr_tol']:.2f}")
+            for g in out["groups"]:
+                print(f"     {{{', '.join(g)}}}")
+            print()
+            print(f"  Within a group the data can determine roughly ONE "
+                  f"parameter. Estimate or")
+            print(f"  fix your choice and the others become unestimable once "
+                  f"you do — they are")
+            print(f"  interchangeable as far as the measurements are concerned. "
+                  f"Members are")
+            print(f"  listed most- to least-estimable, but pick on physical "
+                  f"grounds: which one")
+            print(f"  is meaningful, transferable, or independently known.")
+        else:
+            print(f"  No correlation group at |corr| > {out['corr_tol']:.2f}.")
+        print()
+        print(f"  threshold sweep — how stable is the grouping?")
+        for t, gs in out["_sweep"]:
+            txt = " ; ".join("{" + ", ".join(g) + "}" for g in gs) or "none"
+            mark = "  <-- corr_tol" if abs(t - out["corr_tol"]) < 1e-9 else ""
+            print(f"     |corr| > {t:.2f}   {txt}{mark}")
+        print()
+
+    def _plot_estimability(self, out, tol):
+        """
+        Draw the estimability figures — SEPARATE figures, not panels of one.
+
+        Four when error_cov was supplied (step-1 norm, E, E-UD, correlation),
+        three otherwise. They are separate because the number of parameters is
+        unbounded: a model with fifty parameters needs a fifteen-inch-tall bar
+        chart and a fifty-by-fifty heat map, and neither survives being squeezed
+        into a quarter of a shared canvas. Figure sizes scale with n_mp, and the
+        heat map drops its cell annotations once the grid is too fine to read
+        them.
+
+        Each bar figure is sorted by its OWN metric rather than by a shared
+        order, so the change in ordering between them is the thing you read: a
+        parameter high on step-1 norm but low on E has lost its leverage to
+        correlation with something already selected, and the heat map names what.
+
+        Returns the list of figures.
+        """
+        from matplotlib import pyplot as plt
+        from matplotlib.patches import Rectangle
+
+        names_all = out["corr_names"]
+        # corr_matrix, NOT correlation -- the latter is a DataFrame and C[a, b]
+        # raises KeyError on it. Same trap as in _report_estimability_corr.
+        C = np.asarray(out["corr_matrix"])
+        ctol = out["corr_tol"]
+        weighted = out["weighted"]
+        p = len(names_all)
+        figs = []
+
+        panels = [("abs info — pooled Fisher information, dimensionless",
+                   out["abs_info"], "tab:green", False)]
+        if weighted:
+            panels.append(("E — index for MLE / weighted least squares",
+                           out["e_index"], "tab:red", True))
+        panels.append(("E — Unit Dependent Index — for unweighted least squares",
+                       out["e_index_ud"], "tab:blue", True))
+
+        # ── one bar figure per index ─────────────────────────────────────────
+        for title, values, colour, show_tol in panels:
+            # scale with the parameter count; a fixed height crushes the bars
+            height = max(3.0, 0.30 * p + 1.6)
+            fig, ax = plt.subplots(figsize=(8.5, height))
+            ordered = sorted(values, key=lambda n: -values[n])
+            vals = [max(values[n], 1e-300) for n in ordered]
+            y = np.arange(len(ordered))[::-1]
+            ax.barh(y, vals, color=colour, alpha=0.8,
+                    height=0.72 if p <= 30 else 0.85)
+            ax.set_yticks(y)
+            lbl_fs = 9 if p <= 25 else (7 if p <= 50 else 5.5)
+            ax.set_yticklabels([f"{r}. {n}" for r, n in enumerate(ordered, 1)],
+                               fontsize=lbl_fs)
+            ax.set_xscale("log")     # these span orders of magnitude
+            if show_tol:
+                ax.axvline(tol, color="0.3", ls="--", lw=1.4,
+                           label=f"resolution tol = {tol:.0e}")
+                ax.legend(loc="lower right", fontsize=8.5, framealpha=0.9)
+            ax.set_title(f"{title}\nranked most to least estimable — advisory",
+                         fontsize=11)
+            ax.set_xlabel("normalised to the largest (log scale)")
+            ax.grid(axis="x", alpha=0.3, linestyle=":")
+            fig.tight_layout()
+            figs.append(fig)
+
+        # ── correlation heat map, its own figure ─────────────────────────────
+        side = float(np.clip(0.42 * p + 2.4, 6.0, 22.0))
+        fig, ax = plt.subplots(figsize=(side, side * 0.92))
+        # |corr| on viridis with a gamma norm, NOT a signed diverging map.
+        #
+        # Three reasons, in order of weight:
+        #   1. Colour-vision safety. A diverging map encodes the two directions
+        #      as opposing HUES, which is exactly what red-green colour blindness
+        #      cannot separate. viridis varies monotonically in LIGHTNESS, so it
+        #      survives any colour-vision deficiency and greyscale printing.
+        #   2. The question is "where are the hot spots". On a signed map the
+        #      strong correlations sit at BOTH ends, so the eye must scan two
+        #      directions and dark-at-one-end reads as "nothing here" when it
+        #      means the opposite.
+        #   3. gamma > 1 gives the 0.9-1.0 band most of the colour range, which
+        #      is where the decisions are. Linearly, 0.87 and 0.99 are
+        #      indistinguishable.
+        #
+        # The sign is not lost: every cell is annotated with the signed value,
+        # and for grouping only the magnitude matters — +0.99 and -0.99 are
+        # equally exchangeable.
+        from matplotlib.colors import PowerNorm as _PowerNorm
+        A = np.abs(C)
+        im = ax.imshow(A, cmap="viridis", norm=_PowerNorm(3.0, 0.0, 1.0))
+
+        annotate = p <= 20                 # past this the numbers are unreadable
+        ann_fs = 8 if p <= 10 else 6
+        for a in range(p):
+            for b in range(p):
+                strong = a != b and abs(C[a, b]) > ctol
+                if annotate:
+                    # viridis runs dark->light, so light text on the DARK (low
+                    # |corr|) cells and dark text on the bright hot spots
+                    ax.text(b, a, f"{C[a, b]:.3f}", ha="center", va="center",
+                            fontsize=ann_fs,
+                            fontweight="bold" if strong else "normal",
+                            color="0.1" if abs(C[a, b]) > 0.88 else "white")
+                if strong:
+                    # every pair above corr_tol -- the edges the grouping uses
+                    ax.add_patch(Rectangle((b - 0.5, a - 0.5), 1, 1, fill=False,
+                                           ec="crimson",
+                                           lw=2.2 if p <= 20 else 1.2, zorder=4))
+        tick_fs = 9 if p <= 25 else (7 if p <= 50 else 5)
+        ax.set_xticks(range(p))
+        ax.set_yticks(range(p))
+        ax.set_xticklabels(names_all, rotation=45, ha="right", fontsize=tick_fs)
+        ax.set_yticklabels(names_all, fontsize=tick_fs)
+        tag = "weighted by error_cov" if weighted else "unweighted"
+        # Group membership in the subtitle only when it is unambiguously short.
+        #
+        # Counting CHARACTERS is the wrong test: "$\theta_{10}$" is 13 source
+        # characters that render as about 3 glyphs, so a length guard both lets
+        # LaTeX-heavy titles through and rejects short plain-name ones. Gate on
+        # the number of groups and members instead — a proxy that does not depend
+        # on how the names render. Sixty parameters in a dozen groups produces a
+        # 200-character subtitle that no figure width can absorb.
+        #
+        # Nothing is lost by falling back to the count: the groups are listed in
+        # the printed report together with the threshold sweep, they are in
+        # result["groups"], and the boxed cells show the pairs directly.
+        n_grp = len(out["groups"])
+        n_mem = sum(len(g) for g in out["groups"])
+        if n_grp == 0:
+            grp = "no group above threshold"
+        elif n_grp <= 3 and n_mem <= 8:
+            grp = "groups: " + " ; ".join(
+                "{" + ", ".join(g) + "}" for g in out["groups"])
+        else:
+            grp = (f"{n_grp} group{'s' if n_grp != 1 else ''} spanning {n_mem} "
+                   f"parameters — see the printed report")
+        # Third line rather than appended: with annotations suppressed the note is
+        # another 45 characters, which on a wide figure pushes the subtitle past
+        # the width it can actually occupy.
+        note = ("" if annotate else
+                "\ncell values omitted at this size — see result['correlation']")
+        # the figure grows with n_mp, so a fixed title size becomes illegible on
+        # a 22-inch canvas; scale it with the side length
+        title_fs = float(np.clip(0.9 * side, 11.0, 26.0))
+        ax.set_title(f"Sensitivity-direction correlation ({tag})\n"
+                     f"boxed = |corr| > {ctol:.2f}   |   {grp}{note}",
+                     fontsize=title_fs)
+        cb = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03)
+        cb.set_label("|correlation|   (gamma=3; sign is in the cell text)",
+                     fontsize=title_fs * 0.75)
+        cb.ax.tick_params(labelsize=title_fs * 0.65)
+        fig.tight_layout()
+        figs.append(fig)
+        return figs
+
+    def diagnose_fim_structure(self, rtol=1e-12, participation_tol=0.05,
+                               report=True):
+        """
+        Detect a STRUCTURALLY singular FIM and name the parameters responsible.
+
+        "Structurally" singular means singular for EVERY admissible design, not
+        merely for the design currently loaded. The test therefore uses the most
+        informative attainable information matrix -- every candidate at full
+        effort, i.e. the sum of all atomic FIMs (plus any prior, plus the
+        regularisation term if enabled). If that matrix is rank-deficient, no
+        allocation of effort can repair it: the deficiency lives in the model
+        and the measurements, not in the design.
+
+        Why this matters, and why it is worth stopping for
+        -------------------------------------------------
+        A rank-deficient FIM does not necessarily make the design solve FAIL.
+        The native D-optimal formulation lifts log-det through a Cholesky factor
+        with a floored diagonal, and an interior-point solver will happily
+        report "Optimal Solution Found" at a point where that floor is propping
+        up an eigenvalue of ~1e-24. The criterion value is then real arithmetic
+        on a quantity the data does not contain. Symptoms to recognise:
+
+          * apportion() reports the rounded design as a tiny percentage
+            (well under a few percent) as informative as the continuous one,
+            and the Kiefer lower bound comes out at 0.00%;
+          * the solver needs feasibility restoration and the objective
+            oscillates by O(1) between iterations;
+          * divide-by-zero or invalid-cast warnings from the effort ratios.
+
+        Identifying the culprits
+        ------------------------
+        Eigenvectors of the FIM whose eigenvalues are ~0 span the unidentifiable
+        subspace. A parameter with appreciable weight in one of those vectors is
+        participating in a combination the data cannot resolve. Note it is the
+        COMBINATION that is unidentifiable: if two parameters share a null
+        direction, the data may well determine their sum or ratio while leaving
+        each one free.
+
+        What to do about it is a MODELLING decision, not a numerical one:
+          * reparameterise so the unidentifiable combination becomes one
+            parameter (e.g. replace c1 and c2 by their sum);
+          * add measurements that inform the direction;
+          * fix the offending parameter at a known value;
+          * or keep it in the model but stop asking for its precision --
+            move it to the nuisance set and use ds_opt_criterion.
+
+        Parameters
+        ----------
+        rtol : float
+            Relative eigenvalue cutoff. An eigenvalue below
+            rtol * max(eigenvalue) counts as null.
+        participation_tol : float
+            A parameter counts as participating in a null direction when the
+            magnitude of its component in that eigenvector exceeds this.
+        report : bool
+            Print the diagnosis table.
+
+        Returns
+        -------
+        dict with keys:
+            singular          : bool
+            rank, n_mp        : int
+            eigenvalues       : (n_mp,) ascending
+            eigenvectors      : (n_mp, n_mp) columns matching eigenvalues
+            null_indices      : indices of the null eigenvalues
+            culprits          : parameter NAMES participating in a null direction
+            culprit_indices   : their positions
+            directions        : list of (eigenvalue, [names]) per null direction
+        """
+        if self.atomic_fims is None:
+            raise SyntaxError(
+                "diagnose_fim_structure() needs the atomic FIMs. Call "
+                "eval_fim() (or design_experiment(), or eval_sensitivities() "
+                "followed by eval_fim()) first."
+            )
+        A = np.asarray(self.atomic_fims, dtype=float)
+        if A.ndim == 4:                       # pseudo-Bayesian: average scenarios
+            A = A.mean(axis=0)
+        fim_max = A.sum(axis=0)
+        if self._prior_fim is not None:
+            fim_max = fim_max + np.asarray(self._prior_fim, dtype=float)
+        if getattr(self, "_regularize_fim", False):
+            fim_max = fim_max + self._eps * np.identity(fim_max.shape[0])
+        fim_max = 0.5 * (fim_max + fim_max.T)
+
+        w, V = np.linalg.eigh(fim_max)
+        scale = max(1.0, float(abs(w).max()))
+        null_idx = [j for j in range(len(w)) if w[j] <= rtol * scale]
+
+        names = (list(self.model_parameter_names)
+                 if self.model_parameter_names is not None
+                 else [f"parameter {i}" for i in range(len(w))])
+
+        directions, culprit_idx = [], set()
+        for j in null_idx:
+            idx = [i for i in range(len(w)) if abs(V[i, j]) > participation_tol]
+            culprit_idx |= set(idx)
+            directions.append((float(w[j]), [names[i] for i in idx]))
+
+        out = {
+            "singular": bool(null_idx),
+            "rank": int(len(w) - len(null_idx)),
+            "n_mp": int(len(w)),
+            "eigenvalues": w,
+            "eigenvectors": V,
+            "null_indices": null_idx,
+            "culprits": [names[i] for i in sorted(culprit_idx)],
+            "culprit_indices": sorted(culprit_idx),
+            "directions": directions,
+        }
+
+        if report:
+            print("\n" + "-" * 100)
+            print("  FIM Structural Diagnosis".center(100))
+            print("-" * 100)
+            print(f"  Evaluated at the fully-supported design (every candidate "
+                  f"at full effort) -- the most")
+            print(f"  informative matrix attainable, so any deficiency here is "
+                  f"structural.")
+            print(f"  Rank            : {out['rank']} of {out['n_mp']}")
+            print(f"  cond(FIM_max)   : {np.linalg.cond(fim_max):.3e}")
+            print(f"  Null cutoff     : eigenvalue <= {rtol:.0e} x "
+                  f"{scale:.3e} = {rtol*scale:.3e}")
+            print()
+            hdr = f"    {'eigenvalue':>13}  " + "  ".join(f"{n[:11]:>11}" for n in names)
+            print(hdr)
+            for j in range(len(w)):
+                row = "  ".join(f"{abs(V[i, j]):>11.4f}" for i in range(len(w)))
+                tag = "   <-- NULL" if j in null_idx else ""
+                print(f"    {w[j]:>13.3e}  {row}{tag}")
+            print()
+            if out["singular"]:
+                for ev, who in out["directions"]:
+                    print(f"  Unidentifiable direction (eigenvalue {ev:.3e}) "
+                          f"involves: {who}")
+                print(f"\n  Parameters implicated : {out['culprits']}")
+                print("  It is the COMBINATION that is unresolved -- the data may "
+                      "still determine a")
+                print("  function of these parameters (a sum or ratio) while "
+                      "leaving each one free.")
+                print()
+                print("  Options:")
+                print("    * reparameterise so the unidentifiable combination "
+                      "becomes a single parameter")
+                print("    * add measurements that inform this direction")
+                print("    * fix the offending parameter(s) at known values")
+                print("    * keep them in the model but stop designing for their "
+                      "precision: move them")
+                print("      to the nuisance set and use ds_opt_criterion "
+                      "(designer.interest_parameters)")
+            else:
+                print("  FIM is full rank at the fully-supported design -- no "
+                      "structural deficiency.")
+            print("-" * 100 + "\n")
+        return out
+
+    def diagnose_sensitivity(self, tol_diag=1.0, tol_cond=1e4, plot=False,
+                             figsize=None, write=False, dpi=360,
+                             report=True):
         """
         Diagnose rank-deficiency and near-zero sensitivity in the candidate grid
         using scale-free, physically motivated thresholds.
@@ -5284,10 +7462,24 @@ class Designer:
             ill-conditioned.  Default: 1e4.
 
         plot : bool
-            If True, produce two figures:
+            If True, produce two figures.  Default: False.
               - Heatmap of ``log10(A_k[j,j])`` (candidates × parameters),
                 with ``tol_diag`` threshold line and flagged cells marked.
               - Bar chart of per-candidate condition numbers.
+
+            Opt-in rather than automatic, because on a collinear model the
+            second figure carries no information: every candidate exceeds
+            ``tol_cond`` and the whole chart is red.  The heatmap can still be
+            worth a look — a candidate red across ALL parameters is an
+            experiment that informs nothing and could be dropped from the grid,
+            which is the one thing this diagnostic sees that the pooled
+            :meth:`run_estimability` cannot.
+
+        report : bool
+            Print the per-candidate table and summary.  Default: True.
+            Set False to keep only the returned dict — the table is one row per
+            candidate, which on a large grid is a great deal of low-density
+            output.
 
         figsize : tuple or None
             Figure size.  None uses automatic sizing.
@@ -5322,6 +7514,8 @@ class Designer:
         >>> # result["flagged_diag"] — (candidate, parameter) pairs: one experiment
         >>> #   cannot determine that parameter to within its own magnitude here.
         >>> # result["flagged_cond"] — candidates where parameters are collinear.
+        >>> # result["figs"] is empty unless plot=True is passed:
+        >>> result = d.diagnose_sensitivity(tol_diag=1.0, plot=True)
         """
         if self.sensitivities is None:
             raise RuntimeError(
@@ -5381,66 +7575,74 @@ class Designer:
         flagged_cond = [c for c in range(self.n_c) if cond_numbers[c] > tol_cond]
 
         # --- print report ---
-        sep = "─" * 100
-        print(f"\n{' Sensitivity Diagnosis ':─^100}")
-        print(f"  Candidates         : {self.n_c}")
-        print(f"  Parameters         : {self.n_mp}")
-        print(f"  tol_diag           : {tol_diag:.1g}"
-              f"  (flag A_k[j,j] < {tol_diag:.1g}  ← {tol_diag:.1g} experiment(s) needed"
-              f" for SNR≥1 on θⱼ)")
-        print(f"  tol_cond           : {tol_cond:.1g}")
-        print(f"{sep}")
+        # Gated on `report`. The per-candidate table is n_c rows wide by n_mp
+        # columns; on a 60-candidate 9-parameter model that is 60 lines of
+        # low-density output that buries whatever else the script prints. The
+        # counts and the returned dict carry the same information.
+        if report:
+            sep = "─" * 100
+            print(f"\n{' Sensitivity Diagnosis ':─^100}")
+            print(f"  Candidates         : {self.n_c}")
+            print(f"  Parameters         : {self.n_mp}")
+            print(f"  tol_diag           : {tol_diag:.1g}"
+                  f"  (flag A_k[j,j] < {tol_diag:.1g}  ← {tol_diag:.1g} experiment(s) needed"
+                  f" for SNR≥1 on θⱼ)")
+            print(f"  tol_cond           : {tol_cond:.1g}")
+            print(f"{sep}")
 
-        pcw = max(10, max(len(p) for p in param_names))
-        header = f"  {'Candidate':<20}"
-        for p in param_names:
-            header += f"  {p:>{pcw}}"
-        header += f"  {'Cond#':>12}  Status"
-        print(header)
-        print(f"  {'':20}  " + "  ".join(f"{'A_k[j,j]':>{pcw}}" for _ in param_names)
-              + f"  {'':>12}")
-        print(sep)
+            pcw = max(10, max(len(p) for p in param_names))
+            header = f"  {'Candidate':<20}"
+            for p in param_names:
+                header += f"  {p:>{pcw}}"
+            header += f"  {'Cond#':>12}  Status"
+            print(header)
+            print(f"  {'':20}  " + "  ".join(f"{'A_k[j,j]':>{pcw}}" for _ in param_names)
+                  + f"  {'':>12}")
+            print(sep)
 
-        for c in range(self.n_c):
-            row    = f"  {cand_names[c]:<20}"
-            issues = []
-            for j in range(self.n_mp):
-                val = diag_A[c, j]
-                s   = f"{val:>{pcw}.3f}"
-                if val < tol_diag:
-                    s = f"{'!'+f'{val:.1e}':>{pcw}}"
-                    issues.append(f"{param_names[j]}")
-                row += f"  {s}"
-            cn     = cond_numbers[c]
-            cn_str = f"{cn:>12.2e}" if np.isfinite(cn) else f"{'∞':>12}"
-            if cn > tol_cond:
-                cn_str = f"{'!'+f'{cn:.1e}':>12}"
-                issues.append("ill-cond")
-            row += f"  {cn_str}"
-            if issues:
-                row += f"  ⚠ {', '.join(issues)}"
-            print(row)
+            for c in range(self.n_c):
+                row    = f"  {cand_names[c]:<20}"
+                issues = []
+                for j in range(self.n_mp):
+                    val = diag_A[c, j]
+                    s   = f"{val:>{pcw}.3f}"
+                    if val < tol_diag:
+                        s = f"{'!'+f'{val:.1e}':>{pcw}}"
+                        issues.append(f"{param_names[j]}")
+                    row += f"  {s}"
+                cn     = cond_numbers[c]
+                cn_str = f"{cn:>12.2e}" if np.isfinite(cn) else f"{'∞':>12}"
+                if cn > tol_cond:
+                    cn_str = f"{'!'+f'{cn:.1e}':>12}"
+                    issues.append("ill-cond")
+                row += f"  {cn_str}"
+                if issues:
+                    row += f"  ⚠ {', '.join(issues)}"
+                print(row)
 
-        print(sep)
-        print(f"\n  Summary:")
-        print(f"    Near-zero diagonal flags  : {len(flagged_diag)} "
-              f"(candidate, parameter) pairs")
-        if flagged_diag:
-            for c, j in flagged_diag[:10]:
-                print(f"      {cand_names[c]:<22}  {param_names[j]:<20}"
-                      f"  A_k[j,j] = {diag_A[c,j]:.2e}"
-                      f"  → need ≥{1/max(diag_A[c,j],1e-30):.1f} experiments here for SNR≥1")
-            if len(flagged_diag) > 10:
-                print(f"      ... and {len(flagged_diag)-10} more")
-        print(f"    Ill-conditioned candidates : {len(flagged_cond)}")
-        if flagged_cond:
-            for c in flagged_cond[:10]:
-                print(f"      {cand_names[c]:<22}  cond = {cond_numbers[c]:.2e}")
-            if len(flagged_cond) > 10:
-                print(f"      ... and {len(flagged_cond)-10} more")
-        print(f"{'─'*100}\n")
+            print(sep)
+            print(f"\n  Summary:")
+            print(f"    Near-zero diagonal flags  : {len(flagged_diag)} "
+                  f"(candidate, parameter) pairs")
+            if flagged_diag:
+                for c, j in flagged_diag[:10]:
+                    print(f"      {cand_names[c]:<22}  {param_names[j]:<20}"
+                          f"  A_k[j,j] = {diag_A[c,j]:.2e}"
+                          f"  → need ≥{1/max(diag_A[c,j],1e-30):.1f} experiments here for SNR≥1")
+                if len(flagged_diag) > 10:
+                    print(f"      ... and {len(flagged_diag)-10} more")
+            print(f"    Ill-conditioned candidates : {len(flagged_cond)}")
+            if flagged_cond:
+                for c in flagged_cond[:10]:
+                    print(f"      {cand_names[c]:<22}  cond = {cond_numbers[c]:.2e}")
+                if len(flagged_cond) > 10:
+                    print(f"      ... and {len(flagged_cond)-10} more")
+            print(f"{'─'*100}\n")
 
         # --- plots ---
+        # figs must be initialised OUTSIDE the report block: it is returned
+        # unconditionally, and gating its creation on `report` made
+        # diagnose_sensitivity(report=False) raise UnboundLocalError.
         figs = []
         if plot:
             if figsize is None:
@@ -5474,7 +7676,7 @@ class Designer:
             for c, j in flagged_diag:
                 ax1.text(j, c, '!', ha='center', va='center',
                          color='black', fontsize=8, fontweight='bold')
-            fig1.tight_layout()
+            _safe_tight_layout(fig1)
             figs.append(fig1)
 
             # bar chart of condition numbers
@@ -5494,7 +7696,7 @@ class Designer:
                 '(red = ill-conditioned, parameters are collinear at this candidate)'
             )
             ax2.legend(fontsize=8)
-            fig2.tight_layout()
+            _safe_tight_layout(fig2)
             figs.append(fig2)
 
             if write:
@@ -5729,13 +7931,15 @@ class Designer:
                 out_names = getattr(self, "pyomo_output_var_name", None)
                 n_mr      = self.n_m_r
                 tic_list  = self.ti_controls_candidates
+                spt_list  = self.sampling_times_candidates
                 mp_list   = self.model_parameters   # shape (n_scr, n_mp)
                 n_c_      = self.n_c
                 n_spt_    = self.n_spt
                 n_mp_     = self.n_mp
 
-                def _pb_scenario_worker(scr, mp, tic_list_, out_names_, n_mr_, n_spt__,
-                                            n_mp__, norm_sens):
+                def _pb_scenario_worker(scr, mp, tic_list_, spt_list_, out_names_,
+                                            n_mr_, n_spt__, n_mp__, norm_sens,
+                                            dyn_sys):
                     """Process all candidates for one scenario; runs in a subprocess.
 
                     mp          : parameter vector for THIS scenario.
@@ -5747,8 +7951,38 @@ class Designer:
                     mp = _np.asarray(mp, dtype=float)
                     sens_scr = _np.empty((len(tic_list_), n_spt__, n_mr_, n_mp__))
                     for c, tic in enumerate(tic_list_):
+                        # _eval_sensitivities_pyomo_ift gates the
+                        # sampling_times kwarg on _dynamic_system. That flag was
+                        # previously ABSENT from this namespace, so getattr
+                        # defaulted it to False and sampling_times was forced to
+                        # None regardless of the designer's real setting -- fine
+                        # for static models (where the sequential path also
+                        # passes None, which is why both agreed) but wrong for
+                        # genuinely dynamic ones, where it crashes builders that
+                        # accept the kwarg. Propagate the REAL flag: static
+                        # models keep their previous behaviour exactly, dynamic
+                        # models now receive their sampling times.
+                        if dyn_sys and spt_list_ is not None:
+                            # Dynamic model: use THIS candidate's sampling
+                            # times, mirroring the sequential path
+                            # (self._current_spt = spt_arr[k][~nan]).
+                            _spt_c = _np.atleast_1d(spt_list_[c]).astype(float)
+                            _spt_c = _spt_c[~_np.isnan(_spt_c)]
+                        else:
+                            # Static model: keep the original expression
+                            # verbatim. It reads oddly -- these are the
+                            # time-invariant CONTROLS, not times -- but
+                            # _current_spt is only used for array shapes and
+                            # the time loop here, its length matches n_spt == 1,
+                            # and sampling_times_candidates for a static model
+                            # holds uninitialised placeholder values that must
+                            # NOT be fed to the builder. Changing this branch
+                            # makes the parallel path disagree with the
+                            # sequential one (pydex test 22 / 27).
+                            _spt_c = _np.atleast_1d(tic)
                         fake = types.SimpleNamespace(
-                            _current_spt          = _np.atleast_1d(tic),
+                            _current_spt          = _spt_c,
+                            _dynamic_system       = dyn_sys,
                             pyomo_model_fn        = pyomo_fn,
                             pyomo_output_var_name = out_names_,
                             n_m_r                 = n_mr_,
@@ -5774,10 +8008,12 @@ class Designer:
                 scr_sens = np.empty((self.n_scr, self.n_c, self.n_spt, self.n_m_r, self.n_mp))
                 _pb_par_start = time()
                 _norm_sens = getattr(self, "_norm_sens_by_params", True)
+                _dyn_sys   = bool(getattr(self, "_dynamic_system", False))
                 raw = Parallel(n_jobs=_n_jobs, prefer="processes")(
                     delayed(_pb_scenario_worker)(
-                        scr, mp_list[scr].copy(), list(tic_list), out_names,
-                        n_mr, n_spt_, n_mp_, _norm_sens
+                        scr, mp_list[scr].copy(), list(tic_list),
+                        (list(spt_list) if spt_list is not None else None),
+                        out_names, n_mr, n_spt_, n_mp_, _norm_sens, _dyn_sys
                     )
                     for scr in range(self.n_scr)
                 )
@@ -5839,7 +8075,15 @@ class Designer:
         """ update mp, and efforts """
         self.eval_fim(efforts)
 
-        fim_inv = np.linalg.inv(self.fim)
+        # Guarded inverse. This was previously an unguarded np.linalg.inv, which
+        # raises LinAlgError on an exactly singular FIM and silently returns
+        # garbage on a nearly singular one. Setting pvars to None lets the
+        # consuming criteria report an infeasible design (+inf) instead, which
+        # is what an optimiser can actually act on.
+        fim_inv = self._safe_fim_inverse()
+        if fim_inv is None:
+            self.pvars = None
+            return self.pvars
         if vector:
             self.pvars = np.array([
                 [f @ fim_inv @ f.T for f in F] for F in self.sensitivities
@@ -5853,6 +8097,17 @@ class Designer:
         return self.pvars
 
     def eval_atom_fims(self, mp, store_predictions=True):
+        """Evaluate the atomic FIM of every candidate at given parameter values.
+
+        The atomic FIM is one candidate's information contribution at unit
+        effort; the design FIM is their effort-weighted sum. Computing them once
+        is what makes the optimisation cheap relative to the sensitivity
+        analysis.
+
+        Args:
+            mp (numpy.ndarray): Parameter values to evaluate at.
+            store_predictions (bool): Keep the predicted responses.
+        """
         self._current_scr_mp = mp
 
         """ eval_sensitivities, only runs if model parameters changed """
@@ -5889,6 +8144,16 @@ class Designer:
     """ getters (filters) """
 
     def get_optimal_candidates(self, tol=1e-4):
+        """Collect the candidates carrying non-negligible effort.
+
+        Args:
+            tol (float): Effort below which a candidate is treated as unused.
+
+        Returns:
+            list: One entry per supported candidate, holding its index, control
+            values, sampling times, sampling schedules and efforts. Also stored
+            on :attr:`optimal_candidates`.
+        """
         if self.efforts is None:
             raise SyntaxError(
                 'Please solve an experiment design before attempting to get optimal '
@@ -5974,31 +8239,421 @@ class Designer:
             jac = -np.array([np.sum(fim_inv.T * m) for m in self.atomic_fims])
             return (-d_opt, jac) if sign == 1 else (np.inf, jac)
 
-    def _a_opt_criterion(self, efforts):
-        """ A-optimality: minimise trace(FIM^{-1}). """
+    def _resolve_ds_idx(self):
+        """
+        Resolve the user-declared interest-parameter NAMES
+        (self.ds_interest_names) into positional indices into the FIM, by
+        matching each name against self.model_parameter_names.
+
+        Matching is by exact name, never by position/order: the position of
+        a parameter in the FIM follows the order of self.model_parameters as
+        supplied to the designer, which is independent of (and not
+        guaranteed to track) the order in which a Pyomo model happens to
+        declare its equations or variables. Resolving lazily here — rather
+        than at `interest_parameters` assignment time — also allows
+        interest_parameters to be set before initialize() has populated
+        (or defaulted) model_parameter_names.
+
+        Results are cached in self.ds_interest_idx / self.ds_nuisance_idx
+        and reused on subsequent calls.
+        """
+        if self.ds_interest_idx is not None and self.ds_nuisance_idx is not None:
+            return self.ds_interest_idx, self.ds_nuisance_idx
+
+        if self.ds_interest_names is None:
+            raise SyntaxError(
+                "Ds-optimal design requires designer.interest_parameters to "
+                "be set to the NAMES of the parameters of interest, e.g. "
+                "designer.interest_parameters = ['Ka', 'A0']."
+            )
+        if self.model_parameter_names is None:
+            raise SyntaxError(
+                "designer.model_parameter_names is not set, but "
+                "interest_parameters matches parameters BY NAME against it. "
+                "Assign designer.model_parameter_names (or call "
+                "initialize() first, which defaults them) before evaluating "
+                "ds_opt_criterion."
+            )
+
+        name_list = list(self.model_parameter_names)
+        idx_s = []
+        for nm in self.ds_interest_names:
+            if nm not in name_list:
+                raise ValueError(
+                    f"interest_parameters: '{nm}' not found in "
+                    f"model_parameter_names {name_list}. Names must match "
+                    f"exactly."
+                )
+            idx_s.append(name_list.index(nm))
+        idx_s = np.array(sorted(set(idx_s)), dtype=int)
+        idx_n = np.array(
+            [j for j in range(self.n_mp) if j not in idx_s], dtype=int
+        )
+        self.ds_interest_idx = idx_s
+        self.ds_nuisance_idx = idx_n
+        return idx_s, idx_n
+
+    def _ds_opt_criterion(self, efforts):
+        """
+        Ds-optimality: maximise log-det of the Schur complement of the
+        nuisance-parameter block of the FIM, i.e. D-optimal design for a
+        SUBSET of model_parameters ("interest" parameters, indices idx_s)
+        while marginalising out the remaining ("nuisance") parameters
+        (indices idx_n).
+
+        Partitioning the FIM (after conceptually reordering rows/columns so
+        interest parameters come first) as
+
+            FIM = [[M_ss, M_sn],
+                   [M_ns, M_nn]]
+
+        the Schur complement of the nuisance block M_nn is
+
+            S = M_ss - M_sn @ M_nn^{-1} @ M_ns
+
+        and, by the Schur determinant identity,
+
+            det(S) = det(FIM) / det(M_nn)
+            log-det(S) = log-det(FIM) - log-det(M_nn)
+
+        The determinant identity above is NOT used to evaluate the criterion,
+        because it is 0/0-indeterminate precisely when an unidentifiable
+        nuisance parameter makes both determinants vanish — the very case
+        Ds-optimality exists to handle. S is instead formed explicitly (it is
+        only n_s x n_s) via a least-squares nuisance solve; see
+        _ds_eval_schur() for the full numerical rationale. When there are no
+        nuisance parameters (idx_n is empty), Ds-optimality collapses exactly
+        to D-optimality and is delegated to _d_opt_criterion.
+
+        The analytic (non finite-difference) Jacobian uses S = Pᵀ·FIM·P with
+        P = [[I_s], [-M_nn^{-1} M_ns]], giving
+
+            d/de_i log-det(S) = trace(S^{-1} Pᵀ A_i P)
+
+        for the i-th atomic FIM A_i (the FIM is linear in the efforts). This
+        form needs only S^{-1}, so it remains valid when M_nn is singular,
+        unlike the identity-based gradient which needs both FIM^{-1} and
+        M_nn^{-1}.
+        """
+        idx_s, idx_n = self._resolve_ds_idx()
         self.eval_fim(efforts)
 
-        if self.fim.size == 1:
-            if self._fd_jac:
-                return -self.fim
-            else:
-                jac = np.array([m for m in self.atomic_fims])
-                return -self.fim, jac
+        if len(idx_n) == 0:
+            # no nuisance parameters: Ds-optimality reduces to D-optimality
+            return self._d_opt_criterion(efforts)
+
+        n_grad = self._n_grad(efforts)
+        logdet_S, P, S_inv, info = self._ds_eval_schur(
+            self.fim, idx_s, idx_n, want_grad=not self._fd_jac
+        )
+
+        if logdet_S is None:
+            return self._ds_infeasible(n_grad, info)
 
         if self._fd_jac:
-            eigvals = np.linalg.eigvalsh(self.fim)
-            return np.sum(1 / eigvals) if np.all(eigvals > 0) else 0
-        else:
-            jac = np.zeros(self.n_e)
+            return -logdet_S
+
+        atoms = self.atomic_fims
+        if atoms is None:
+            raise RuntimeError(
+                "Analytic Jacobian for ds_opt_criterion requires atomic FIMs, "
+                "but self.atomic_fims is None (large-memory mode). Set "
+                "designer._fd_jac = True, or reduce the problem size."
+            )
+        # d/de_i log-det(S) = trace(S^{-1} Pᵀ A_i P), exact because the FIM is
+        # linear in the efforts and the P-dependence contributes nothing (the
+        # [S 0] structure of Pᵀ·FIM makes the envelope/Danskin term vanish).
+        jac = -np.array([
+            np.sum(S_inv.T * (P.T @ np.asarray(a) @ P)) for a in atoms
+        ])
+        return -logdet_S, jac
+
+    """ Ds-optimality numerical kernel """
+
+    def _n_grad(self, efforts):
+        """
+        Length the criterion gradient must have. Prefer the number of atomic
+        FIMs (the authoritative count of effort variables); fall back to the
+        size of the effort vector when atomics are unavailable, so that an
+        infeasible return still has the right shape instead of crashing.
+
+        Used by the Ds and A criteria. Note self.n_e is NOT usable for this:
+        it is initialised to None and never assigned anywhere in the class.
+        """
+        if self.atomic_fims is not None:
             try:
-                fim_inv = np.linalg.inv(self.fim)
-                a_opt = fim_inv.trace()
-                jac = -np.array([
-                    np.sum((fim_inv @ fim_inv) * m) for m in self.atomic_fims
-                ])
-            except np.linalg.LinAlgError:
-                a_opt = 0
-            return a_opt, jac
+                return len(self.atomic_fims)
+            except TypeError:
+                pass
+        return int(np.asarray(efforts).size)
+
+    def _ds_infeasible(self, n_grad, info=None):
+        """ Uniform infeasible return, shaped for the active gradient mode. """
+        if info is not None and self._verbose >= 2:
+            reason = info.get("reason", "unspecified")
+            print(f"[ds_opt_criterion] infeasible FIM ({reason}).")
+        if self._fd_jac:
+            return np.inf
+        return np.inf, np.zeros(n_grad)
+
+    def _prepare_fim(self, fim):
+        """
+        Coerce a candidate FIM into a well-formed (n_mp, n_mp) finite array,
+        or return None if it is degenerate. Shared by the Ds and A criteria.
+
+        This guards several shapes that _eval_fim can legitimately produce and
+        that would otherwise crash the sub-block extraction below:
+          * python int 0 — self.fim is initialised to the scalar 0 and is only
+            incremented for candidates with non-NaN sensitivities, so a grid
+            whose sensitivities are all NaN leaves it a scalar;
+          * np.array([0]) — the 1-D sentinel returned on an all-zero FIM;
+          * an all-zero (n_mp, n_mp) array — every effort driven to zero;
+          * non-finite entries from a diverged simulation.
+        """
+        if fim is None:
+            return None
+        fim = np.asarray(fim, dtype=float)
+        if fim.ndim != 2 or fim.shape != (self.n_mp, self.n_mp):
+            return None
+        if not np.all(np.isfinite(fim)):
+            return None
+        if np.all(fim == 0.0):
+            return None
+        return fim
+
+    def _ds_eval_schur(self, fim, idx_s, idx_n, want_grad=False):
+        """
+        Evaluate log-det of the Schur complement of the nuisance block.
+
+        Returns (logdet_S, P, S_inv, info). logdet_S is None when Ds is
+        infeasible at this FIM; info carries diagnostics.
+
+        Why this does NOT use the determinant identity
+        ----------------------------------------------
+        log-det(S) = log-det(FIM) - log-det(M_nn) is algebraically correct but
+        numerically fragile in exactly the case Ds-optimality exists to serve.
+        If a nuisance parameter is wholly unidentified by the data, BOTH
+        determinants vanish and the identity becomes 0/0 — reported as
+        infeasible — even though S itself remains finite and positive definite.
+        That is the single most valuable Ds use case (design for the parameters
+        you care about while an uninteresting parameter stays unidentifiable),
+        so it must not be rejected.
+
+        Conditioning note
+        -----------------
+        The nuisance block is never the conditioning bottleneck. For a PSD FIM,
+        Cauchy eigenvalue interlacing gives
+            lambda_min(FIM) <= lambda_min(M_nn) <= lambda_max(M_nn) <= lambda_max(FIM)
+        hence cond(M_nn) <= cond(FIM): a principal submatrix of a PSD matrix is
+        PSD and no worse conditioned than its parent. So M_nn singular IMPLIES
+        FIM singular, but not conversely. The quantity whose conditioning
+        actually governs Ds is S, which is why S is formed explicitly (it is
+        only n_s x n_s, so this is cheap) and tested directly.
+
+        Solving for W = M_nn^+ M_ns by least squares yields the minimum-norm
+        solution when M_nn is rank-deficient, which is precisely the limiting
+        (generalised) Schur complement — valid whenever range(M_ns) is
+        contained in range(M_nn). That containment is automatic for any PSD
+        FIM: if M_nn v = 0 then v'M_nn v = 0, and PSD-ness of the FIM forces
+        FIM[0; v] = 0, hence M_sn v = 0. A non-negligible least-squares
+        residual therefore indicates a NON-PSD FIM, for which S genuinely
+        diverges — correctly reported as infeasible.
+        """
+        info = {"reason": None, "nuisance_rank": None,
+                "nuisance_rank_deficient": False, "cond_S": np.inf,
+                "residual": 0.0}
+
+        fim = self._prepare_fim(fim)
+        if fim is None:
+            info["reason"] = "FIM absent, wrong shape, all-zero, or non-finite"
+            return None, None, None, info
+
+        # Cheap sanity check on the FULL FIM. It is PSD by construction
+        # (Σᵢ eᵢ·SᵢᵀΣ⁻¹Sᵢ with eᵢ >= 0), so an indefinite FIM means something is
+        # wrong upstream — almost always a user-supplied _prior_fim that is not
+        # itself PSD. Worth surfacing loudly, because the Schur complement can
+        # still come out positive definite in that situation and would
+        # otherwise hand back a plausible-looking number built on an invalid
+        # information matrix. Not treated as fatal: S being PD is what the
+        # criterion actually requires.
+        _eig_fim = np.linalg.eigvalsh(0.5 * (fim + fim.T))
+        _psd_tol = -max(1.0, float(np.abs(_eig_fim).max())) * 1e-10
+        info["fim_not_psd"] = bool(_eig_fim.min() < _psd_tol)
+        if info["fim_not_psd"] and self._verbose >= 1:
+            if "fim_psd" not in self._ds_warned:
+                self._ds_warned.add("fim_psd")
+                print(
+                    f"[WARNING][ds_opt_criterion] the FIM is not positive "
+                    f"semi-definite (lambda_min = {_eig_fim.min():.3e}). A FIM "
+                    f"assembled from sensitivities is PSD by construction, so "
+                    f"this usually means designer._prior_fim is not PSD. The "
+                    f"Ds value below is computed from the Schur complement and "
+                    f"may be meaningless."
+                )
+
+        m_ss = fim[np.ix_(idx_s, idx_s)]
+        m_sn = fim[np.ix_(idx_s, idx_n)]
+        m_ns = fim[np.ix_(idx_n, idx_s)]
+        m_nn = fim[np.ix_(idx_n, idx_n)]
+
+        # W = M_nn^+ M_ns via least squares (handles singular M_nn).
+        try:
+            W, _res, rank, svals = np.linalg.lstsq(
+                m_nn, m_ns, rcond=self._ds_rcond
+            )
+        except np.linalg.LinAlgError:
+            info["reason"] = "nuisance-block least-squares solve failed (SVD)"
+            return None, None, None, info
+
+        info["nuisance_rank"] = int(rank)
+        info["nuisance_rank_deficient"] = bool(rank < len(idx_n))
+
+        # Inconsistent solve => non-PSD FIM => S diverges.
+        resid = float(np.linalg.norm(m_nn @ W - m_ns))
+        scale = max(1.0, float(np.linalg.norm(m_ns)))
+        info["residual"] = resid / scale
+        if info["residual"] > self._ds_resid_tol:
+            info["reason"] = (
+                f"nuisance solve inconsistent (rel. residual "
+                f"{info['residual']:.2e}) — FIM is not positive semi-definite, "
+                f"so the Schur complement diverges"
+            )
+            return None, None, None, info
+
+        S = m_ss - m_sn @ W
+        S = 0.5 * (S + S.T)     # re-symmetrise against round-off asymmetry
+
+        # Genuine positive-definiteness test. A determinant-sign check is NOT
+        # sufficient: det > 0 only requires an EVEN number of negative
+        # eigenvalues, so an indefinite matrix (e.g. diag(1, 1, -1, -1), which
+        # a rescaled user-supplied prior FIM can produce) passes a sign test
+        # while being meaningless as an information matrix. Cholesky is the
+        # correct test and simultaneously gives a stable log-det.
+        try:
+            chol_S = np.linalg.cholesky(S)
+        except np.linalg.LinAlgError:
+            info["reason"] = "Schur complement not positive definite"
+            return None, None, None, info
+
+        diag_S = np.diag(chol_S)
+        if not np.all(diag_S > 0) or not np.all(np.isfinite(diag_S)):
+            info["reason"] = "Schur complement Cholesky degenerate"
+            return None, None, None, info
+
+        logdet_S = float(2.0 * np.sum(np.log(diag_S)))
+        if not np.isfinite(logdet_S):
+            info["reason"] = "log-det(S) non-finite"
+            return None, None, None, info
+
+        # Conditioning diagnostics (S is small, so this is cheap).
+        eig_S = np.linalg.eigvalsh(S)
+        info["cond_S"] = (
+            float(eig_S.max() / eig_S.min()) if eig_S.min() > 0 else np.inf
+        )
+        if self._verbose >= 1 and info["cond_S"] > self._ds_cond_warn:
+            key = "cond_S"
+            if key not in self._ds_warned:
+                self._ds_warned.add(key)
+                print(
+                    f"[WARNING][ds_opt_criterion] Schur complement is "
+                    f"ill-conditioned (cond = {info['cond_S']:.2e}). The "
+                    f"interest parameters are close to collinear after "
+                    f"marginalising the nuisance parameters; the Ds design may "
+                    f"be numerically unreliable. Consider reducing "
+                    f"interest_parameters, or enabling regularize_fim."
+                )
+        if (self._verbose >= 2 and info["nuisance_rank_deficient"]
+                and "nuis_rank" not in self._ds_warned):
+            self._ds_warned.add("nuis_rank")
+            print(
+                f"[INFO][ds_opt_criterion] nuisance block is rank-deficient "
+                f"(rank {info['nuisance_rank']}/{len(idx_n)}). Using the "
+                f"generalised (minimum-norm) Schur complement — this is well "
+                f"defined and is a normal situation for Ds-optimal design."
+            )
+
+        P, S_inv = None, None
+        if want_grad:
+            P = np.zeros((self.n_mp, len(idx_s)))
+            P[idx_s, :] = np.eye(len(idx_s))
+            P[idx_n, :] = -W
+            try:
+                from scipy.linalg import cho_solve
+                S_inv = cho_solve((chol_S, True), np.eye(len(idx_s)))
+            except Exception:
+                S_inv = np.linalg.inv(S)
+            S_inv = 0.5 * (S_inv + S_inv.T)
+
+        return logdet_S, P, S_inv, info
+
+    def _a_opt_criterion(self, efforts):
+        """
+        A-optimality: minimise trace(FIM^{-1}), i.e. the total (summed)
+        variance of the parameter estimates.
+
+        Infeasibility convention
+        ------------------------
+        A-optimality is MINIMISED, and trace(FIM^{-1}) diverges to +inf as the
+        FIM approaches singularity. An unusable FIM must therefore return +inf.
+        Earlier revisions returned 0, which is the BEST attainable value and
+        made a singular FIM look like a perfect design -- actively attracting
+        the optimiser toward rank-deficient supports. The sign of that error
+        matters more than its magnitude, so it is called out here explicitly.
+
+        Positive-definiteness is tested by eigenvalue in BOTH the
+        finite-difference and analytic branches. Testing only for
+        LinAlgError (as the analytic branch previously did) is insufficient:
+        an indefinite matrix such as diag(1, -1) inverts cleanly and yields a
+        NEGATIVE trace, which to a minimiser looks better than any feasible
+        design. It also made the two branches disagree about feasibility, so
+        flipping _fd_jac silently changed the answer.
+        """
+        self.eval_fim(efforts)
+
+        n_grad = self._n_grad(efforts)
+        fim_raw = self.fim
+
+        # Single-parameter case, checked BEFORE _prepare_fim because the
+        # original implementation short-circuited on fim.size == 1 without
+        # consulting n_mp; preserving that ordering keeps genuine
+        # single-parameter studies bit-identical. Kept as the historical
+        # monotone-equivalent surrogate -maximise(FIM) rather than
+        # minimise(1/FIM): both order designs identically for FIM > 0.
+        # The finite/positive guard is new, so that the np.array([0]) sentinel
+        # _eval_fim can return routes to the infeasible branch instead of
+        # yielding a meaningless -0.
+        if isinstance(fim_raw, np.ndarray) and fim_raw.size == 1:
+            _v = float(np.asarray(fim_raw, dtype=float).reshape(-1)[0])
+            if np.isfinite(_v) and _v > 0.0:
+                if self._fd_jac:
+                    return -fim_raw
+                jac = np.array([m for m in self.atomic_fims])
+                return -fim_raw, jac
+            return np.inf if self._fd_jac else (np.inf, np.zeros(n_grad))
+
+        fim = self._prepare_fim(fim_raw)
+        if fim is None:
+            # degenerate FIM (absent, wrong shape, all-zero, non-finite)
+            return np.inf if self._fd_jac else (np.inf, np.zeros(n_grad))
+
+        eigvals = np.linalg.eigvalsh(0.5 * (fim + fim.T))
+        if not np.all(eigvals > 0):
+            return np.inf if self._fd_jac else (np.inf, np.zeros(n_grad))
+
+        if self._fd_jac:
+            return float(np.sum(1.0 / eigvals))
+
+        try:
+            fim_inv = np.linalg.inv(fim)
+        except np.linalg.LinAlgError:
+            return np.inf, np.zeros(n_grad)
+        a_opt = float(fim_inv.trace())
+        if not np.isfinite(a_opt):
+            return np.inf, np.zeros(n_grad)
+        jac = -np.array([
+            np.sum((fim_inv @ fim_inv) * np.asarray(m)) for m in self.atomic_fims
+        ])
+        return a_opt, jac
 
     def _e_opt_criterion(self, efforts):
         """ E-optimality: maximise minimum eigenvalue of FIM. """
@@ -6013,18 +8668,229 @@ class Designer:
             raise NotImplementedError  # TODO: implement analytic jac for e-opt
 
     # prediction-oriented
-    def _dg_opt_criterion(self, efforts):
+    """ Prediction-variance criterion helpers (dg / di / vdi) """
 
+    def _safe_fim_inverse(self):
+        """
+        Inverse of the current FIM, or None when the FIM is not usable.
+
+        Positive-definiteness is tested by eigenvalue rather than relying on
+        np.linalg.inv raising: an indefinite matrix inverts cleanly and yields
+        a plausible-looking but meaningless PVAR.
+        """
+        fim = getattr(self, "fim", None)
+        if fim is None:
+            return None
+        fim = np.asarray(fim, dtype=float)
+        if fim.ndim != 2 or fim.shape[0] != fim.shape[1]:
+            return None
+        if not np.all(np.isfinite(fim)):
+            return None
+        eig = np.linalg.eigvalsh(0.5 * (fim + fim.T))
+        if not np.all(eig > 0):
+            return None
+        try:
+            return np.linalg.inv(fim)
+        except np.linalg.LinAlgError:
+            return None
+
+    def reset_pvar_logdet_mode(self):
+        """
+        Clear the latched det/pseudo-det decision for dg / di / vdi.
+
+        Called automatically at the start of design_experiment(). Call it
+        manually if you change model_parameters, candidates or measurable
+        responses and then re-evaluate a determinant-based prediction-variance
+        criterion outside of design_experiment().
+        """
+        self._pvar_logdet_mode = None
+        self._pvar_warned = set()
+
+    def _pvar_log_pdet(self, pvar):
+        """
+        log pseudo-determinant: the sum of log-eigenvalues above a relative
+        cutoff. Well defined for a singular or near-singular PSD matrix, where
+        the ordinary determinant is either exactly zero or numerical noise.
+        Reduces to log-det when the matrix is well conditioned.
+
+        Returns (value, n_kept).
+        """
+        P = np.asarray(pvar, dtype=float)
+        ev = np.linalg.eigvalsh(0.5 * (P + P.T))
+        if ev.size == 0 or not np.all(np.isfinite(ev)):
+            return -np.inf, 0
+        ev_max = ev.max()
+        if not np.isfinite(ev_max) or ev_max <= 0.0:
+            return -np.inf, 0
+        keep = ev[ev > self._pvar_rcond * ev_max]
+        if keep.size == 0:
+            return -np.inf, 0
+        return float(np.sum(np.log(keep))), int(keep.size)
+
+    def _pvar_slogdets(self):
+        """
+        Per-block (sign, logdet) of self.pvars, plus the near-singularity
+        diagnostic on the underlying sensitivity blocks.
+
+        Returns (signs, logdets) as (n_blk0, n_blk1) arrays, or (None, None)
+        when pvars is unavailable.
+        """
+        pvars = getattr(self, "pvars", None)
+        if pvars is None:
+            return None, None
+        P = np.asarray(pvars, dtype=float)
+        if P.ndim != 4:
+            return None, None
+        n0, n1 = P.shape[0], P.shape[1]
+        signs = np.empty((n0, n1))
+        logdets = np.empty((n0, n1))
+        for c in range(n0):
+            for t in range(n1):
+                signs[c, t], logdets[c, t] = np.linalg.slogdet(P[c, t])
+        return signs, logdets
+
+    def _pvar_warn_near_singular(self):
+        """
+        Warn once when the sensitivity blocks feeding PVAR are near-singular.
+
+        This is a MODELLING signal, not a numerical one: it means the measurable
+        responses are close to linearly dependent in sensitivity space at some
+        conditions, so the response set carries fewer independent directions
+        than it appears to. Only the determinant-based criteria are sensitive to
+        it, which is why it is surfaced here rather than treated as an error.
+        """
+        if self._verbose < 1 or "near_sing" in self._pvar_warned:
+            return
+        sens = getattr(self, "sensitivities", None)
+        if sens is None:
+            return
+        S = np.asarray(sens, dtype=float)
+        if S.ndim != 4:
+            return
+        worst = np.inf
+        for c in range(S.shape[0]):
+            for t in range(S.shape[1]):
+                sv = np.linalg.svd(S[c, t], compute_uv=False)
+                if sv.size and sv[0] > 0:
+                    worst = min(worst, float(sv[-1] / sv[0]))
+        if np.isfinite(worst) and worst < self._pvar_cond_warn:
+            self._pvar_warned.add("near_sing")
+            print(
+                f"[WARNING][pvar] the response sensitivity blocks are "
+                f"near-singular (smallest sv_min/sv_max over all "
+                f"candidate/sampling-time pairs = {worst:.2e}). The measurable "
+                f"responses are close to linearly dependent in sensitivity "
+                f"space, so PVAR has a near-null direction. Determinant-based "
+                f"criteria (dg, di, vdi) multiply that direction in and lose "
+                f"meaning; trace-based (ag, ai) and eigenvalue-based (eg, ei) "
+                f"criteria are unaffected."
+            )
+
+    def _pvar_decide_logdet_mode(self, signs, trial, label, scale_floor=None):
+        """
+        Decide ONCE per design run whether the ordinary determinant form of a
+        prediction-variance criterion is usable, and latch the answer.
+
+        Latching matters: the branch must not flip while the optimiser is
+        running, or the objective becomes discontinuous and SLSQP breaks. The
+        test is deliberately BEHAVIOURAL ("did the original form produce a
+        usable number?") rather than rank-based, because the numerical rank of
+        PVAR is tolerance-dependent and was observed to flip between values
+        across effort vectors for blocks sitting on the cutoff.
+
+        Returns 'det' (use the original definition, bit-identically) or 'pdet'.
+        """
+        if self._pvar_logdet_mode is not None:
+            return self._pvar_logdet_mode
+
+        reasons = []
+        if signs is not None and not np.all(signs == 1):
+            n_bad = int((signs != 1).sum())
+            reasons.append(
+                f"{n_bad} of {signs.size} PVAR blocks are not positive definite"
+            )
+        if trial is not None and not np.isfinite(trial):
+            reasons.append(f"the aggregate evaluates to {trial}")
+        if (scale_floor is not None and trial is not None
+                and np.isfinite(trial) and abs(trial) < scale_floor):
+            reasons.append(
+                f"|aggregate| = {abs(trial):.3e} is below the usable floor "
+                f"{scale_floor:.0e}, i.e. numerical noise rather than signal"
+            )
+
+        if reasons:
+            self._pvar_logdet_mode = "pdet"
+            if self._verbose >= 1 and "mode" not in self._pvar_warned:
+                self._pvar_warned.add("mode")
+                print(
+                    f"[WARNING][{label}] the determinant form of this criterion "
+                    f"is not usable here ({'; '.join(reasons)}). Falling back to "
+                    f"the log-PSEUDO-determinant (sum of log-eigenvalues above "
+                    f"a relative cutoff of {self._pvar_rcond:.0e}), which stays "
+                    f"finite and O(1) for a near-singular PVAR. NOTE this "
+                    f"CHANGES the criterion definition, and the reported value "
+                    f"is on a LOG scale -- it is not comparable with a "
+                    f"determinant from a well-conditioned problem. The decision "
+                    f"is latched for this design run; see "
+                    f"reset_pvar_logdet_mode()."
+                )
+        else:
+            self._pvar_logdet_mode = "det"
+        return self._pvar_logdet_mode
+
+    def _dg_opt_criterion(self, efforts):
+        """
+        dg-optimality: the WORST (maximum) determinant of the prediction
+        variance matrix over all candidate / sampling-time pairs, minimised.
+
+        Two defects in the previous implementation are fixed here.
+
+        1. `dg_opts[c, spt] = sign * np.exp(temp_dg)` with `temp_dg` set to inf
+           when `sign != 1` evaluates to `0 * inf = nan` for a SINGULAR block
+           (sign == 0), and np.nanmax then silently DISCARDS it. Degenerate
+           blocks -- exactly the ones that should dominate a worst-case
+           criterion -- were being dropped from the maximum.
+        2. Even with valid blocks, det() of an n_r x n_r matrix of small
+           variances underflows toward zero. An objective below the solver's
+           absolute ftol makes SLSQP declare convergence at iteration 1 and
+           return the starting design untouched.
+
+        When every block is positive definite and the aggregate is on a usable
+        scale, the original determinant definition is kept EXACTLY (the same
+        slogdet call, so values are bit-identical to previous releases).
+        Otherwise a log-pseudo-determinant is substituted; see
+        _pvar_decide_logdet_mode.
+        """
         self.eval_pim(efforts)
-        # dg_opt: max det of the pvar matrix over candidates and sampling times
-        dg_opts = np.empty((self.n_c, self.n_spt))
-        for c, PVAR in enumerate(self.pvars):
-            for spt, pvar in enumerate(PVAR):
-                sign, temp_dg = np.linalg.slogdet(pvar)
-                if sign != 1:
-                    temp_dg = np.inf
-                dg_opts[c, spt] = sign * np.exp(temp_dg)
-        dg_opt = np.nanmax(dg_opts)
+        if self.pvars is None:
+            if self._fd_jac:
+                return np.inf
+            raise NotImplementedError("Analytic Jacobian for dg_opt unavailable.")
+
+        self._pvar_warn_near_singular()
+        signs, logdets = self._pvar_slogdets()
+        if signs is None:
+            if self._fd_jac:
+                return np.inf
+            raise NotImplementedError("Analytic Jacobian for dg_opt unavailable.")
+
+        # trial value under the ORIGINAL definition, used only to decide the mode
+        with np.errstate(over="ignore"):
+            trial = float(np.nanmax(np.where(signs == 1, np.exp(logdets), -np.inf)))
+        mode = self._pvar_decide_logdet_mode(
+            signs, trial, "dg_opt", scale_floor=self._pvar_scale_floor
+        )
+
+        if mode == "det":
+            dg_opt = trial
+        else:
+            vals = [
+                self._pvar_log_pdet(self.pvars[c, t])[0]
+                for c in range(np.asarray(self.pvars).shape[0])
+                for t in range(np.asarray(self.pvars).shape[1])
+            ]
+            finite = [v for v in vals if np.isfinite(v)]
+            dg_opt = float(max(finite)) if finite else np.inf
 
         if self._fd_jac:
             return dg_opt
@@ -6032,20 +8898,50 @@ class Designer:
             raise NotImplementedError("Analytic Jacobian for dg_opt unavailable.")
 
     def _di_opt_criterion(self, efforts):
+        """
+        di-optimality: the SUM of log-determinants of the prediction variance
+        matrix over all candidate / sampling-time pairs, minimised.
 
+        Note the original comment said "average det"; the computation is a sum
+        of log-determinants. The computation is preserved -- only the comment
+        was wrong.
+
+        The previous implementation set a block's contribution to +inf whenever
+        slogdet reported a non-positive-definite PVAR, so a SINGLE degenerate
+        block drove the whole sum to +inf and destroyed all design information.
+        When every block is positive definite the original definition is kept
+        exactly; otherwise a log-pseudo-determinant is substituted. See
+        _pvar_decide_logdet_mode.
+        """
         self.eval_pim(efforts)
-        # di_opt: average det of the pvar matrix over candidates and sampling times
-        dg_opts = np.empty((self.n_c, self.n_spt))
-        for c, PVAR in enumerate(self.pvars):
-            for spt, pvar in enumerate(PVAR):
-                sign, temp_dg = np.linalg.slogdet(pvar)
-                if sign != 1:
-                    temp_dg = np.inf
-                dg_opts[c, spt] = temp_dg
-        dg_opt = np.nansum(dg_opts)
+        if self.pvars is None:
+            if self._fd_jac:
+                return np.inf
+            raise NotImplementedError("Analytic Jacobian for di_opt unavailable.")
+
+        self._pvar_warn_near_singular()
+        signs, logdets = self._pvar_slogdets()
+        if signs is None:
+            if self._fd_jac:
+                return np.inf
+            raise NotImplementedError("Analytic Jacobian for di_opt unavailable.")
+
+        trial = float(np.nansum(np.where(signs == 1, logdets, np.inf)))
+        mode = self._pvar_decide_logdet_mode(signs, trial, "di_opt")
+
+        if mode == "det":
+            di_opt = trial
+        else:
+            vals = [
+                self._pvar_log_pdet(self.pvars[c, t])[0]
+                for c in range(np.asarray(self.pvars).shape[0])
+                for t in range(np.asarray(self.pvars).shape[1])
+            ]
+            di_opt = np.inf if any(not np.isfinite(v) for v in vals) \
+                else float(np.sum(vals))
 
         if self._fd_jac:
-            return dg_opt
+            return di_opt
         else:
             raise NotImplementedError("Analytic Jacobian for di_opt unavailable.")
 
@@ -6088,7 +8984,13 @@ class Designer:
         eg_opts = np.empty((self.n_c, self.n_spt))
         for c, PVAR in enumerate(self.pvars):
             for spt, pvar in enumerate(PVAR):
-                temp_dg = np.linalg.eigvals(pvar).max()
+                # eigvalsh: PVAR is symmetric by construction, so use the
+                # symmetric solver -- it is faster and guarantees a real
+                # spectrum, whereas the general eigvals can return a complex
+                # array whose imaginary part is then silently discarded on
+                # assignment into a float buffer.
+                _P = np.asarray(pvar, dtype=float)
+                temp_dg = np.linalg.eigvalsh(0.5 * (_P + _P.T)).max()
                 eg_opts[c, spt] = temp_dg
         eg_opt = np.nanmax(eg_opts)
 
@@ -6104,7 +9006,13 @@ class Designer:
         ei_opts = np.empty((self.n_c, self.n_spt))
         for c, PVAR in enumerate(self.pvars):
             for spt, pvar in enumerate(PVAR):
-                temp_dg = np.linalg.eigvals(pvar).max()
+                # eigvalsh: PVAR is symmetric by construction, so use the
+                # symmetric solver -- it is faster and guarantees a real
+                # spectrum, whereas the general eigvals can return a complex
+                # array whose imaginary part is then silently discarded on
+                # assignment into a float buffer.
+                _P = np.asarray(pvar, dtype=float)
+                temp_dg = np.linalg.eigvalsh(0.5 * (_P + _P.T)).max()
                 ei_opts[c, spt] = temp_dg
         ei_opt = np.nansum(ei_opts)
 
@@ -6130,17 +9038,125 @@ class Designer:
                 sign, scr_d_opt = np.linalg.slogdet(fim)
                 d_opt += scr_d_opt if sign == 1 else np.inf
             return -d_opt / self.n_scr
+        else:
+            # Fail loudly rather than falling through and returning None, which
+            # surfaces later as an opaque TypeError inside the optimizer.
+            raise ValueError(
+                f"_pseudo_bayesian_type is {self._pseudo_bayesian_type!r}; "
+                f"expected 0/'avg_inf'/'average_information' or "
+                f"1/'avg_crit'/'average_criterion'. It is normally defaulted by "
+                f"design_experiment(); set it explicitly when calling a "
+                f"pseudo-Bayesian criterion directly."
+            )
 
-    def _pb_a_opt_criterion(self, efforts):
-        """ Pseudo-Bayesian A-optimality. """
+
+    def _pb_ds_opt_criterion(self, efforts):
+        """
+        Pseudo-Bayesian Ds-optimality: as _ds_opt_criterion, but averaged
+        over parameter scenarios (either by averaging the FIM itself, or by
+        averaging the per-scenario Ds criterion value, per
+        self._pseudo_bayesian_type).
+        """
+        idx_s, idx_n = self._resolve_ds_idx()
         self.eval_fim(efforts)
 
+        def scr_ds(fim):
+            """ Per-scenario Ds value; +inf when infeasible. """
+            fim = self._prepare_fim(fim)
+            if fim is None:
+                return np.inf
+            if len(idx_n) == 0:
+                # degenerates to D-optimality; use a Cholesky PD test rather
+                # than a determinant-sign test (see _ds_eval_schur).
+                try:
+                    chol = np.linalg.cholesky(0.5 * (fim + fim.T))
+                except np.linalg.LinAlgError:
+                    return np.inf
+                return -float(2.0 * np.sum(np.log(np.diag(chol))))
+            logdet_S, _P, _S_inv, _info = self._ds_eval_schur(
+                fim, idx_s, idx_n, want_grad=False
+            )
+            return np.inf if logdet_S is None else -logdet_S
+
+        scr_fims = self.scr_fims
+        if scr_fims is None:
+            return np.inf
+
         if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
-            return np.linalg.inv(
-                np.mean([fim for fim in self.scr_fims], axis=0)
-            ).trace()
+            prepared = [self._prepare_fim(f) for f in scr_fims]
+            if any(f is None for f in prepared):
+                # a degenerate scenario FIM would poison the average
+                return np.inf
+            return scr_ds(np.mean(prepared, axis=0))
         elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
-            return np.mean([np.linalg.inv(fim).trace() for fim in self.scr_fims])
+            vals = [scr_ds(fim) for fim in scr_fims]
+            return np.inf if any(np.isinf(v) for v in vals) else float(np.mean(vals))
+        else:
+            # Fail loudly rather than falling through and returning None. The
+            # sibling _pb_*_opt_criterion methods return None silently when
+            # _pseudo_bayesian_type is unset (it is only defaulted inside
+            # design_experiment), which surfaces much later as an opaque
+            # TypeError inside the optimizer. Surface it here instead.
+            raise ValueError(
+                f"_pseudo_bayesian_type is {self._pseudo_bayesian_type!r}; "
+                f"expected 0/'avg_inf'/'average_information' or "
+                f"1/'avg_crit'/'average_criterion'. It is normally defaulted by "
+                f"design_experiment(); set it explicitly when calling "
+                f"ds_opt_criterion directly."
+            )
+
+    def _pb_a_opt_criterion(self, efforts):
+        """
+        Pseudo-Bayesian A-optimality.
+
+        Carries the same infeasibility convention as _a_opt_criterion: an
+        unusable FIM returns +inf, never 0, because A-optimality is minimised
+        and 0 is its best attainable value. Positive-definiteness is checked by
+        eigenvalue rather than relying on np.linalg.inv raising, since an
+        indefinite scenario FIM inverts cleanly and returns a negative trace.
+        """
+        self.eval_fim(efforts)
+
+        def scr_a(fim):
+            """ trace(FIM^-1) for one scenario; +inf when unusable. """
+            fim = self._prepare_fim(fim)
+            if fim is None:
+                return np.inf
+            eigvals = np.linalg.eigvalsh(0.5 * (fim + fim.T))
+            if not np.all(eigvals > 0):
+                return np.inf
+            # Deliberately keep the original inv().trace() arithmetic rather
+            # than the algebraically equivalent sum(1/eigvals), so that values
+            # for well-conditioned FIMs stay bit-identical to previous releases.
+            try:
+                val = float(np.linalg.inv(fim).trace())
+            except np.linalg.LinAlgError:
+                return np.inf
+            return val if np.isfinite(val) else np.inf
+
+        scr_fims = self.scr_fims
+        if scr_fims is None:
+            return np.inf
+
+        if self._pseudo_bayesian_type in [0, "avg_inf", "average_information"]:
+            prepared = [self._prepare_fim(f) for f in scr_fims]
+            if any(f is None for f in prepared):
+                # a degenerate scenario FIM would poison the average
+                return np.inf
+            return scr_a(np.mean(prepared, axis=0))
+        elif self._pseudo_bayesian_type in [1, "avg_crit", "average_criterion"]:
+            vals = [scr_a(fim) for fim in scr_fims]
+            return np.inf if any(np.isinf(v) for v in vals) else float(np.mean(vals))
+        else:
+            # Fail loudly rather than falling through and returning None, which
+            # surfaces later as an opaque TypeError inside the optimizer.
+            raise ValueError(
+                f"_pseudo_bayesian_type is {self._pseudo_bayesian_type!r}; "
+                f"expected 0/'avg_inf'/'average_information' or "
+                f"1/'avg_crit'/'average_criterion'. It is normally defaulted by "
+                f"design_experiment(); set it explicitly when calling "
+                f"a_opt_criterion directly."
+            )
 
     def _pb_e_opt_criterion(self, efforts):
         """ Pseudo-Bayesian E-optimality. """
@@ -6154,7 +9170,18 @@ class Designer:
                 -np.linalg.eigvalsh(fim).min() for fim in self.scr_fims
             ])
 
+        else:
+            # Fail loudly rather than falling through and returning None, which
+            # surfaces later as an opaque TypeError inside the optimizer.
+            raise ValueError(
+                f"_pseudo_bayesian_type is {self._pseudo_bayesian_type!r}; "
+                f"expected 0/'avg_inf'/'average_information' or "
+                f"1/'avg_crit'/'average_criterion'. It is normally defaulted by "
+                f"design_experiment(); set it explicitly when calling a "
+                f"pseudo-Bayesian criterion directly."
+            )
     # prediction-oriented
+
     def _pb_dg_opt_criterion(self, efforts):
         raise NotImplementedError(
             "Prediction-oriented criteria not implemented for pseudo-bayesian problems."
@@ -6301,7 +9328,7 @@ class Designer:
                                 marker=marker,
                                 s=markersize * 50 * np.array(eff),
                                 color=color,
-                                label=f"Variant {i+1}",
+                                label=f"Sampling schedule {i + 1}",
                                 facecolors="none",
                             )
                     if self._pseudo_bayesian:
@@ -6339,7 +9366,7 @@ class Designer:
         if legend and len(self.optimal_candidates) > 1:
             axes[-1, -1].legend()
 
-        fig.tight_layout()
+        _safe_tight_layout(fig)
 
         if write:
             fn = f"sensitivity_plot_{self.oed_result['optimality_criterion']}"
@@ -6522,7 +9549,7 @@ class Designer:
             plt.draw()
         mp_rad.on_clicked(_mp_rad)
 
-        fig.tight_layout()
+        _safe_tight_layout(fig)
         plt.show()
         return fig
 
@@ -6582,7 +9609,44 @@ class Designer:
         # 2. Resolve output variable name(s)
         out_names = getattr(self, 'pyomo_output_var_name', None)
         if out_names is None:
-            out_names = [str(all_vars[n_mp + r]) for r in range(n_mr)]
+            # Derive the response variable BASE names from the state block of
+            # all_vars, taking the first n_mr DISTINCT bases in order of first
+            # appearance.
+            #
+            # The previous rule was  [str(all_vars[n_mp + r]) for r in range(n_mr)],
+            # which assumed one all_vars entry per response. That holds only for
+            # SCALAR responses. For a time-indexed dynamic model the layout is
+            #
+            #     [params...] + [ca[t] for ALL t] + [cb[t] for ALL t] + ...
+            #
+            # so all_vars[n_mp + r] walks along ONE response's time index instead
+            # of across responses: with 61 collocation points, all_vars[4] and
+            # all_vars[5] are 'ca[0.0]' and 'ca[0.007753]' — both CA. Every
+            # response then resolved to the same variable, so the extractor
+            # returned the CA row n_mr times and never read CB at all. Both the
+            # predicted responses and their sensitivity rows came back
+            # duplicated, and any parameter appearing only in the unread
+            # response (here nu, which enters solely through the CB material
+            # balance) presented as unidentifiable — a structurally singular FIM
+            # from a perfectly well-posed problem.
+            #
+            # A single-response model cannot exhibit this, which is why the
+            # FD-vs-IFT agreement test passes on the first-order example.
+            _bases = []
+            for _v in all_vars[n_mp:]:
+                _b = str(_v).split('[', 1)[0]
+                if _b not in _bases:
+                    _bases.append(_b)
+            if len(_bases) < n_mr:
+                raise RuntimeError(
+                    f"[Pyomo IFT] Cannot identify {n_mr} response variables: the "
+                    f"state block of all_vars contains only {len(_bases)} "
+                    f"distinct variable name(s) {_bases}. Order all_vars as "
+                    f"[parameters..., response_1[...], response_2[...], ..., "
+                    f"auxiliaries...], or set "
+                    f"designer.pyomo_output_var_name explicitly."
+                )
+            out_names = _bases[:n_mr]
         elif isinstance(out_names, str):
             out_names = [out_names]
 
@@ -6603,8 +9667,13 @@ class Designer:
                 base_name,
             ):
                 for idx, vname in enumerate(state_var_strs):
+                    # Compare the BASE name exactly (everything before '[')
+                    # rather than by prefix. A startswith test would let 'ca'
+                    # match 'cah', 'ca_total', 'catalyst' and so on, silently
+                    # returning a different variable's row.
+                    _vbase = vname.split('[', 1)[0]
                     if vname == target or (
-                        vname.startswith(base_name) and
+                        _vbase == base_name and
                         vname.endswith(f"[{t_key}]")
                     ):
                         return idx
@@ -6613,7 +9682,9 @@ class Designer:
             best_idx, best_dist = None, float('inf')
             prefix = f"{base_name}["
             for idx, vname in enumerate(state_var_strs):
-                if vname.startswith(prefix) and vname.endswith("]"):
+                # exact base-name match, then nearest time
+                if (vname.split('[', 1)[0] == base_name
+                        and vname.startswith(prefix) and vname.endswith("]")):
                     try:
                         t_var = float(vname[len(prefix):-1])
                         dist = abs(t_var - t_key)
@@ -6691,6 +9762,34 @@ class Designer:
         sens      = np.zeros((len(self._current_spt), n_mr, n_mp))
 
         unique_spt = sorted(set(float(t) for t in self._current_spt))
+
+        # Scale needed to map an ABSOLUTE sampling time into the grid returned
+        # by pyomo_model_fn. Model builders are free to return their grid in
+        # absolute time OR normalised to [0, 1] (case_2_model normalises by
+        # tau = max(sampling_times)), and the designer cannot know which. Both
+        # are handled by proportional scaling: a build that was asked for
+        # sampling times with maximum `build_tau` and returned a grid whose
+        # maximum is `grid_max` maps absolute t to  t / build_tau * grid_max.
+        #   normalised grid: grid_max = 1        -> t / build_tau
+        #   absolute grid  : grid_max = build_tau -> t
+        #
+        # Getting this wrong was a real bug: the snap used
+        #     min(t_sorted, key=lambda tt: abs(tt - t_val))
+        # comparing an absolute time against a normalised grid. For t_val > 1
+        # the min clamps to the largest grid point, which is accidentally
+        # correct; for t_val < 1 it lands in the grid interior and reads the
+        # response at the WRONG time. Sensitivities were exact at late sampling
+        # times and silently wrong at early ones, with an error that does not
+        # shrink as the collocation grid is refined.
+        def _grid_target(t_abs, t_grid, build_tau):
+            g_max = max(t_grid) if len(t_grid) else 1.0
+            if build_tau is None or not np.isfinite(build_tau) or build_tau <= 0:
+                return float(t_abs)
+            return float(t_abs) / float(build_tau) * float(g_max)
+
+        _spt_arr0 = np.asarray(self._current_spt, dtype=float).ravel()
+        _spt_arr0 = _spt_arr0[np.isfinite(_spt_arr0) & (_spt_arr0 >= 0)]
+        _build_tau0 = float(_spt_arr0.max()) if _spt_arr0.size else None
         # Cache: maps t_val → (S_t, t_sorted_t, m_t) to avoid rebuilding
         # the same model twice if the same time appears more than once.
         _spt_cache = {}
@@ -6750,20 +9849,36 @@ class Designer:
                             f"IFT lstsq failed (SVD did not converge) — "
                             f"J_z_t is rank-deficient for this candidate."
                         ) from _lae
+                    # this sub-model was built for the single time t_val_f,
+                    # so that is its requested-time scale
                     _spt_cache[t_val_f] = (S_t, t_sorted_t,
                                            state_var_strs_t, m_t,
-                                           all_vars_t)
+                                           all_vars_t, t_val_f)
                 else:
-                    # Single unique spt — reuse the already-solved model
+                    # Single unique spt — reuse the already-solved model, which
+                    # was built from the full _current_spt vector
                     _spt_cache[t_val_f] = (S, t_sorted, state_var_strs,
-                                           m, all_vars)
+                                           m, all_vars, _build_tau0)
 
-            S_use, t_sorted_use, sv_strs_use, m_use, av_use = \
+            S_use, t_sorted_use, sv_strs_use, m_use, av_use, tau_use = \
                 _spt_cache[t_val_f]
-            t_key = min(t_sorted_use, key=lambda tt: abs(tt - t_val_f))
+            # map the absolute sampling time into this model's grid coordinates
+            t_tgt = _grid_target(t_val_f, t_sorted_use, tau_use)
+            t_key = min(t_sorted_use, key=lambda tt: abs(tt - t_tgt))
 
-            def _find_state_idx_t(base_name, t_v, _sv=sv_strs_use):
-                t_k = min(t_sorted_use, key=lambda tt: abs(tt - t_v))
+            def _find_state_idx_t(base_name, t_v, _sv=sv_strs_use,
+                                  _t_key=t_key, _tau=tau_use):
+                # t_v arrives as an ABSOLUTE sampling time, but t_sorted_use may
+                # be normalised — map it through the same proportional scaling
+                # used for t_key rather than snapping on the raw value. Snapping
+                # an absolute time against a normalised grid reads the response
+                # at the wrong time whenever t_v < 1 (see _grid_target).
+                if float(t_v) == float(t_val_f):
+                    t_k = _t_key            # already mapped by the caller
+                else:
+                    t_k = min(t_sorted_use,
+                              key=lambda tt: abs(tt - _grid_target(
+                                  t_v, t_sorted_use, _tau)))
                 for target in (
                     f"{base_name}[{t_k}]",
                     f"{base_name}[{t_k:.10g}]",
@@ -6771,15 +9886,19 @@ class Designer:
                     base_name,
                 ):
                     for idx, vname in enumerate(_sv):
+                        # exact BASE-name comparison; a startswith test would let
+                        # 'ca' match 'cah', 'ca_total', 'catalyst', ...
                         if vname == target or (
-                            vname.startswith(base_name) and
+                            vname.split('[', 1)[0] == base_name and
                             vname.endswith(f"[{t_k}]")
                         ):
                             return idx
                 prefix = f"{base_name}["
                 best_idx2, best_dist2 = None, float('inf')
                 for idx, vname in enumerate(_sv):
-                    if vname.startswith(prefix) and vname.endswith("]"):
+                    if (vname.split('[', 1)[0] == base_name
+                            and vname.startswith(prefix)
+                            and vname.endswith("]")):
                         try:
                             t_v2  = float(vname[len(prefix):-1])
                             dist2 = abs(t_v2 - t_k)
@@ -6884,7 +10003,7 @@ class Designer:
             fp = self._generate_result_path(fn, "png")
             fig.savefig(fname=fp, dpi=dpi)
 
-        fig.tight_layout()
+        _safe_tight_layout(fig)
         return fig
 
     def _plot_current_efforts_3d(self, width=None, write=False, dpi=720, tol=1e-4,
@@ -6946,7 +10065,7 @@ class Designer:
             axes.set_zlabel('Experimental Effort')
             axes.set_zlim([0, 1])
             axes.set_zticks(np.linspace(0, 1, 6))
-            fig.tight_layout()
+            _safe_tight_layout(fig)
 
             if write:
                 fn = f'efforts_{self.oed_result["optimality_criterion"]}'
@@ -7008,7 +10127,7 @@ class Designer:
         axes.set_zlim([0, 1])
         axes.set_zticks(np.linspace(0, 1, 6))
 
-        fig.tight_layout()
+        _safe_tight_layout(fig)
 
         if write:
             fn = f'efforts_{self.oed_result["optimality_criterion"]}'
