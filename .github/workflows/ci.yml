@@ -62,6 +62,45 @@ jobs:
   # takes far longer than a CI budget allows. Run it locally before a
   # release.
   # ---------------------------------------------------------------------
+  # ---------------------------------------------------------------------
+  # Cheapest possible gate: byte-compile everything. Runs in seconds, needs no
+  # solvers and no dependencies, and covers the two trees nothing else touches
+  # — examples/ and testing_scripts/ are not installed (packages.find is scoped
+  # to pydex*), are not collected by pytest, and are not run by any job here,
+  # so without this a plain syntax error in an example would ship unnoticed.
+  #
+  # The FLOOR version matters more than the newest one. Compiling on 3.12 does
+  # NOT catch PEP 701 f-string quote reuse, because 3.12 is where that became
+  # legal — that is exactly the bug that broke this workflow on py3.9 and 3.11
+  # while passing locally. Compiling on the oldest supported Python is what
+  # makes requires-python an enforced claim rather than an aspiration.
+  # ---------------------------------------------------------------------
+  syntax:
+    name: Byte-compile (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # floor first (catches version-gated syntax), newest last
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Byte-compile package, tests, examples and scripts
+        # -W error promotes SyntaxWarning to an error, which catches the class
+        # of latent bug that is legal Python but almost never intended: `is`
+        # against a string literal, invalid escape sequences in non-raw
+        # strings. The now-deleted pydex/core/bnb had five of the former.
+        #
+        # publications/ is deliberately excluded: it is archival code kept as
+        # published, and it emits invalid-escape-sequence warnings that would
+        # only add noise.
+        run: python -W error -m compileall -q pydex tests examples testing_scripts
+
   unit-tests:
     name: Fast regression tests
     runs-on: ubuntu-latest

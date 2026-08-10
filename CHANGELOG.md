@@ -213,6 +213,19 @@ Fixed in `testing_scripts/pydex_full_capability_test.py`:
   single section for debugging. Now matches `'pydex'` exactly or the `'pydex.'`
   prefix.
 
+### Removed
+
+- **`pydex/core/bnb/`** — the pre-Pyomo, cvxpy-era branch-and-bound
+  implementation. It was unreachable (referenced by no module, and its own
+  `__init__.py` was empty, with `tree.py` not even importing `node.py`), but it
+  was still shipping in the wheel, and `node.py` opened with `import cvxpy` —
+  a dependency this fork removed. So `import pydex.core.bnb` on a fresh install
+  raised `ModuleNotFoundError: No module named 'cvxpy'`: the same class of
+  defect as the undeclared `pandas`, hiding in a module nothing imports. It also
+  contained five `is` comparisons against string literals, which have raised
+  `SyntaxWarning` since Python 3.8 — evidence it had not been executed in years.
+  Sparse designs are served by the Pyomo MINLP path (`min_effort` with bonmin).
+
 ### Known issues
 
 - `vdi_criterion` collapses to D-optimality when `n_m_r == n_mp`, because
