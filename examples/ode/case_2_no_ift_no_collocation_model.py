@@ -41,8 +41,33 @@ The collocation variant solves a large NLP (≈ 285 variables, IPOPT) for every
 FD perturbation.  When a perturbed parameter pushes CA toward zero, IPOPT's
 interior-point barrier hits the hard lower bound and declares infeasibility —
 not because the physics is infeasible, but because the NLP formulation cannot
-step past the constraint.  Three architectural workarounds are needed (parameter
-clamping, relaxed CA bound, NaN fallback).
+step past the constraint.  Three workarounds mitigate this (parameter clamping,
+relaxed CA bound, NaN fallback).
+
+CORRECTION — those workarounds were NOT the real problem
+--------------------------------------------------------
+An earlier version of this note blamed the collocation+FD variant's poor
+behaviour on the clamping/bounds/NaN machinery.  That was wrong, and the
+measurements say so plainly: with nominal parameters, no perturbation and no
+NaN fallback active, the collocation model returned responses differing from
+this scipy model by 26 mol/L on states bounded by 5 mol/L.
+
+The actual cause was the COLLOCATION TIME GRID.  The sampling grid
+np.linspace(0.001, 200, 11) normalises its first entry to 5e-6, a hair off the
+node at 0.0; embedding both produced a finite element of width ~1e-16 and the
+solve converged to a non-physical branch while reporting success.  See the
+PITFALL section in case_2_model.py for the full diagnosis.
+
+With that fixed, collocation+FD agrees with this scipy path to SEVEN
+significant figures (10.724136 vs 10.724134) and picks the same optimal
+sampling times to two decimal places.  So the honest comparison is:
+
+  * collocation+FD is slower and needs more care, but is not less accurate;
+  * this scipy path is more robust chiefly because it has no time grid to get
+    wrong, and no NLP that can converge to a wrong branch;
+  * its value as a CROSS-CHECK is what actually mattered here.  Two independent
+    forward solvers disagreeing is what localised the bug, after three
+    incorrect diagnoses that each trusted a single path.
 
 scipy.integrate.solve_ivp has none of these problems:
 

@@ -209,3 +209,33 @@ suzuki/
 design_space_example/
 /suzuki/
 /safe_oed/
+
+# ── pydex-specific ───────────────────────────────────────────────────────────
+# Sphinx build output (this project builds to docs/build, not docs/_build)
+docs/build/
+docs/source/_autosummary/
+
+# Designer run artefacts: create_result_dir() writes timestamped result trees,
+# and save_state()/save_result() write pickles next to the running script.
+*.pkl
+*.pickle
+result/
+*_result/
+
+# Capability-suite and example output
+*.log
+figures/
+
+# Solver scratch files (Pyomo writes .nl/.sol next to the process CWD)
+*.nl
+*.sol
+*.row
+*.col
+tmp*.pyomo.*
+
+# Tracked publication data files are unaffected by the *.pkl rule above
+# (gitignore does not untrack), but list the exception explicitly for clarity.
+!publications/**/*.pkl
+
+# macOS Finder metadata
+.DS_Store

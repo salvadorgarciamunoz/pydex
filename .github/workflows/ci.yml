@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# Package index.
+#
+# Defaults to PyPI, which is what a public repository needs: forks and
+# outside contributors cannot reach a private index. To build against an
+# internal mirror (e.g. JFrog Artifactory) instead, set the repository
+# variable PIP_INDEX_URL — Settings → Secrets and variables → Actions →
+# Variables. Any runner that can reach it will then use it, and the
+# workflow is otherwise unchanged.
+env:
+  PIP_INDEX_URL: ${{ vars.PIP_INDEX_URL || 'https://pypi.org/simple' }}
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # The check that would have caught the undeclared-pandas bug: install the
+  # package alone, into a clean environment, and import it. No test extras,
+  # no solver — if a runtime dependency is missing from the metadata, this
+  # fails with the same ModuleNotFoundError a user would hit.
+  # ---------------------------------------------------------------------
+  install-and-import:
+    name: Fresh install imports (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package only
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Import from a directory that is not the repo
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -c "
+          from pydex.core.designer import Designer
+          d = Designer()
+          assert hasattr(d, 'run_estimability')
+          print('import OK')
+          "
+
+  # ---------------------------------------------------------------------
+  # Fast, solver-free regression tests. These stub pydex's plotting/logging
+  # modules and import designer.py directly, so they need no IPOPT and run
+  # in seconds. The full capability suite is deliberately not run here: it
+  # needs IPOPT, an MINLP solver and PyNumero's compiled ASL extension, and
+  # takes far longer than a CI budget allows. Run it locally before a
+  # release.
+  # ---------------------------------------------------------------------
+  unit-tests:
+    name: Fast regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and test tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install . pytest
+
+      - name: Run solver-free tests
+        run: |
+          # These tests import a flat `designer` module by name.
+          mkdir -p _flat && cp pydex/core/designer.py _flat/designer.py
+          PYTHONPATH="$PWD/_flat" pytest -q tests/
+
+  # ---------------------------------------------------------------------
+  # Documentation must build, and must build without warnings: a broken
+  # docstring shows up here as a docutils error rather than as a silently
+  # mangled API page. intersphinx is disabled because a build should not
+  # fail because python.org was briefly unreachable.
+  # ---------------------------------------------------------------------
+  docs:
+    name: Sphinx docs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and docs tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install . sphinx sphinx-rtd-theme
+
+      - name: Build HTML (warnings are errors)
+        run: |
+          python -m sphinx -b html -W --keep-going \
+            -D extensions=sphinx.ext.autodoc,sphinx.ext.napoleon,sphinx.ext.viewcode,sphinx.ext.autosummary \
+            docs/source docs/build/html
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: html-docs
+          path: docs/build/html
