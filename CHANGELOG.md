@@ -5,6 +5,37 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-10
+
+### Removed
+
+- **`pydex/core/bnb/`** — the pre-Pyomo, cvxpy-era branch-and-bound
+  implementation. It was unreachable (referenced by no module, its own
+  `__init__.py` was empty, and `tree.py` did not even import `node.py`), but it
+  was still shipping in the wheel, and `node.py` opened with `import cvxpy` —
+  a dependency this fork removed. So `import pydex.core.bnb` on a fresh install
+  raised `ModuleNotFoundError: No module named 'cvxpy'`: the same class of
+  defect as the undeclared `pandas`, hiding in a module nothing imports. It also
+  contained five `is` comparisons against string literals, which have raised
+  `SyntaxWarning` since Python 3.8 — evidence it had not been executed in years.
+  Sparse designs are served by the Pyomo MINLP path (`min_effort` with bonmin).
+
+  Nothing could have depended on this: the module could not be imported at all
+  on a clean install, which is why removing it is a patch release rather than a
+  breaking change.
+
+### Added
+
+- **CI byte-compiles `examples/` and `testing_scripts/`.** Neither tree is
+  installed (`packages.find` is scoped to `pydex*`), collected by pytest, or run
+  by any CI job, so a plain syntax error in an example previously shipped
+  unnoticed. The new `syntax` job runs `compileall` on py3.9 as well as py3.12:
+  the floor is the version that matters, because compiling on 3.12 does **not**
+  catch PEP 701 f-string quote reuse — 3.12 is where that became legal. It also
+  uses `-W error`, promoting `SyntaxWarning` to a failure, which catches `is`
+  against string literals and invalid escape sequences. The now-deleted `bnb`
+  was the only thing blocking that stricter setting.
+
 ## [0.2.0] - 2026-08-10
 
 First tagged release of this fork. Everything below is relative to upstream
@@ -212,19 +243,6 @@ Fixed in `testing_scripts/pydex_full_capability_test.py`:
   died with `KeyError`. Harmless under `__main__`, but it blocked importing a
   single section for debugging. Now matches `'pydex'` exactly or the `'pydex.'`
   prefix.
-
-### Removed
-
-- **`pydex/core/bnb/`** — the pre-Pyomo, cvxpy-era branch-and-bound
-  implementation. It was unreachable (referenced by no module, and its own
-  `__init__.py` was empty, with `tree.py` not even importing `node.py`), but it
-  was still shipping in the wheel, and `node.py` opened with `import cvxpy` —
-  a dependency this fork removed. So `import pydex.core.bnb` on a fresh install
-  raised `ModuleNotFoundError: No module named 'cvxpy'`: the same class of
-  defect as the undeclared `pandas`, hiding in a module nothing imports. It also
-  contained five `is` comparisons against string literals, which have raised
-  `SyntaxWarning` since Python 3.8 — evidence it had not been executed in years.
-  Sparse designs are served by the Pyomo MINLP path (`min_effort` with bonmin).
 
 ### Known issues
 
