@@ -96,7 +96,10 @@ lets you compare sensitivity methods on an otherwise identical problem.
 
 ## Documentation
 
-The API reference is built from the in-source docstrings with Sphinx:
+Built docs: **https://salvadorgarciamunoz.github.io/pydex/**
+
+The API reference is built from the in-source docstrings with Sphinx. To
+build it yourself instead of using the hosted copy above:
 
 ```bash
 pip install sphinx sphinx-rtd-theme
