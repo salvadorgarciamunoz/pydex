@@ -129,6 +129,14 @@ Also fixed, outside `designer.py`:
 - **`pandas` was undeclared in the packaging metadata**, so a fresh install
   failed at import with a bare `ModuleNotFoundError`. Now declared, along
   with version floors for the other runtime dependencies.
+- **`designer.py` would not parse below Python 3.12.** Two `print` statements
+  reused the double-quote delimiter inside an f-string expression
+  (`f"...{getattr(self, "_cvar_mean_phi", float("nan"))}..."`). PEP 701 made
+  that legal in 3.12; on 3.9 and 3.11 it is a hard `SyntaxError`, so the
+  package could not even be imported. Both now use single quotes inside. Found
+  by the CI matrix on its first run — the local environment is 3.12, where the
+  syntax is valid, so nothing local could have caught it.
+
 - **The class docstring advertised two criteria that do not exist.** It listed
   a `G-optimal` criterion — there is no `g_opt_criterion` anywhere in the
   codebase — and `CVaR-D/A/E`, when only `cvar_d_opt_criterion` exists and
