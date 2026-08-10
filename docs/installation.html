@@ -1,0 +1,183 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Installation &mdash; pydex 0.2.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=37f418d5"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Examples" href="examples.html" />
+    <link rel="prev" title="pydex documentation" href="index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            pydex
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#solvers">Solvers</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#pounce">POUNCE</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">pydex</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Installation</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/installation.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="installation">
+<h1>Installation<a class="headerlink" href="#installation" title="Link to this heading"></a></h1>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span>git+https://github.com/salvadorgarciamunoz/pydex.git
+</pre></div>
+</div>
+<p>Core dependencies (installed automatically): <code class="docutils literal notranslate"><span class="pre">numpy</span></code>, <code class="docutils literal notranslate"><span class="pre">scipy</span></code>,
+<code class="docutils literal notranslate"><span class="pre">pandas</span></code>, <code class="docutils literal notranslate"><span class="pre">matplotlib</span></code>, <code class="docutils literal notranslate"><span class="pre">numdifftools</span></code>, <code class="docutils literal notranslate"><span class="pre">pyomo</span></code>, <code class="docutils literal notranslate"><span class="pre">joblib</span></code>,
+<code class="docutils literal notranslate"><span class="pre">dill</span></code>.</p>
+<section id="solvers">
+<h2>Solvers<a class="headerlink" href="#solvers" title="Link to this heading"></a></h2>
+<p>The OED problem is formulated in Pyomo, so most design criteria need an
+NLP solver Pyomo can call. IPOPT is recommended and is looked up on
+<code class="docutils literal notranslate"><span class="pre">PATH</span></code> by default (<code class="docutils literal notranslate"><span class="pre">solver=&quot;ipopt&quot;</span></code>); the Implicit Function Theorem
+(IFT) sensitivity path additionally uses Pyomo’s PyNumero/ASL interface,
+which requires the <code class="docutils literal notranslate"><span class="pre">pynumero_ASL</span></code> extension to be built
+(<code class="docutils literal notranslate"><span class="pre">pyomo</span> <span class="pre">build-extensions</span></code>).</p>
+<p>Sparsity-enforcing MINLP designs (<code class="docutils literal notranslate"><span class="pre">min_effort</span> <span class="pre">&gt;</span> <span class="pre">0</span></code>) require an MINLP
+solver such as <code class="docutils literal notranslate"><span class="pre">bonmin</span></code> or (via GAMS) <code class="docutils literal notranslate"><span class="pre">BARON</span></code>.</p>
+<section id="pounce">
+<h3>POUNCE<a class="headerlink" href="#pounce" title="Link to this heading"></a></h3>
+<p><a class="reference external" href="https://github.com/jkitchin/pounce">POUNCE</a> is a pure-Rust port of IPOPT.
+It implements the same interior-point algorithm and follows upstream IPOPT’s
+option semantics and console output, but its default build needs no Fortran,
+no HSL and no system BLAS — the sparse symmetric factorisation is pure Rust
+too. That makes it an alternative worth knowing about if the HSL licensing
+step above is inconvenient.</p>
+<p>Because POUNCE speaks the AMPL NL/SOL protocol, Pyomo drives it exactly as it
+drives IPOPT. The <code class="docutils literal notranslate"><span class="pre">pyomo-pounce</span></code> package registers it with
+<code class="docutils literal notranslate"><span class="pre">SolverFactory</span></code>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span>pyomo-pounce
+</pre></div>
+</div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">pyomo_pounce</span>          <span class="c1"># registers the &#39;pounce&#39; solver</span>
+<span class="n">designer</span><span class="o">.</span><span class="n">design_experiment</span><span class="p">(</span><span class="n">designer</span><span class="o">.</span><span class="n">d_opt_criterion</span><span class="p">,</span> <span class="n">solver</span><span class="o">=</span><span class="s2">&quot;pounce&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The import is what performs the registration, so it must happen before the
+design call.</p>
+<p>POUNCE covers both of pydex’s solver call sites, which are separate mechanisms:</p>
+<ul class="simple">
+<li><p>the <strong>design formulation</strong> — pydex passes <code class="docutils literal notranslate"><span class="pre">solver=</span></code> straight through to
+<code class="docutils literal notranslate"><span class="pre">pyo.SolverFactory</span></code>, so <code class="docutils literal notranslate"><span class="pre">solver=&quot;pounce&quot;</span></code> works for the criteria built
+symbolically in Pyomo;</p></li>
+<li><p>the <strong>IFT sensitivity path</strong> — here the collocation NLP is solved inside your
+own <code class="docutils literal notranslate"><span class="pre">pyomo_model_fn</span></code>, so the solver is whichever one that function calls.
+Change the <code class="docutils literal notranslate"><span class="pre">SolverFactory</span></code> call in your model function, not the
+<code class="docutils literal notranslate"><span class="pre">design_experiment</span></code> argument. Exact sensitivities are then extracted from
+that solve through PyomoNLP/ASL as usual.</p></li>
+</ul>
+<p>Checked on <code class="docutils literal notranslate"><span class="pre">examples/ode/case_1.py</span></code> with POUNCE 0.9.0 driving both sites: the
+D-optimal criterion agreed with IPOPT to 3.6e-15 relative (1.2188792603520995
+against 1.218879260352095) on the same support, with the sensitivity method
+still reported as <code class="docutils literal notranslate"><span class="pre">Pyomo</span> <span class="pre">IFT</span> <span class="pre">—</span> <span class="pre">PyomoNLP</span> <span class="pre">/</span> <span class="pre">ASL</span> <span class="pre">(compiled)</span></code>.</p>
+<p>POUNCE also accepts IPOPT’s option names, so <code class="docutils literal notranslate"><span class="pre">solver_options</span></code> written for
+IPOPT carry over; a request it cannot honour degrades rather than failing, e.g.
+<code class="docutils literal notranslate"><span class="pre">linear_solver:</span> <span class="pre">ma57</span></code> on a default build reports <code class="docutils literal notranslate"><span class="pre">running</span> <span class="pre">with</span> <span class="pre">linear</span> <span class="pre">solver</span>
+<span class="pre">FERAL</span> <span class="pre">(ma57</span> <span class="pre">requested</span> <span class="pre">but</span> <span class="pre">not</span> <span class="pre">compiled)</span></code> and proceeds.</p>
+<p>The capability suite is run against IPOPT, so that remains the reference
+configuration.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><code class="docutils literal notranslate"><span class="pre">cyipopt</span></code> is optional. It accelerates the V-optimal
+operating-point step (Stage 1) when present, and is required for the
+PyNumero/cyipopt solve path; without it, Stage 1 falls back to scipy
+SLSQP. Install with <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">pydex[ipopt]</span></code>.</p>
+</div>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="index.html" class="btn btn-neutral float-left" title="pydex documentation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="examples.html" class="btn btn-neutral float-right" title="Examples" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2026, Kennedy Putra Kusumo, Salvador Garcia-Munoz, and contributors.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

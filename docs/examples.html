@@ -1,0 +1,355 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Examples &mdash; pydex 0.2.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=37f418d5"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="API Reference" href="api.html" />
+    <link rel="prev" title="Installation" href="installation.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            pydex
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Examples</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#naming-scheme">Naming scheme</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#ode-examples">ODE examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#case-1-first-order-reaction-one-parameter">Case 1 — first-order reaction, one parameter</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#case-2-ab-with-arrhenius-kinetics-four-parameters">Case 2 — A→B with Arrhenius kinetics, four parameters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#case-3-michaelis-menten-style-network-nine-parameters">Case 3 — Michaelis-Menten-style network, nine parameters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#case-4-case-5-local-vs-pseudo-bayesian-d-optimal-a-b-c-network">Case 4 / Case 5 — local vs pseudo-Bayesian D-optimal, A -&gt; B -&gt; C network</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#bayesian-inference-in-case-4-py-via-pymc-not-pydex">Bayesian inference in <code class="docutils literal notranslate"><span class="pre">case_4.py</span></code> – via PyMC, not pydex</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#asl-elimination">ASL elimination</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#jupyter-notebooks">Jupyter notebooks</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#test-scripts-as-worked-examples">Test scripts as worked examples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#publication-code">Publication code</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">pydex</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Examples</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/examples.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="examples">
+<h1>Examples<a class="headerlink" href="#examples" title="Link to this heading"></a></h1>
+<p>Every example is a pair of files: a <code class="docutils literal notranslate"><span class="pre">*_model.py</span></code> holding the model (a
+<code class="docutils literal notranslate"><span class="pre">simulate()</span></code> function and, where relevant, a <code class="docutils literal notranslate"><span class="pre">build_pyomo_model()</span></code>), and a
+runner script that builds the <a class="reference internal" href="api.html#pydex.core.designer.Designer" title="pydex.core.designer.Designer"><code class="xref py py-class docutils literal notranslate"><span class="pre">Designer</span></code></a>, sets the
+candidate grid, and designs the experiment. Run the runner, not the model:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">cd</span><span class="w"> </span>examples/ode
+python<span class="w"> </span>case_2.py
+</pre></div>
+</div>
+<p>Most examples solve an NLP, so they need IPOPT on <code class="docutils literal notranslate"><span class="pre">PATH</span></code> — see
+<a class="reference internal" href="installation.html"><span class="doc">Installation</span></a>.</p>
+<section id="naming-scheme">
+<h2>Naming scheme<a class="headerlink" href="#naming-scheme" title="Link to this heading"></a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">case_N</span></code> families vary one axis at a time, so the suffix tells you which
+sensitivity path a script exercises:</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 24.0%" />
+<col style="width: 32.0%" />
+<col style="width: 44.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>suffix</p></th>
+<th class="head"><p>sensitivities</p></th>
+<th class="head"><p>model solved by</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><em>(none)</em></p></td>
+<td><p>exact, via the Implicit Function Theorem (<code class="docutils literal notranslate"><span class="pre">pyomo_model_fn</span></code> assigned)</p></td>
+<td><p>Pyomo.DAE orthogonal collocation + IPOPT</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">_no_ift</span></code></p></td>
+<td><p>finite differences</p></td>
+<td><p>Pyomo.DAE orthogonal collocation + IPOPT</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">_no_ift_no_collocation</span></code></p></td>
+<td><p>finite differences</p></td>
+<td><p>Pyomo <code class="docutils literal notranslate"><span class="pre">Simulator</span></code> (scipy/vode) forward integration</p></td>
+</tr>
+</tbody>
+</table>
+<p>Comparing <code class="docutils literal notranslate"><span class="pre">case_1.py</span></code> against <code class="docutils literal notranslate"><span class="pre">case_1_no_ift.py</span></code> therefore isolates the
+effect of the sensitivity method alone — same model, same grid, same criterion.
+The three paths should agree on the design, and the capability suite asserts
+this: section 52 compares nine criteria across both paths and requires
+agreement within 5%, typically achieving about 0.01%.</p>
+</section>
+<section id="ode-examples">
+<h2>ODE examples<a class="headerlink" href="#ode-examples" title="Link to this heading"></a></h2>
+<section id="case-1-first-order-reaction-one-parameter">
+<h3>Case 1 — first-order reaction, one parameter<a class="headerlink" href="#case-1-first-order-reaction-one-parameter" title="Link to this heading"></a></h3>
+<p>The smallest useful dynamic example: <code class="docutils literal notranslate"><span class="pre">dCA/dt</span> <span class="pre">=</span> <span class="pre">-k*CA</span></code>, one parameter, one
+control, one response. Start here.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">case_1.py</span></code> — IFT sensitivities via PyomoNLP.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">case_1_no_ift.py</span></code> — finite differences over the collocation solve.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">case_1_no_ift_no_collocation.py</span></code> — finite differences over forward
+integration. Also shows, in a commented block, what happens if
+<code class="docutils literal notranslate"><span class="pre">pyomo_model_fn</span></code> is assigned to a model built for the <code class="docutils literal notranslate"><span class="pre">Simulator</span></code> path.</p></li>
+</ul>
+</section>
+<section id="case-2-ab-with-arrhenius-kinetics-four-parameters">
+<h3>Case 2 — A→B with Arrhenius kinetics, four parameters<a class="headerlink" href="#case-2-ab-with-arrhenius-kinetics-four-parameters" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">dCA/dt</span> <span class="pre">=</span> <span class="pre">-k*CA^alpha</span></code>, <code class="docutils literal notranslate"><span class="pre">dCB/dt</span> <span class="pre">=</span> <span class="pre">nu*k*CA^alpha</span></code>, with
+<code class="docutils literal notranslate"><span class="pre">k</span> <span class="pre">=</span> <span class="pre">exp(theta_0</span> <span class="pre">+</span> <span class="pre">theta_1*(T-273.15)/T)</span></code>. Four parameters, two controls
+<code class="docutils literal notranslate"><span class="pre">[CA0,</span> <span class="pre">T]</span></code>, two responses <code class="docutils literal notranslate"><span class="pre">[CA,</span> <span class="pre">CB]</span></code> — the first example with multiple
+responses.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">case_2.py</span></code> — D-optimal, IFT path.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">case_2_no_ift.py</span></code>, <code class="docutils literal notranslate"><span class="pre">case_2_no_ift_no_collocation.py</span></code> — as above.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">case_2_ds.py</span></code> — <strong>Ds-optimal</strong>: same model, grid and parameters as
+<code class="docutils literal notranslate"><span class="pre">case_2.py</span></code>, only the criterion changes. Worth reading even though this
+model’s FIM is healthy, because it shows designing for a <em>subset</em> of
+parameters while marginalising the rest, which is the usual reason to reach
+for Ds.</p></li>
+</ul>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>The collocation grid in this family previously admitted a sampling time a
+hair off an existing collocation node, producing a machine-epsilon finite
+element. IPOPT reported “Optimal Solution Found” while returning
+<code class="docutils literal notranslate"><span class="pre">CA</span> <span class="pre">=</span> <span class="pre">31</span> <span class="pre">mol/L</span></code> from <code class="docutils literal notranslate"><span class="pre">CA0</span> <span class="pre">=</span> <span class="pre">5</span></code>. If you adapt this example and see a
+physically impossible result reported as optimal, check that every sampling
+time lands exactly on a collocation node — refining <code class="docutils literal notranslate"><span class="pre">nfe</span></code> will not help,
+because this is a formulation problem rather than truncation error.</p>
+</div>
+</section>
+<section id="case-3-michaelis-menten-style-network-nine-parameters">
+<h3>Case 3 — Michaelis-Menten-style network, nine parameters<a class="headerlink" href="#case-3-michaelis-menten-style-network-nine-parameters" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">A</span> <span class="pre">-&gt;</span> <span class="pre">B</span></code> through an inhibited power-law rate,
+<code class="docutils literal notranslate"><span class="pre">r</span> <span class="pre">=</span> <span class="pre">k1(T)*CA^alpha</span> <span class="pre">/</span> <span class="pre">(k2(T)</span> <span class="pre">+</span> <span class="pre">k3(T)*CA^beta)</span></code> with
+<code class="docutils literal notranslate"><span class="pre">ki(T)</span> <span class="pre">=</span> <span class="pre">exp(theta_i0</span> <span class="pre">+</span> <span class="pre">theta_i1*(T-273.15)/T)</span></code>. Nine parameters
+<code class="docutils literal notranslate"><span class="pre">[theta_10,</span> <span class="pre">theta_11,</span> <span class="pre">theta_20,</span> <span class="pre">theta_21,</span> <span class="pre">theta_30,</span> <span class="pre">theta_31,</span> <span class="pre">nu,</span> <span class="pre">alpha,</span>
+<span class="pre">beta]</span></code>, three controls <code class="docutils literal notranslate"><span class="pre">[CA0,</span> <span class="pre">T,</span> <span class="pre">tau]</span></code>, two responses. The largest example,
+and the one where the sensitivity path matters most.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">case_3.py</span></code> — scipy/finite-difference path. Its own header reports roughly
+350 s in sensitivity analysis, at about 45 model evaluations per candidate.
+The candidate count is not fixed: <code class="docutils literal notranslate"><span class="pre">enumerate_candidates</span></code> builds a
+5x5x5 = 125 point grid, then a feasibility filter drops the candidates whose
+conversion falls below <code class="docutils literal notranslate"><span class="pre">MIN_CONVERSION</span></code> at the nominal parameters, and the
+script prints how many survived.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">case_3_ift.py</span></code> — the same design via exact IFT sensitivities taken from
+the KKT conditions of the collocation NLP, one IPOPT solve per candidate. Its
+header quotes 5-15 s for the same step. This is the fast version, and the
+clearest illustration of why the IFT path exists. Timings are from the
+example’s own documentation, so treat them as indicative of the ratio rather
+than as measurements on your hardware.</p></li>
+</ul>
+</section>
+<section id="case-4-case-5-local-vs-pseudo-bayesian-d-optimal-a-b-c-network">
+<h3>Case 4 / Case 5 — local vs pseudo-Bayesian D-optimal, A -&gt; B -&gt; C network<a class="headerlink" href="#case-4-case-5-local-vs-pseudo-bayesian-d-optimal-a-b-c-network" title="Link to this heading"></a></h3>
+<p>A different reaction network from cases 1-3, introducing <strong>pseudo-Bayesian
+design</strong> — designing under uncertainty in the model parameters rather than
+at a single nominal guess. Neither file carries a <code class="docutils literal notranslate"><span class="pre">_no_ift</span></code> /
+<code class="docutils literal notranslate"><span class="pre">_no_ift_no_collocation</span></code> suffix even though both use the
+finite-difference-over-forward-integration sensitivity path (no
+<code class="docutils literal notranslate"><span class="pre">pyomo_model_fn</span></code>); that suffix scheme is specific to the cases 1-3
+sensitivity-path comparison, and this family has no IFT/collocation
+counterpart.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">case_4.py</span></code> — <strong>local</strong> D-optimal design on two rate constants
+<code class="docutils literal notranslate"><span class="pre">[k1,</span> <span class="pre">k2]</span></code> at a single nominal guess, with one control (feed rate
+<code class="docutils literal notranslate"><span class="pre">f_in</span></code>). <code class="docutils literal notranslate"><span class="pre">f_in</span></code> feeds pure A with no outflow term, so this is a
+continuously-fed semi-batch reactor rather than a closed system: total
+moles grow as <code class="docutils literal notranslate"><span class="pre">1</span> <span class="pre">+</span> <span class="pre">f_in</span> <span class="pre">*</span> <span class="pre">t</span></code> once <code class="docutils literal notranslate"><span class="pre">f_in</span> <span class="pre">&gt;</span> <span class="pre">0</span></code>, confirmed numerically.
+<code class="docutils literal notranslate"><span class="pre">pseudo_bayesian_type</span></code> only takes effect when <code class="docutils literal notranslate"><span class="pre">model_parameters</span></code> is
+2-D, so passing it here (a 1-D nominal vector) has no effect — the
+design stays local. Also demonstrates recovering <code class="docutils literal notranslate"><span class="pre">[k1,</span> <span class="pre">k2]</span></code> from data
+simulated at the apportioned design, via PyMC — see below.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">case_5.py</span></code> — the Arrhenius version of the same network (<code class="docutils literal notranslate"><span class="pre">f_in</span></code> fixed
+to 0, so this one is closed) under a <strong>genuine pseudo-Bayesian Type-1</strong>
+D-optimal design: <code class="docutils literal notranslate"><span class="pre">model_parameters</span></code> is a scenario array drawn from a
+uniform prior over all four kinetic parameters, and the criterion is
+averaged over scenarios rather than over averaged information matrices.
+Ships with <code class="docutils literal notranslate"><span class="pre">N_SCR</span> <span class="pre">=</span> <span class="pre">20</span></code> (roughly 13 s/scenario measured on this grid,
+so a few minutes total) rather than a much larger ensemble; raise
+<code class="docutils literal notranslate"><span class="pre">N_SCR</span></code> for a smoother estimate at the cost of runtime.
+<code class="docutils literal notranslate"><span class="pre">save_atomics</span></code> must be passed to <code class="docutils literal notranslate"><span class="pre">design_experiment()</span></code> as a keyword,
+not set as <code class="docutils literal notranslate"><span class="pre">designer._save_atomics</span></code> beforehand — the keyword’s own
+default silently overwrites the attribute either way, the same as
+<code class="docutils literal notranslate"><span class="pre">regularize_fim</span></code>.</p></li>
+</ul>
+<p>Both models fold their reaction rates directly into the mass balance
+rather than defining them as a separate algebraic constraint, which keeps
+each system a pure ODE — required by scipy’s <code class="docutils literal notranslate"><span class="pre">Simulator</span></code> backend, which
+only integrates ODEs, not DAEs.</p>
+</section>
+<section id="bayesian-inference-in-case-4-py-via-pymc-not-pydex">
+<h3>Bayesian inference in <code class="docutils literal notranslate"><span class="pre">case_4.py</span></code> – via PyMC, not pydex<a class="headerlink" href="#bayesian-inference-in-case-4-py-via-pymc-not-pydex" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">case_4.py</span></code> ends by recovering <code class="docutils literal notranslate"><span class="pre">[k1,</span> <span class="pre">k2]</span></code> from data simulated at the
+apportioned design, using <strong>PyMC</strong> (<code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">pymc</span> <span class="pre">arviz</span></code> — not a
+pydex dependency, only needed for this section): synthetic “observed” data
+is simulated at the apportioned design’s condition(s) using the same
+nominal parameters the design was built on, plus measurement noise drawn
+from <code class="docutils literal notranslate"><span class="pre">error_cov</span></code>, and PyMC samples the posterior over <code class="docutils literal notranslate"><span class="pre">[k1,</span> <span class="pre">k2]</span></code> given
+that data.</p>
+<p>This is ordinary downstream analysis written against the public API
+(<code class="docutils literal notranslate"><span class="pre">designer.optimal_candidates</span></code>, <code class="docutils literal notranslate"><span class="pre">designer.apportionments</span></code>,
+<code class="docutils literal notranslate"><span class="pre">error_cov</span></code>, <code class="docutils literal notranslate"><span class="pre">simulate()</span></code>) — pydex has no Bayesian-inference capability
+of its own. <code class="docutils literal notranslate"><span class="pre">simulate()</span></code> runs through scipy’s Simulator, a black box with
+no symbolic gradient, so it is wrapped with <code class="docutils literal notranslate"><span class="pre">pytensor.wrap_py</span></code> and
+sampled with <code class="docutils literal notranslate"><span class="pre">pm.Metropolis</span></code> rather than PyMC’s default (gradient-based)
+NUTS sampler. A 2-parameter local D-optimal design with an unconstrained
+budget typically collapses to a single condition run several times rather
+than spread across several; 4 chains x (500 tune + 800 draws) in parallel
+takes a few minutes and should recover <code class="docutils literal notranslate"><span class="pre">k1</span></code>/<code class="docutils literal notranslate"><span class="pre">k2</span></code> close to their true
+values, with r_hat typically landing around 1.01-1.04 — inside PyMC’s own
+“probably fine, more draws would help” range rather than fully converged.
+The draw/tune/chain/core counts are constants at the top of that section
+if tighter diagnostics are needed, at the cost of runtime.</p>
+</section>
+</section>
+<section id="asl-elimination">
+<h2>ASL elimination<a class="headerlink" href="#asl-elimination" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">examples/ASL</span> <span class="pre">Elimination/</span></code></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">asl_elimination_demo.py</span></code> — demonstrates the diagnostic in
+<code class="docutils literal notranslate"><span class="pre">pydex.utils.diagnose_asl_elimination</span></code>, which checks that every parameter
+<code class="docutils literal notranslate"><span class="pre">Var</span></code> survives into the ASL primal vector by name. This is the
+precondition pydex’s IFT column-matching relies on;
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.initialize" title="pydex.core.designer.Designer.initialize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">initialize()</span></code></a> runs the same check
+automatically when the utility is importable.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pydex_ift_asl_guide.docx</span></code> — background on the IFT/ASL interaction.</p></li>
+</ul>
+</section>
+<section id="jupyter-notebooks">
+<h2>Jupyter notebooks<a class="headerlink" href="#jupyter-notebooks" title="Link to this heading"></a></h2>
+<p>The notebooks are not rendered here — building them into these pages would add
+a notebook-execution extension to the docs toolchain. They are kept in the
+repository with their outputs stored, so they read correctly on GitHub without
+being run:</p>
+<ul class="simple">
+<li><p><a class="reference external" href="https://github.com/salvadorgarciamunoz/pydex/blob/main/examples/jupyter/pydex_quickstart.ipynb">pydex_quickstart.ipynb</a>
+— narrated walkthrough of a first design.</p></li>
+<li><p><a class="reference external" href="https://github.com/salvadorgarciamunoz/pydex/blob/main/examples/jupyter/pydex_ode_model.ipynb">pydex_ode_model.ipynb</a>
+— the same for a dynamic model.</p></li>
+</ul>
+<p>To run them locally:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">cd</span><span class="w"> </span>examples/jupyter
+jupyter<span class="w"> </span>lab
+</pre></div>
+</div>
+</section>
+<section id="test-scripts-as-worked-examples">
+<h2>Test scripts as worked examples<a class="headerlink" href="#test-scripts-as-worked-examples" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">testing_scripts/</span></code> doubles as a set of larger examples. They are standalone
+scripts, run individually — the capability suite does not execute them, though
+it does reuse the three-reaction batch model introduced in
+<code class="docutils literal notranslate"><span class="pre">v_optimal_test_case.py</span></code>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">first_order_reaction.py</span></code> / <code class="docutils literal notranslate"><span class="pre">first_order_reaction_pyomo.py</span></code> — the same
+problem posed twice, once with a plain <code class="docutils literal notranslate"><span class="pre">simulate()</span></code> and once with a Pyomo
+model.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">v_optimal_test_case.py</span></code> / <code class="docutils literal notranslate"><span class="pre">v_optimal_test_case_pyomo.py</span></code> — the two-stage
+V-optimal workflow.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">smoke_test_designer.py</span></code> — the fastest end-to-end check that needs a
+solver: Ds-optimality resolved by name, the A-optimality singular-FIM
+behaviour, Ds succeeding where D-optimal cannot, and the <code class="docutils literal notranslate"><span class="pre">regularize_fim</span></code>
+path.</p></li>
+</ul>
+</section>
+<section id="publication-code">
+<h2>Publication code<a class="headerlink" href="#publication-code" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">publications/</span></code> holds scripts reproducing figures and results from the papers
+behind pydex. These are archival: they are kept as published rather than
+updated alongside the API, so treat them as a record rather than as current
+usage examples.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="installation.html" class="btn btn-neutral float-left" title="Installation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="api.html" class="btn btn-neutral float-right" title="API Reference" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2026, Kennedy Putra Kusumo, Salvador Garcia-Munoz, and contributors.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
