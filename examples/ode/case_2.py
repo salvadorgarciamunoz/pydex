@@ -15,6 +15,107 @@ Model:  dCA/dt = -k * CA^α
 Four model parameters : [θ₀, θ₁, α, ν]
 Two time-invariant controls : [CA0, T]
 Two measurable responses : [CA, CB]
+
+WHAT THIS SCRIPT DOES, AND IN WHAT ORDER
+----------------------------------------
+Three D-optimal design rounds on the same model and the same 25-candidate grid.
+They differ only in how much freedom the optimiser has over WHEN to sample.
+Each round prints a report and then produces three figures, so the run ends
+with nine figures numbered in the order below.
+
+  ROUND 1 — fixed sampling times            design_experiment(..., optimize_sampling_times=False)
+      Every selected experiment is measured at ALL ELEVEN sampling times.
+      The optimiser only chooses WHICH conditions (CA0, T) to run and how
+      much of the budget each one gets.
+      -> Figures 1-3: optimal efforts, predicted responses, sensitivities
+      -> apportion(2): the continuous design rounded to 2 physical runs
+
+  ROUND 2 — sampling times optimised        design_experiment(..., optimize_sampling_times=True)
+      Now the optimiser also chooses WHEN to sample, one time point per
+      experiment. The same experimental condition may appear more than once
+      with different sampling times (see "sampling schedules" below).
+      -> Figures 4-6
+      -> apportion(12)
+
+  ROUND 3 — exactly two samples per run     design_experiment(..., optimize_sampling_times=True, n_spt=2)
+      As round 2, but each experiment collects exactly TWO samples. The
+      optimiser picks the best PAIR of times for each condition.
+      -> Figures 7-9
+      -> apportion(12)
+
+  Note the  designer_1.atomic_fims = None  line before round 3. It clears the
+  cached atomic FIMs so they are rebuilt for the new 2-sample layout. The
+  original comment on that line claimed an IndexError without it; that is no
+  longer reproducible -- round 3 gives the same 10.610118 either way, on both
+  the IFT and the finite-difference paths. The reset is harmless and kept as a
+  precaution when changing n_spt between rounds, but do not expect a crash if
+  you omit it.
+
+
+READING THE PREDICTED-RESPONSE FIGURES
+--------------------------------------
+plot_optimal_predictions() draws, for each selected candidate, the model
+trajectories cA(t) and cB(t) as dashed lines, with MARKERS at the times where
+the design says to take a sample. Marker size is proportional to the effort
+allocated there, so a big marker means "most of your budget goes here".
+
+In round 1 there is one marker per sampling time on the fixed grid. In rounds 2
+and 3 the legend gains entries reading "Sampling schedule 1", "Sampling
+schedule 2", and so on, each drawn with its own marker shape (circle, square,
+hexagon, plus). Read the times off the marker positions on the time axis; the
+exact values are also listed in the printed report above each figure.
+
+A SAMPLING SCHEDULE is one particular set of sampling times for a given
+experimental condition. Two schedules on the same candidate mean: run this
+same (CA0, T) condition more than once, and sample at different times each
+time. For example round 3 typically returns
+
+    Candidate 21  (CA0 = 5, T = 273.15)
+      schedule 1 ~ [ 60, 80]:   ~23% of experiments
+      schedule 2 ~ [180, 200]:  ~25% of experiments
+
+i.e. run that condition twice -- one batch sampled early, one late. Sampling
+early and late on a decay curve is the usual pattern: the two regions carry
+different information, so splitting the runs beats putting every sample in one
+window. (Which schedule informs which parameter is not something this script
+measures -- if you need that, compare the sensitivity magnitudes at those times
+via plot_optimal_sensitivities.)
+
+Earlier pydex versions labelled these "Variant 1", "Variant 2", which said
+nothing about what a variant was.
+
+
+IMPORTANT — the sampling-time grid is a trap on collocation models
+-------------------------------------------------------------------
+`np.linspace(0.001, 200, 11)` below looks harmless. It is the trigger for a
+failure that shipped undetected in this example for a long time.
+
+The model normalises time by tau = max(sampling_times) = 200, so the first
+sampling time maps to 0.001/200 = 5e-6 -- five microseconds away from the
+collocation node at 0.0, but not equal to it. Embedding both produces a finite
+element of width ~1e-16 next to elements of width 5e-2, and the collocation
+solve then converges to a non-physical branch WHILE IPOPT REPORTS SUCCESS:
+CA rises to 31 mol/L from CA0 = 5, and the exact invariant CA + CB/nu = CA0 is
+violated by ~70 mol/L. Refining nfe does not help.
+
+The model file now guards against this (see build_collocation_grid in
+case_2_model.py, and the PITFALL section of its module docstring for the full
+diagnosis). You will see a RuntimeWarning saying the first sampling time was
+read from the nearest node instead of being embedded exactly -- that warning is
+the guard working, not a problem.
+
+If you write your own collocation model, three cheap habits catch this class of
+bug: assert a conservation law inside simulate(); print the min/max
+finite-element width after building the grid; and cross-check one candidate
+against an independent integrator. Details in the model file.
+
+Two ways to avoid triggering it at all:
+  * start the sampling grid at a time that is a comfortable fraction of the
+    horizon -- np.linspace(1.0, 200, 11) is exact to 1e-13 here, versus a
+    600% error for 0.001; or
+  * guard the grid construction, as the model file now does, which is the
+    better option because it protects every future sampling grid.
+
 """
 
 designer_1 = Designer()
@@ -41,6 +142,11 @@ tic = designer_1.enumerate_candidates(
 )
 designer_1.ti_controls_candidates = tic
 
+# NOTE the first sampling time. 0.001 with a 200-minute horizon normalises to
+# 5e-6, which sits a hair off the collocation node at 0 and used to produce a
+# machine-epsilon finite element that silently corrupted the solve. The model
+# file guards against it now and warns when it engages; see the PITFALL section
+# in case_2_model.py for the full story.
 designer_1.sampling_times_candidates = np.array([
     np.linspace(0.001, 200, 11)   # avoid t=0 with normalised time convention
     for _ in tic
@@ -88,10 +194,12 @@ designer_1.plot_optimal_sensitivities(interactive=False)
 designer_1.apportion(12)
 
 # ── D-optimal design (exactly 2 sampling times) ───────────────────────────────
-# Reset atomic_fims so pydex recomputes them for the new n_spt=2 grid.
-# Without this, pydex reuses the shape (n_c*11, 4, 4) array from the
-# previous round and tries to index it with the new (n_c*2) layout,
-# causing an IndexError.
+# Clear the cached atomic FIMs so they are rebuilt for the new n_spt=2 layout.
+# This was previously documented as necessary to avoid an IndexError from
+# reusing the (n_c*11, 4, 4) array with the (n_c*2) layout. That failure is no
+# longer reproducible on either sensitivity path -- round 3 returns the same
+# value with or without the reset -- so treat this as a cheap precaution when
+# changing n_spt between rounds rather than a requirement.
 designer_1.atomic_fims = None
 designer_1.design_experiment(
     designer_1.d_opt_criterion,

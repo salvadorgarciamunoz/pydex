@@ -41,11 +41,26 @@ by Kennedy Putra Kusumo et al., originally described in:
 - **regularize_fim fix**: `regularize_fim=True` now correctly adds ε·I
   to the symbolic FIM expression in the Pyomo solve (previously the flag
   was stored but had no computational effect on the native solve path)
-- **Comprehensive test suite**: 32 end-to-end tests covering all design
-  criteria, both sensitivity paths (FD and IFT), parallel correctness,
-  prior FIM, save/load, visualisation, and more
-- **Improved documentation**: Sphinx/NumPy-compliant docstrings throughout
-  `designer.py`
+- **Ds-optimal design**: design for a chosen SUBSET of the parameters
+  (`designer.interest_parameters`, set BY NAME) while marginalising the
+  rest, via the Schur complement of the nuisance block. Works on models
+  whose FIM is singular in a direction you do not care about, where
+  D-optimality cannot proceed
+- **Estimability analysis**: `run_estimability()` ranks parameters from
+  most to least estimable (Yao/McAuley orthogonalisation via pivoted QR)
+  and reports which are mutually correlated, hence interchangeable
+- **Structural-singularity gate**: `design_experiment()` refuses a
+  rank-deficient FIM by default and names the parameters responsible,
+  rather than returning a plausible number from a floored Cholesky
+  factor. Override with `allow_singular_fim=True`; Ds-optimality is exempt
+- **Comprehensive test suite**: 55 sections / 261 assertions covering all
+  design criteria, both sensitivity paths (FD and IFT), parallel
+  correctness, prior FIM, save/load, visualisation, and more
+- **Improved documentation**: Google-style docstrings throughout
+  `designer.py`, rendered to HTML with Sphinx (see `docs/`)
+
+A full list of changes, including the twelve bugs fixed in this fork and
+which test section guards each, is in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -75,6 +90,21 @@ Good starting points:
 - `examples/jupyter/pydex_quickstart.ipynb` — introductory notebook on
   basic features
 
+[`examples/README.md`](examples/README.md) indexes all of them and
+explains the `_no_ift` / `_no_ift_no_collocation` naming scheme, which
+lets you compare sensitivity methods on an otherwise identical problem.
+
+## Documentation
+
+The API reference is built from the in-source docstrings with Sphinx:
+
+```bash
+pip install sphinx sphinx-rtd-theme
+python -m sphinx -b html docs/source docs/build/html
+```
+
+Then open `docs/build/html/index.html`.
+
 ---
 
 ## Features
@@ -103,11 +133,21 @@ Good starting points:
 |----------------|------------------------------------------------------|
 | numpy          | Array operations                                     |
 | scipy          | ODE integration, optimisation fallback               |
+| pandas         | Estimability tables returned by `run_estimability()` |
 | matplotlib     | Visualisation                                        |
 | numdifftools   | Numerical finite-difference sensitivities            |
 | pyomo          | OED problem formulation, DAE modelling, IFT Jacobian |
 | joblib         | Parallel sensitivity evaluation                      |
 | dill           | Saving objects with weak references                  |
+
+> **matplotlib compatibility.** `designer.py` uses
+> `matplotlib.pyplot.get_cmap(name, lut)` for colormap lookup. This is the
+> supported API across the whole supported range: it is not deprecated in
+> matplotlib 3.11, it accepts a `Colormap` instance as well as a name, and
+> it keeps the `>=3.4` floor. It deliberately avoids
+> `matplotlib.cm.get_cmap()`, which was removed in 3.11, and
+> `matplotlib.colormaps[...]`, which would raise the floor to 3.6 and
+> rejects `Colormap` instances. Verified against matplotlib 3.10 and 3.11.
 
 ### Solvers
 
@@ -130,9 +170,33 @@ Any other NLP solver registered with Pyomo's `SolverFactory`
 (e.g. `bonmin`, `glpk`, `cplex`) can be used by passing
 `solver=<solver_name>`.
 
-> For best IPOPT performance, configure it with HSL linear solvers
-> (`MA27`, `MA57`) — see `docs/ipopt_setup_guide.docx`. The open-source
-> `MUMPS` solver works as a fallback.
+[POUNCE](https://github.com/jkitchin/pounce) is a pure-Rust port of IPOPT
+whose default build requires no Fortran, HSL or system BLAS. It speaks the
+AMPL NL/SOL protocol, so Pyomo drives it the same way it drives IPOPT:
+
+```bash
+pip install pyomo-pounce
+```
+
+```python
+import pyomo_pounce          # registers the 'pounce' solver
+designer.design_experiment(designer.d_opt_criterion, solver="pounce")
+```
+
+POUNCE covers both solver call sites. `solver=` handles the design
+formulation; for the IFT sensitivity path the collocation NLP is solved inside
+your own `pyomo_model_fn`, so change the `SolverFactory` call there instead.
+On `examples/ode/case_1.py` with both driven by POUNCE 0.9.0, the D-optimal
+criterion matched IPOPT to 3.6e-15 relative on the same support. IPOPT
+remains the reference configuration, being what the capability suite runs
+against.
+
+> For best IPOPT performance, configure it with the HSL linear solvers
+> (`MA27`, `MA57`), which require a separate licence from
+> [HSL](https://licences.stfc.ac.uk/product/coin-hsl). The open-source
+> `MUMPS` solver works as a fallback and is what a stock IPOPT build
+> uses. Scripts that request `linear_solver: ma57` will need that value
+> changed to `mumps` if HSL is not installed.
 
 **V-optimal operating-point optimisation** (Stage 1 of the V-optimal
 workflow, `find_optimal_operating_point()`) attempts a Pyomo PyNumero
@@ -321,14 +385,33 @@ variable-elimination behaviour encountered in the IFT sensitivity path:
 
 ---
 
-## Testing scripts
+## Testing
 
-The `testing_scripts/` folder contains standalone scripts used to verify
-and demonstrate the package end-to-end. They double as larger worked
-examples.
+There are two tiers.
+
+**`tests/` — fast, solver-free regression tests.** These stub out pydex's
+plotting and logging modules and import `designer.py` directly, so they
+need no IPOPT and run in seconds. This is what CI runs on every push:
+
+```bash
+mkdir -p _flat && cp pydex/core/designer.py _flat/designer.py
+PYTHONPATH="$PWD/_flat" pytest -q tests/
+```
+
+**`testing_scripts/` — end-to-end scripts that need solvers.** These
+verify and demonstrate the package end-to-end and double as larger worked
+examples. They are deliberately *not* run in CI: they need IPOPT, an MINLP
+solver, and PyNumero's compiled ASL extension, and take far longer than a
+CI budget allows. Run the capability suite locally before tagging a
+release.
+
+`testing_scripts/smoke_test_designer.py` sits between the two tiers: it
+needs only IPOPT, runs in seconds, and checks Ds-optimality resolution by
+name, the A-optimality singular-FIM fix, Ds succeeding where D-optimal
+cannot, and the `regularize_fim` path.
 
 - **`pydex_full_capability_test.py`** — the comprehensive capability
-  suite: 37 end-to-end tests built on the three-reaction batch model
+  suite: 55 sections and 261 assertions built on the three-reaction batch model
   (A→B desired, A→I impurity, A→D decomposition), run in sequence and
   gated by a single pass/fail check. Coverage includes: setup and
   initialisation; candidate-grid helpers; sensitivity analysis,

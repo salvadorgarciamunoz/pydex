@@ -18,7 +18,6 @@ import dill
 import sys
 
 from matplotlib import pyplot as plt
-from matplotlib import cm
 from matplotlib.widgets import RadioButtons, CheckButtons
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.ticker import AutoMinorLocator
@@ -151,6 +150,8 @@ class Designer:
     Designer comes equipped with convenient built-in visualization capabilities
     using matplotlib, and supports the following design criteria:
 
+    .. code-block:: text
+
         Calibration-oriented (minimise parameter uncertainty):
             D-optimal  — maximises det(FIM),  minimises joint confidence volume
             Ds-optimal — maximises det of the Schur complement of the nuisance-
@@ -162,7 +163,6 @@ class Designer:
 
         Prediction-oriented (minimise prediction uncertainty at target conditions):
             V-optimal  — minimises trace(W FIM^{-1} W^T) at user-specified dw
-            G-optimal  — minimises max prediction variance over a region
 
         Prediction-variance family, on PVAR = f·FIM^{-1}·f^T per candidate and
         sampling time ("g" = generalised / worst case, "i" = individual / summed):
@@ -171,8 +171,15 @@ class Designer:
             eg, ei     — largest eigenvalue of PVAR
             vdi        — as di, over the operating-point grid
 
-        Risk-averse:
-            CVaR-D/A/E — conditional value-at-risk variants for robust design
+        Robustness to parameter uncertainty:
+            pseudo-Bayesian — average information (type 0) or average criterion
+                              (type 1) over a scenario set
+            CVaR-D          — conditional value-at-risk on the D-criterion, for
+                              designs judged on their worst-case scenarios
+
+        Other:
+            U-optimal  — maximises the squared Frobenius norm of the FIM; needs
+                         no inverse, so it survives a singular FIM
 
     Quick-start
     -----------
@@ -198,54 +205,98 @@ class Designer:
     >>> d.design_experiment(d.d_opt_criterion, solver="ipopt")
     >>> d.print_optimal_candidates()
 
-    Simulate function signatures
-    ----------------------------
-    Pydex recognises five signatures based on the argument names.  Use
-    exactly these names — pydex inspects them with ``inspect.signature``:
+    Design types
+    ------------
+    Every criterion is a bound method taking the effort vector and returning a
+    scalar to be MINIMISED; pass the method itself to
+    :meth:`design_experiment`::
 
-    Type 1 — static model, time-invariant controls only:
-        simulate(ti_controls, model_parameters)
+            d.design_experiment(d.d_opt_criterion, solver="ipopt")
 
-    Type 2 — dynamic model, time-invariant controls + sampling times:
-        simulate(ti_controls, sampling_times, model_parameters)
+    The sections below cover each family. Which of them run natively in Pyomo
+    and which fall back to SLSQP is set out under
+    `Which solver actually runs`_.
 
-    Type 3 — dynamic model, time-varying controls + sampling times:
-        simulate(tv_controls, sampling_times, model_parameters)
+    D-optimal
+    ^^^^^^^^^
+    ``d_opt_criterion`` — maximises ``det(FIM)``, equivalently minimises the
+    volume of the joint parameter confidence ellipsoid. The default choice, and
+    the one to reach for without a specific reason to do otherwise: it is
+    invariant to reparameterisation by any invertible linear transform, so the
+    design does not depend on whether you estimate a rate constant or its
+    logarithm.
 
-    Type 4 — dynamic model, both control types + sampling times:
-        simulate(ti_controls, tv_controls, sampling_times, model_parameters)
+    Its weakness is that a determinant multiplies all eigenvalues, so it says
+    nothing about WHICH parameter is poorly determined — a design can score well
+    while leaving one direction almost undetermined, provided the others
+    compensate. When ``det(FIM)`` is zero for every admissible design the
+    criterion is infeasible everywhere; that is a structural statement about the
+    model and grid, and :meth:`diagnose_fim_structure` names the parameters
+    responsible.
 
-    Type 5 — dynamic model, sampling times only (no explicit controls):
-        simulate(sampling_times, model_parameters)
+    A-optimal
+    ^^^^^^^^^
+    ``a_opt_criterion`` — minimises ``trace(FIM^-1)``, the sum of the parameter
+    variances. More interpretable than D: it is literally the total variance you
+    expect across the parameter set. The trade-off is that it is NOT invariant to
+    reparameterisation, and because it is a sum it can be dominated by whichever
+    parameter happens to carry the largest variance, which in turn depends on the
+    units the parameters are expressed in.
 
-    In all cases ``model_parameters`` must be present.  The function must
-    return a numpy array:
-        - Static (types 1): shape (n_responses,)
-        - Dynamic (types 2-5): shape (n_spt, n_responses)
+    A singular or indefinite FIM returns ``+inf``, never 0 — see
+    `Infeasibility conventions`_ for why that distinction matters.
 
-    Control variables
-    -----------------
-    ``ti_controls`` — time-invariant controls
-        Settings fixed for the entire duration of an experiment.
-        Examples: initial concentration, reactor pressure, feed ratio.
-        Set as ``designer.ti_controls_candidates``, shape (n_c, n_tic).
+    E-optimal
+    ^^^^^^^^^
+    ``e_opt_criterion`` — maximises the smallest eigenvalue of the FIM,
+    equivalently minimises ``lambda_max(FIM^-1)``. This targets the WORST
+    determined direction in parameter space, so it is the criterion to reach for
+    when the concern is one specific poorly determined combination rather than
+    average precision across the set. Like A, it is not invariant to
+    reparameterisation.
 
-    ``tv_controls`` — time-varying controls
-        Settings that vary during an experiment, represented as a flat
-        parameter vector whose interpretation (ramp, step, spline, etc.)
-        is defined inside the user's simulate function.
-        Examples: temperature ramp rate, feed profile knots.
-        Set as ``designer.tv_controls_candidates``, shape (n_c, n_tvc).
+    Ds-optimal (subset)
+    ^^^^^^^^^^^^^^^^^^^
+    Ds-optimality designs for a chosen SUBSET of the model parameters while
+    marginalising the remainder ("nuisance" parameters) out through the Schur
+    complement of the FIM. Declare the subset BY NAME:
 
-    ``sampling_times`` — measurement time points
-        The times within a dynamic experiment at which measurements are
-        taken.  Set as ``designer.sampling_times_candidates``, shape (n_c, n_spt).
-        When ``optimize_sampling_times=True`` is passed to design_experiment,
-        pydex optimises the effort allocation over both candidates and
-        sampling times simultaneously.
+    >>> d.model_parameter_names = ["k", "A0", "c1", "c2"]
+    >>> d.interest_parameters   = ["k", "A0"]        # c1, c2 become nuisance
+    >>> d.design_experiment(d.ds_opt_criterion, solver="ipopt")
 
-    V-optimal design workflow (two-stage)
-    --------------------------------------
+    Names are matched against `model_parameter_names` by exact string equality.
+    Numeric indices are rejected: a parameter's POSITION in the FIM follows the
+    order of `model_parameters`, which is not guaranteed to track the order in
+    which a Pyomo model declares its equations or variables, so position is not
+    a stable identifier. Unknown names raise immediately rather than binding
+    silently to the wrong parameter.
+
+    Why use it: Ds stays well defined when a nuisance parameter is
+    unidentifiable, whereas D-optimality does not. If a nuisance direction
+    carries no information then det(FIM) = 0 and D-optimality is infeasible for
+    EVERY design, but the Schur complement over the interest parameters remains
+    finite and positive definite, so there is still something to optimise.
+
+    Its limit: Ds only helps when the unidentifiable direction lies in the
+    NUISANCE subspace. If the interest parameters are themselves collinear after
+    marginalisation, the Schur complement is singular too and the criterion
+    correctly reports infeasibility. A Ds value of +inf is therefore a
+    diagnosis, not a bug: the question to ask is whether the unidentifiability
+    sits in the parameters you care about or the ones you do not.
+
+    Practical note: when the nuisance block cannot be made positive definite,
+    the native Pyomo formulation is infeasible by construction and the solve
+    falls back to SLSQP on the generalised Schur complement. If the Schur
+    complement is also non-PD at the STARTING design, SLSQP has an infinite
+    objective and no gradient with which to escape it, so the design will not
+    move. Passing regularize_fim=True to design_experiment() keeps the solve on
+    the native path, where IPOPT can make progress from an infeasible start;
+    note the resulting criterion value then depends on `_eps`.
+
+
+    V-optimal (prediction-oriented, two-stage)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     V-optimal design targets prediction accuracy at a specific operating
     condition ``dw`` rather than minimising global parameter uncertainty.
     It requires two stages.
@@ -270,8 +321,8 @@ class Designer:
         tv_control parameters, ``mp`` the current model_parameters array.
         Returns the scalar value to minimise or maximise.
 
-    ``process_constraints`` signature:
-    ``callable(tic, tvc, mp) -> list of dicts``
+    ``process_constraints`` signature: ``callable(tic, tvc, mp) -> list of dicts``
+
         Each dict: ``{"type": "ineq" | "eq", "fun": callable(tic, tvc, mp)}``.
         For ``"ineq"``: ``fun(tic, tvc, mp) >= 0`` means feasible.
         For ``"eq"``: ``fun(tic, tvc, mp) == 0``.
@@ -320,65 +371,29 @@ class Designer:
                 optimize_sampling_times = True,
             )
 
-    Subset (Ds-optimal) design
-    --------------------------
-    Ds-optimality designs for a chosen SUBSET of the model parameters while
-    marginalising the remainder ("nuisance" parameters) out through the Schur
-    complement of the FIM. Declare the subset BY NAME:
 
-    >>> d.model_parameter_names = ["k", "A0", "c1", "c2"]
-    >>> d.interest_parameters   = ["k", "A0"]        # c1, c2 become nuisance
-    >>> d.design_experiment(d.ds_opt_criterion, solver="ipopt")
+    Prediction-variance family (dg, di, ag, ai, eg, ei, vdi)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    These act on the prediction-variance block ``PVAR = f·FIM^-1·f^T`` formed per
+    candidate and sampling time, rather than on the FIM directly. The first
+    letter is the aggregation over PVAR and the second is the aggregation over
+    blocks — ``g`` for generalised (worst case over blocks), ``i`` for individual
+    (summed over blocks):
 
-    Names are matched against `model_parameter_names` by exact string equality.
-    Numeric indices are rejected: a parameter's POSITION in the FIM follows the
-    order of `model_parameters`, which is not guaranteed to track the order in
-    which a Pyomo model declares its equations or variables, so position is not
-    a stable identifier. Unknown names raise immediately rather than binding
-    silently to the wrong parameter.
+    .. code-block:: text
 
-    Why use it: Ds stays well defined when a nuisance parameter is
-    unidentifiable, whereas D-optimality does not. If a nuisance direction
-    carries no information then det(FIM) = 0 and D-optimality is infeasible for
-    EVERY design, but the Schur complement over the interest parameters remains
-    finite and positive definite, so there is still something to optimise.
+        dg, di   determinant of PVAR        (see the caveat below)
+        ag, ai   trace of PVAR
+        eg, ei   largest eigenvalue of PVAR
+        vdi      as di, over the operating-point grid
 
-    Its limit: Ds only helps when the unidentifiable direction lies in the
-    NUISANCE subspace. If the interest parameters are themselves collinear after
-    marginalisation, the Schur complement is singular too and the criterion
-    correctly reports infeasibility. A Ds value of +inf is therefore a
-    diagnosis, not a bug: the question to ask is whether the unidentifiability
-    sits in the parameters you care about or the ones you do not.
+    Use these when the quantity you care about is the precision of the model's
+    PREDICTIONS across the design region, rather than of its parameters. Note
+    ``vdi_criterion`` collapses to D-optimality when ``n_m_r == n_mp``, because
+    ``W`` is then square and ``det(PVAR) = det(W)^2 / det(FIM)``; it is a
+    distinct criterion only when there are fewer measured responses than
+    parameters.
 
-    Practical note: when the nuisance block cannot be made positive definite,
-    the native Pyomo formulation is infeasible by construction and the solve
-    falls back to SLSQP on the generalised Schur complement. If the Schur
-    complement is also non-PD at the STARTING design, SLSQP has an infinite
-    objective and no gradient with which to escape it, so the design will not
-    move. Passing regularize_fim=True to design_experiment() keeps the solve on
-    the native path, where IPOPT can make progress from an infeasible start;
-    note the resulting criterion value then depends on `_eps`.
-
-    Infeasibility conventions
-    -------------------------
-    Every criterion is MINIMISED, so an unusable information matrix must return
-    +inf — the worst attainable value — never 0, which for a minimised criterion
-    is among the best. Degenerate inputs handled uniformly (returning +inf, with
-    a correctly shaped zero gradient when an analytic Jacobian was requested):
-
-        * FIM absent, wrong shape, all-zero, or non-finite
-        * FIM not positive definite
-
-    Positive-definiteness is tested by eigenvalue or Cholesky, never by the sign
-    of the determinant: det > 0 only requires an EVEN number of negative
-    eigenvalues, so an indefinite matrix such as diag(1, 1, -1, -1) passes a
-    determinant-sign test while being meaningless as an information matrix. The
-    same test is used in the finite-difference and analytic-gradient branches of
-    a given criterion, so toggling `_fd_jac` cannot change whether a design is
-    judged feasible.
-
-    Determinant-based prediction-variance criteria (dg, di, vdi)
-    -----------------------------------------------------------
     These take determinants of PVAR = f·FIM^{-1}·f^T. A determinant MULTIPLIES
     all eigenvalues, so a single near-null direction in the sensitivity block f
     collapses it to numerical noise. Two failure modes follow:
@@ -421,6 +436,214 @@ class Designer:
     than its size suggests. A warning reports the measured worst
     sv_min/sv_max over all candidate/sampling-time pairs.
 
+
+    Pseudo-Bayesian designs
+    ^^^^^^^^^^^^^^^^^^^^^^^
+    All of the above assume the parameters are known well enough to linearise
+    around. When they are not, supply a SCENARIO SET — an array of parameter
+    draws instead of a single vector — and pydex designs against the whole set.
+    Two aggregations, selected by ``pseudo_bayesian_type``:
+
+    .. code-block:: text
+
+        type 0   average information:  f( mean_s FIM_s )
+        type 1   average criterion:    mean_s f( FIM_s )
+
+    Type 0 is solved natively in Pyomo because the scenario-averaged information
+    matrix is still linear in the efforts; type 1 is not, and falls back to
+    SLSQP with finite-differenced gradients — see `Which solver actually runs`_.
+    That makes type 0 the cheaper of the two. Type 1 is the more faithful reading
+    of "good on average" when the criterion is strongly non-linear in the FIM,
+    since averaging the criterion is not the same as evaluating the criterion of
+    the average.
+
+    CVaR-D (risk-averse)
+    ^^^^^^^^^^^^^^^^^^^^
+    ``cvar_d_opt_criterion``, driven by :meth:`solve_cvar_problem` rather than
+    :meth:`design_experiment`. Where a pseudo-Bayesian design optimises the
+    AVERAGE over scenarios, a CVaR design optimises the average over the WORST
+    ``(1 - beta)`` fraction of them, so it buys protection against the scenarios
+    where the design performs badly at some cost to the typical case. Sweeping
+    ``beta`` traces a bi-objective frontier, which :meth:`plot_pareto_frontier`
+    draws.
+
+    Only the D-criterion has a CVaR form. ``solve_cvar_problem`` rejects any
+    criterion whose name does not contain ``cvar``.
+
+    U-optimal
+    ^^^^^^^^^
+    ``u_opt_criterion`` — maximises the squared Frobenius norm of the FIM,
+    ``sum(FIM * FIM)``. It uses no inverse and no decomposition, so unlike D, A
+    and E it stays finite for a singular FIM. That robustness is also its
+    limitation: it rewards total information without regard to how that
+    information is distributed across parameters, so a design scoring well here
+    can still leave a parameter combination undetermined. Useful as a
+    well-behaved starting point or a sanity check, not as a final criterion.
+
+    Tools and helpers
+    -----------------
+    These answer questions ABOUT a model and a candidate grid rather than
+    producing a design. None of them is wired into any design path: they report,
+    and what you do with the report is yours to decide.
+
+    Estimability analysis
+    ^^^^^^^^^^^^^^^^^^^^^
+    :meth:`run_estimability` ranks the parameters from most to least estimable
+    on the current grid, and is usually the FIRST thing worth running on a new
+    model — before choosing a criterion, and certainly before diagnosing a
+    design that will not converge. It answers three separate questions that are
+    easy to conflate:
+
+    .. code-block:: text
+
+        abs_info   ABSOLUTE. Pooled Fisher information about each parameter's
+                   fractional value. Dimensionless, so it reads on its own:
+                   below 1 the whole grid cannot pin the parameter down to
+                   within its own magnitude.
+        E / E_UD   RELATIVE. Residual norm at selection, scaled so the best
+                   parameter is 1. Says which parameters rank low, NOT whether
+                   even the best is any good — that is what abs_info is for.
+                   E is for weighted least squares / MLE, E_UD for unweighted.
+        group      Which parameters are mutually correlated above corr_tol, and
+                   therefore interchangeable as far as the data is concerned.
+
+    The mechanism is the orthogonalisation of Yao et al. (2003) as tabulated by
+    Wu, McLean, Harris and McAuley (2011), implemented as column-pivoted QR. The
+    step that makes it more than a sensitivity ranking is the projection: a
+    parameter with large raw sensitivity that merely DUPLICATES the effect of one
+    already selected gets a small residual and ranks low. Magnitude and
+    correlation are different problems and call for different experiments, and
+    this separates them.
+
+    Reading the output, in the order it usually matters:
+
+    * any parameter with ``abs_info < 1`` cannot be determined by this grid at
+      all — fix it, reparameterise, or move it to the nuisance set and use
+      Ds-optimality;
+    * a CORRELATION GROUP means the data determines roughly ONE parameter among
+      its members. Estimate or fix your choice and the rest become unestimable
+      once you do. Pick on physical grounds — which one is meaningful,
+      transferable, or independently known — not on the ranking;
+    * a low ``E`` with healthy ``abs_info`` means the parameter is informative
+      but redundant; a low ``abs_info`` means it is simply not informed.
+
+    The ranking is a property of THIS grid at THESE parameter values, not of the
+    model in the abstract. A parameter inestimable on one grid may be fine on
+    another, so re-run it after changing the candidates.
+
+    FIM and sensitivity diagnostics
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    :meth:`diagnose_fim_structure` evaluates the FIM at the fully supported
+    design — every candidate at full effort, the most informative matrix the grid
+    can produce — and reports its rank, condition number, and the parameter
+    composition of any null direction. Because that design is the best case, a
+    deficiency there is STRUCTURAL: no choice of efforts will fix it. The report
+    names the implicated parameters and lists the options.
+
+    :meth:`diagnose_sensitivity` works per candidate instead, tabulating
+    ``A_k[j,j]`` (how many experiments at that candidate would be needed for
+    signal-to-noise 1 on parameter j) and the condition number. Use it to see
+    WHICH candidates carry information about which parameters, rather than
+    whether the grid as a whole is adequate.
+
+    :meth:`design_experiment` runs the structural check itself and REFUSES a
+    rank-deficient design by default rather than returning a plausible number
+    from a floored Cholesky factor. Override with ``allow_singular_fim=True``.
+    Ds-optimality is exempt, since marginalising a singular nuisance block is
+    precisely its purpose.
+
+    ASL elimination diagnostics
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    Only relevant on the IFT sensitivity path. Exact sensitivities are taken from
+    the KKT conditions of the collocation NLP, which requires locating each
+    parameter's column in the ASL primal vector BY NAME. If Pyomo's presolve
+    eliminates a parameter ``Var`` — because it is fixed, unused, or trivially
+    substitutable — that column is not there, and matching by position instead
+    would silently return sensitivities for the wrong variable.
+
+    ``pydex.utils.diagnose_asl_elimination`` checks that every parameter
+    survives into the primal vector and reports any that do not.
+    :meth:`initialize` runs the same check automatically whenever that utility
+    is importable, so in normal use this happens without being asked for. Run it
+    directly when an IFT design produces sensitivities you do not believe; see
+    ``examples/ASL Elimination/``.
+
+    Apportionment
+    ^^^^^^^^^^^^^
+    A design is a continuous effort vector, but experiments come in whole
+    numbers. :meth:`apportion` converts efforts into an integer allocation over
+    ``n_exp`` runs and reports the efficiency of the rounded design relative to
+    the continuous one. Worth reading rather than assuming: the fewer
+    experiments there are to distribute, the less room rounding has to
+    approximate the intended efforts, and the reported efficiency is what tells
+    you whether ``n_exp`` is large enough.
+
+
+    Simulate function signatures
+    ----------------------------
+    Pydex recognises five signatures based on the argument names.  Use
+    exactly these names — pydex inspects them with ``inspect.signature``:
+
+    Type 1 — static model, time-invariant controls only:
+        simulate(ti_controls, model_parameters)
+
+    Type 2 — dynamic model, time-invariant controls + sampling times:
+        simulate(ti_controls, sampling_times, model_parameters)
+
+    Type 3 — dynamic model, time-varying controls + sampling times:
+        simulate(tv_controls, sampling_times, model_parameters)
+
+    Type 4 — dynamic model, both control types + sampling times:
+        simulate(ti_controls, tv_controls, sampling_times, model_parameters)
+
+    Type 5 — dynamic model, sampling times only (no explicit controls):
+        simulate(sampling_times, model_parameters)
+
+    In all cases ``model_parameters`` must be present.  The function must
+    return a numpy array:
+
+        - Static (types 1): shape (n_responses,)
+        - Dynamic (types 2-5): shape (n_spt, n_responses)
+
+    Control variables
+    -----------------
+    ``ti_controls`` — time-invariant controls
+        Settings fixed for the entire duration of an experiment.
+        Examples: initial concentration, reactor pressure, feed ratio.
+        Set as ``designer.ti_controls_candidates``, shape (n_c, n_tic).
+
+    ``tv_controls`` — time-varying controls
+        Settings that vary during an experiment, represented as a flat
+        parameter vector whose interpretation (ramp, step, spline, etc.)
+        is defined inside the user's simulate function.
+        Examples: temperature ramp rate, feed profile knots.
+        Set as ``designer.tv_controls_candidates``, shape (n_c, n_tvc).
+
+    ``sampling_times`` — measurement time points
+        The times within a dynamic experiment at which measurements are
+        taken.  Set as ``designer.sampling_times_candidates``, shape (n_c, n_spt).
+        When ``optimize_sampling_times=True`` is passed to design_experiment,
+        pydex optimises the effort allocation over both candidates and
+        sampling times simultaneously.
+
+    Infeasibility conventions
+    -------------------------
+    Every criterion is MINIMISED, so an unusable information matrix must return
+    +inf — the worst attainable value — never 0, which for a minimised criterion
+    is among the best. Degenerate inputs handled uniformly (returning +inf, with
+    a correctly shaped zero gradient when an analytic Jacobian was requested):
+
+        * FIM absent, wrong shape, all-zero, or non-finite
+        * FIM not positive definite
+
+    Positive-definiteness is tested by eigenvalue or Cholesky, never by the sign
+    of the determinant: det > 0 only requires an EVEN number of negative
+    eigenvalues, so an indefinite matrix such as diag(1, 1, -1, -1) passes a
+    determinant-sign test while being meaningless as an information matrix. The
+    same test is used in the finite-difference and analytic-gradient branches of
+    a given criterion, so toggling `_fd_jac` cannot change whether a design is
+    judged feasible.
+
     Which solver actually runs
     --------------------------
     Criteria expressible as static Pyomo expressions are built symbolically and
@@ -453,6 +676,8 @@ class Designer:
     ------------------
     Attributes, with defaults, grouped by what they govern:
 
+    .. code-block:: text
+
         Ds-optimality (Schur complement)
             _ds_rcond       1e-12  singular-value cutoff for the nuisance solve
             _ds_resid_tol   1e-8   relative residual above which the nuisance
@@ -472,12 +697,6 @@ class Designer:
                                    from its keyword argument, so setting that
                                    attribute directly is silently discarded.
 
-    References
-    ----------
-    Shahmohammadi, A. & McAuley, K.B. (2019). Sequential model-based A- and
-    V-optimal design of experiments for building fundamental models of
-    pharmaceutical production processes. Computers & Chemical Engineering,
-    129, 106504. https://doi.org/10.1016/j.compchemeng.2019.06.029
     """
     def __init__(self):
         """
@@ -4684,6 +4903,12 @@ class Designer:
             nrows=self.n_m_r,
             ncols=self.n_mp,
             sharex=True,
+            # Keep axes 2-D even when n_m_r or n_mp is 1: the loops below
+            # index axes[row, col] unconditionally, and plt.subplots would
+            # otherwise collapse a single row/column to a 1-D array (or a
+            # bare Axes when both are 1). _plot_optimal_sensitivities
+            # achieves the same thing by reshaping after the call.
+            squeeze=False,
         )
         if legend is None:
             if self.n_c < 6:
@@ -4818,7 +5043,7 @@ class Designer:
             else:
                 plot_response = self.response
             ax = axes[res]
-            cmap = cm.get_cmap(colour_map, len(self.optimal_candidates))
+            cmap = plt.get_cmap(colour_map, len(self.optimal_candidates))
             colors = itertools.cycle([
                 cmap(_) for _ in np.linspace(0, 1, len(self.optimal_candidates))
             ])
@@ -5451,7 +5676,8 @@ class Designer:
         marginalising out the remaining ("nuisance") parameters.
 
         Requires designer.interest_parameters to be set beforehand, BY NAME,
-        e.g.:
+        e.g.::
+
             designer.interest_parameters = ["Ka", "A0"]
         """
         if self._pseudo_bayesian:
@@ -7093,7 +7319,7 @@ class Designer:
         """
         Draw the estimability figures — SEPARATE figures, not panels of one.
 
-        Four when error_cov was supplied (step-1 norm, E, E-UD, correlation),
+        Four when error_cov was supplied (abs info, E, E-UD, correlation),
         three otherwise. They are separate because the number of parameters is
         unbounded: a model with fifty parameters needs a fifteen-inch-tall bar
         chart and a fifty-by-fifty heat map, and neither survives being squeezed
@@ -7103,8 +7329,14 @@ class Designer:
 
         Each bar figure is sorted by its OWN metric rather than by a shared
         order, so the change in ordering between them is the thing you read: a
-        parameter high on step-1 norm but low on E has lost its leverage to
+        parameter high on abs info but low on E has lost its leverage to
         correlation with something already selected, and the heat map names what.
+
+        Each panel carries its OWN threshold line and x-axis label. abs info is
+        absolute and its line sits at 1; the two E indices are normalised so the
+        best parameter is 1, and their line sits at the resolution tolerance.
+        Labelling abs info "normalised to the largest" (as a shared label did)
+        contradicts the one property that makes it useful.
 
         Returns the list of figures.
         """
@@ -7121,15 +7353,26 @@ class Designer:
         figs = []
 
         panels = [("abs info — pooled Fisher information, dimensionless",
-                   out["abs_info"], "tab:green", False)]
+                   out["abs_info"], "tab:green",
+                   # abs_info's threshold is the ABSOLUTE value 1, not `tol`.
+                   # `tol` is the E-index numerical-resolution floor (1e-7 or
+                   # 1e-3) and means nothing on an information axis. 1.0 is the
+                   # same constant the returned table's `underdetermined` column
+                   # and the printed report both use, so figure and report agree.
+                   1.0, "under-determined below 1",
+                   "pooled Fisher information — absolute (log scale)")]
         if weighted:
             panels.append(("E — index for MLE / weighted least squares",
-                           out["e_index"], "tab:red", True))
+                           out["e_index"], "tab:red",
+                           tol, f"resolution tol = {tol:.0e}",
+                           "normalised to the largest (log scale)"))
         panels.append(("E — Unit Dependent Index — for unweighted least squares",
-                       out["e_index_ud"], "tab:blue", True))
+                       out["e_index_ud"], "tab:blue",
+                       tol, f"resolution tol = {tol:.0e}",
+                       "normalised to the largest (log scale)"))
 
         # ── one bar figure per index ─────────────────────────────────────────
-        for title, values, colour, show_tol in panels:
+        for title, values, colour, vline, vlabel, xlabel in panels:
             # scale with the parameter count; a fixed height crushes the bars
             height = max(3.0, 0.30 * p + 1.6)
             fig, ax = plt.subplots(figsize=(8.5, height))
@@ -7143,13 +7386,11 @@ class Designer:
             ax.set_yticklabels([f"{r}. {n}" for r, n in enumerate(ordered, 1)],
                                fontsize=lbl_fs)
             ax.set_xscale("log")     # these span orders of magnitude
-            if show_tol:
-                ax.axvline(tol, color="0.3", ls="--", lw=1.4,
-                           label=f"resolution tol = {tol:.0e}")
-                ax.legend(loc="lower right", fontsize=8.5, framealpha=0.9)
+            ax.axvline(vline, color="0.3", ls="--", lw=1.4, label=vlabel)
+            ax.legend(loc="lower right", fontsize=8.5, framealpha=0.9)
             ax.set_title(f"{title}\nranked most to least estimable — advisory",
                          fontsize=11)
-            ax.set_xlabel("normalised to the largest (log scale)")
+            ax.set_xlabel(xlabel)
             ax.grid(axis="x", alpha=0.3, linestyle=":")
             fig.tight_layout()
             figs.append(fig)
@@ -7257,7 +7498,7 @@ class Designer:
         and the measurements, not in the design.
 
         Why this matters, and why it is worth stopping for
-        -------------------------------------------------
+        ---------------------------------------------------
         A rank-deficient FIM does not necessarily make the design solve FAIL.
         The native D-optimal formulation lifts log-det through a Cholesky factor
         with a floored diagonal, and an interior-point solver will happily
@@ -7580,8 +7821,23 @@ class Designer:
         # low-density output that buries whatever else the script prints. The
         # counts and the returned dict carry the same information.
         if report:
-            sep = "─" * 100
-            print(f"\n{' Sensitivity Diagnosis ':─^100}")
+            # Build the header FIRST so the rules can be derived from its true
+            # width. A hardcoded width is wrong in both directions: this table
+            # is 2 + 20 + n_mp*(pcw+2) + 22 characters wide, which is 158 for a
+            # 6-parameter model with long parameter names (rule too short) and
+            # about 82 for a 2-parameter model (rule too long).
+            pcw = max(10, max(len(p) for p in param_names))
+            header = f"  {'Candidate':<20}"
+            for p in param_names:
+                header += f"  {p:>{pcw}}"
+            header += f"  {'Cond#':>12}  Status"
+            sub_header = (f"  {'':20}  "
+                          + "  ".join(f"{'A_k[j,j]':>{pcw}}" for _ in param_names)
+                          + f"  {'':>12}")
+            tbl_w = len(header)
+
+            sep = "─" * tbl_w
+            print(f"\n{' Sensitivity Diagnosis ':─^{tbl_w}}")
             print(f"  Candidates         : {self.n_c}")
             print(f"  Parameters         : {self.n_mp}")
             print(f"  tol_diag           : {tol_diag:.1g}"
@@ -7590,14 +7846,8 @@ class Designer:
             print(f"  tol_cond           : {tol_cond:.1g}")
             print(f"{sep}")
 
-            pcw = max(10, max(len(p) for p in param_names))
-            header = f"  {'Candidate':<20}"
-            for p in param_names:
-                header += f"  {p:>{pcw}}"
-            header += f"  {'Cond#':>12}  Status"
             print(header)
-            print(f"  {'':20}  " + "  ".join(f"{'A_k[j,j]':>{pcw}}" for _ in param_names)
-                  + f"  {'':>12}")
+            print(sub_header)
             print(sep)
 
             for c in range(self.n_c):
@@ -7637,7 +7887,7 @@ class Designer:
                     print(f"      {cand_names[c]:<22}  cond = {cond_numbers[c]:.2e}")
                 if len(flagged_cond) > 10:
                     print(f"      ... and {len(flagged_cond)-10} more")
-            print(f"{'─'*100}\n")
+            print(f"{sep}\n")
 
         # --- plots ---
         # figs must be initialised OUTSIDE the report block: it is returned
@@ -9268,7 +9518,7 @@ class Designer:
 
         for row in range(self.n_m_r):
             for col in range(self.n_mp):
-                cmap = cm.get_cmap(colour_map, len(self.optimal_candidates))
+                cmap = plt.get_cmap(colour_map, len(self.optimal_candidates))
                 colors = itertools.cycle(
                     cmap(_) for _ in np.linspace(0, 1, len(self.optimal_candidates))
                 )
