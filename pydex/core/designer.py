@@ -4200,7 +4200,7 @@ class Designer:
                 print(f"{'Beta':<40}: {self.beta}")
                 print(f"{'Constrained Problem':<40}: {self._constrained_cvar}")
                 if self._constrained_cvar:
-                    print(f"{'Min. Mean Value':<40}: {getattr(self, "_cvar_mean_phi", float("nan")):.6f}")
+                    print(f"{'Min. Mean Value':<40}: {getattr(self, '_cvar_mean_phi', float('nan')):.6f}")
             print(f"{'Dynamic':<40}: {self._dynamic_system}")
             print(f"{'Time-invariant Controls':<40}: {self._invariant_controls}")
             print(f"{'Time-varying Controls':<40}: {self._dynamic_controls}")
@@ -5255,7 +5255,7 @@ class Designer:
             print(f"{'Beta':<40}: {self.beta}")
             print(f"{'Constrained Problem':<40}: {self._constrained_cvar}")
             if self._constrained_cvar:
-                print(f"{'Min. Mean Value':<40}: {getattr(self, "_cvar_mean_phi", float("nan")):.6f}")
+                print(f"{'Min. Mean Value':<40}: {getattr(self, '_cvar_mean_phi', float('nan')):.6f}")
         print(f"{'Dynamic':<40}: {self._dynamic_system}")
         print(f"{'Time-invariant Controls':<40}: {self._invariant_controls}")
         print(f"{'Time-varying Controls':<40}: {self._dynamic_controls}")
