@@ -116,15 +116,51 @@ Then open `docs/build/html/index.html`.
    complex problems.
 2. Continuous and exact (discrete) experimental designs via Adams
    apportionment.
-3. Design criteria: D-optimal, A-optimal, E-optimal, V-optimal, CVaR
-   variants, pseudo-Bayesian (types 0 and 1), MINLP sparse designs.
-4. OED problem formulated entirely in Pyomo — any solver accessible
+3. **Design criteria** — see [Design Criteria](#design-criteria) below for
+   the complete list; this is not just D/A/E/V.
+4. **Estimability analysis and FIM diagnostics** — `run_estimability()`
+   and `diagnose_fim_structure()`, usually the first things worth running
+   on a new model, before choosing a criterion at all.
+5. **Sequential / prior-informed design** — `set_prior_fim()` /
+   `set_prior_experiments()` register information from experiments already
+   run (an external covariance matrix, or raw conditions at arbitrary
+   points), so a new design accounts for what you already know rather than
+   starting from zero.
+6. OED problem formulated entirely in Pyomo — any solver accessible
    through Pyomo can be used, with IPOPT as the default.
-5. Pyomo.DAE support: DAE models as simulator and IFT sensitivity source.
-6. Parallel sensitivity evaluation via `joblib` loky workers.
-7. Convenient built-in visualisation via matplotlib.
-8. Supports virtually any model written as a Python function, including
-   ODE models solved via scipy or Pyomo.DAE.
+7. Pyomo.DAE support: DAE models as simulator and IFT sensitivity source.
+8. Parallel sensitivity evaluation via `joblib` loky workers.
+9. Convenient built-in visualisation via matplotlib.
+10. Supports virtually any model written as a Python function, including
+    ODE models solved via scipy or Pyomo.DAE.
+
+---
+
+## Design Criteria
+
+Most criteria are bound methods passed to `design_experiment()`:
+`designer.design_experiment(designer.d_opt_criterion, solver="ipopt")`.
+CVaR-D is the exception — see its row below. Full details, including
+failure modes and when to prefer one criterion over another, are in the
+`Designer` class docstring (`pydex/core/designer.py`) and rendered in the
+[API reference](https://salvadorgarciamunoz.github.io/pydex/).
+
+| Criterion | Method | What it optimises |
+|---|---|---|
+| D-optimal | `d_opt_criterion` | `det(FIM)` — the default; invariant to reparameterisation |
+| A-optimal | `a_opt_criterion` | `trace(FIM⁻¹)` — total parameter variance |
+| E-optimal | `e_opt_criterion` | smallest eigenvalue of the FIM — the worst-determined direction |
+| **Ds-optimal** | `ds_opt_criterion` | D-optimality on a chosen SUBSET of parameters (`interest_parameters`, set by name), marginalising the rest via the Schur complement — works even when a nuisance parameter is unidentifiable |
+| V-optimal | `v_opt_criterion` | prediction variance at a specific operating condition `dw`, via a two-stage workflow — see [V-optimal MBDoE](#v-optimal-mbdoe) below |
+| vdi | `vdi_criterion` | prediction variance aggregated over the whole operating-point grid, rather than one `dw` — distinct from V-optimal only when there are fewer measured responses than parameters |
+| CVaR-D (risk-averse) | `cvar_d_opt_criterion` | average D-criterion over the worst `(1-beta)` fraction of parameter scenarios, via `solve_cvar_problem()` rather than `design_experiment()` |
+
+**Pseudo-Bayesian designs** are not a separate criterion but a mode:
+supply `model_parameters` as a scenario array (shape `(n_scenarios, n_mp)`)
+instead of a single vector, and pass `pseudo_bayesian_type=0` (average
+information, cheaper, native Pyomo solve) or `=1` (average criterion, more
+faithful for non-linear criteria, falls back to SLSQP) to
+`design_experiment()`. Applies to D, Ds, A, and E.
 
 ---
 
@@ -137,20 +173,11 @@ Then open `docs/build/html/index.html`.
 | numpy          | Array operations                                     |
 | scipy          | ODE integration, optimisation fallback               |
 | pandas         | Estimability tables returned by `run_estimability()` |
-| matplotlib     | Visualisation                                        |
+| matplotlib     | Visualisation (`>=3.4`, including 3.11 — see CHANGELOG) |
 | numdifftools   | Numerical finite-difference sensitivities            |
 | pyomo          | OED problem formulation, DAE modelling, IFT Jacobian |
 | joblib         | Parallel sensitivity evaluation                      |
 | dill           | Saving objects with weak references                  |
-
-> **matplotlib compatibility.** `designer.py` uses
-> `matplotlib.pyplot.get_cmap(name, lut)` for colormap lookup. This is the
-> supported API across the whole supported range: it is not deprecated in
-> matplotlib 3.11, it accepts a `Colormap` instance as well as a name, and
-> it keeps the `>=3.4` floor. It deliberately avoids
-> `matplotlib.cm.get_cmap()`, which was removed in 3.11, and
-> `matplotlib.colormaps[...]`, which would raise the floor to 3.6 and
-> rejects `Colormap` instances. Verified against matplotlib 3.10 and 3.11.
 
 ### Solvers
 
@@ -282,6 +309,37 @@ designer.design_experiment(
     pseudo_bayesian_type = 0,   # 0 = average FIM; 1 = average criterion
 )
 ```
+
+### Sequential design (accounting for prior experiments)
+
+Register what you already know before designing the next round — either a
+FIM/covariance from an external estimation tool (Case A), or the raw
+conditions of experiments already run, from which pydex computes the FIM
+itself (Case B):
+
+```python
+# Case A: you already have a parameter covariance matrix
+sigma_theta = np.diag([0.01, 500.0, 0.005, 300.0]) ** 2
+fim_raw     = np.linalg.inv(sigma_theta)
+designer.set_prior_fim(
+    fim              = fim_raw * np.outer(theta_est, theta_est),  # pydex's normalisation
+    model_parameters = theta_est,
+)
+
+# Case B: you have the raw conditions instead, pydex computes the FIM
+designer.set_prior_experiments(
+    ti_controls      = np.array([[55.0, 65.0, 1.0], [60.0, 70.0, 1.5]]),
+    sampling_times   = np.array([[0.25, 0.5, 1.0], [0.25, 0.75, 1.0]]),
+    model_parameters = theta_est,
+    n_repeats        = np.array([2, 1]),   # optional; defaults to 1 each
+)
+
+designer.design_experiment(criterion=designer.d_opt_criterion, solver="ipopt")
+# the prior FIM is added to the candidate FIM automatically, and is
+# rescaled if designer.model_parameters is updated between rounds
+```
+
+`designer.clear_prior()` removes registered prior information.
 
 ---
 
@@ -460,6 +518,5 @@ cannot, and the `regularize_fim` path.
 ---
 
 Do you have a question, suggestion, or feature request? Feel free to open
-an issue or contact the original author at
-[kennedy.putra.kusumo@gmail.com](mailto:kennedy.putra.kusumo@gmail.com).
+an issue on [GitHub](https://github.com/salvadorgarciamunoz/pydex/issues).
 </file_text>
