@@ -56,6 +56,20 @@ by Kennedy Putra Kusumo et al., originally described in:
 - **Comprehensive test suite**: 55 sections / 261 assertions covering all
   design criteria, both sensitivity paths (FD and IFT), parallel
   correctness, prior FIM, save/load, visualisation, and more
+- **Per-parameter finite-difference step**: the FD step is sized from each
+  parameter's own nominal magnitude (1% by default, floored at `1e-8`),
+  not a flat constant shared by every parameter. Before 0.3.0 the default
+  was a flat `base_step=2`, which silently produced badly wrong
+  sensitivities for any parameter with nominal magnitude well below 1 — a
+  rate constant of 0.02 was perturbed by 100x its own value, far outside
+  the linear regime Richardson extrapolation assumes, with the error
+  growing along the trajectory. Nothing warned; the numbers were simply
+  wrong, and only for the small-magnitude parameters, which made the
+  pattern look like a structural problem with the model rather than a
+  step-size problem. The same scaling applies to `set_prior_experiments()`
+  and the V-optimal `W` matrix. Passing an explicit `base_step` restores
+  the old unconditional behaviour and puts the scaling in your hands; run
+  with `verbose >= 2` to see the resolved per-parameter step
 - **Improved documentation**: Google-style docstrings throughout
   `designer.py`, rendered to HTML with Sphinx (see `docs/`)
 

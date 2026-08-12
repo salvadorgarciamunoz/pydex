@@ -86,6 +86,7 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">string</span><span class="w"> </span><span class="kn">import</span> <span class="n">Template</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">time</span><span class="w"> </span><span class="kn">import</span> <span class="n">time</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">itertools</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">__main__</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">main</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">dill</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
@@ -115,6 +116,82 @@
     <span class="n">_PYNUMERO_ASL_AVAILABLE</span> <span class="o">=</span> <span class="kc">True</span>
 <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
     <span class="n">_PYNUMERO_ASL_AVAILABLE</span> <span class="o">=</span> <span class="kc">False</span>
+
+<span class="c1"># NOTE: _PYNUMERO_ASL_AVAILABLE only reflects whether the *Python* PyomoNLP</span>
+<span class="c1"># class imported successfully. PyNumero&#39;s Python interface is pure-Python</span>
+<span class="c1"># and always importable with Pyomo; the ASL Jacobian machinery it wraps</span>
+<span class="c1"># depends on a separately-built compiled extension that can be missing or</span>
+<span class="c1"># broken even when the import above succeeds. So this flag can be True on</span>
+<span class="c1"># a machine where _PyomoNLP(m) itself raises at call time. Call sites must</span>
+<span class="c1"># not treat a True value here as a runtime guarantee — see</span>
+<span class="c1"># _pyomo_ift_fd_jacobian below and its use in _eval_sensitivities_pyomo_ift.</span>
+
+
+<span class="c1"># Default per-parameter finite-difference step controls. See</span>
+<span class="c1"># _resolve_fd_base_step below for what these mean and why they exist.</span>
+<span class="n">_FD_RELATIVE_BASE_STEP</span> <span class="o">=</span> <span class="mf">1e-2</span>
+<span class="n">_FD_ABSOLUTE_STEP_FLOOR</span> <span class="o">=</span> <span class="mf">1e-8</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_resolve_fd_base_step</span><span class="p">(</span><span class="n">model_parameters</span><span class="p">,</span>
+                          <span class="n">relative_base_step</span><span class="o">=</span><span class="n">_FD_RELATIVE_BASE_STEP</span><span class="p">,</span>
+                          <span class="n">absolute_step_floor</span><span class="o">=</span><span class="n">_FD_ABSOLUTE_STEP_FLOOR</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Size a finite-difference step for each model parameter from that</span>
+<span class="sd">    parameter&#39;s OWN nominal magnitude, returning an array numdifftools can</span>
+<span class="sd">    consume as a per-parameter ``base_step``.</span>
+
+<span class="sd">    step_i = max(relative_base_step * abs(theta_i), absolute_step_floor)</span>
+
+<span class="sd">    Why this is not simply a constant</span>
+<span class="sd">    ---------------------------------</span>
+<span class="sd">    numdifftools builds its step sequence as</span>
+<span class="sd">    ``step_nom * base_step * step_ratio ** i``, where the default</span>
+<span class="sd">    ``step_nom`` heuristic is ``max(log(e + |x|), 1)``. That heuristic</span>
+<span class="sd">    floors at 1, so it scales the step *up* for parameters larger than</span>
+<span class="sd">    O(1) and does nothing whatsoever for parameters smaller than O(1).</span>
+<span class="sd">    A flat ``base_step`` therefore perturbs a parameter of nominal value</span>
+<span class="sd">    0.02 by ~100x its own magnitude — far outside the local linear regime</span>
+<span class="sd">    Richardson extrapolation assumes — while leaving a parameter of</span>
+<span class="sd">    nominal value 2.0 correctly scaled. The failure is silent (no warning,</span>
+<span class="sd">    no exception) and selective, hitting only small-magnitude parameters,</span>
+<span class="sd">    which disguises it as a structural problem with the model rather than</span>
+<span class="sd">    a step-size problem. See CHANGELOG.md 0.3.0 for the ground-truth</span>
+<span class="sd">    verification behind this.</span>
+
+<span class="sd">    The floor exists because a pure percentage gives a parameter whose</span>
+<span class="sd">    nominal value is exactly 0 a step of exactly 0.</span>
+
+<span class="sd">    For a pseudo-Bayesian scenario set (shape ``(n_scr, n_mp)``) the</span>
+<span class="sd">    magnitude is taken as the per-parameter maximum across scenarios, so</span>
+<span class="sd">    no single scenario&#39;s small value silently under-steps relative to the</span>
+<span class="sd">    others.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">theta</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">model_parameters</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+    <span class="n">theta_mag</span> <span class="o">=</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">max</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="n">theta</span><span class="p">),</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span> <span class="k">if</span> <span class="n">theta</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span>
+                 <span class="k">else</span> <span class="n">np</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="n">theta</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="n">theta_mag</span> <span class="o">*</span> <span class="n">relative_base_step</span><span class="p">,</span> <span class="n">absolute_step_floor</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_pyomo_ift_fd_jacobian</span><span class="p">(</span><span class="n">all_vars</span><span class="p">,</span> <span class="n">all_bodies</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Pure-Python fallback Jacobian: differentiate() every constraint body</span>
+<span class="sd">    with respect to every variable. Used both when _PYNUMERO_ASL_AVAILABLE</span>
+<span class="sd">    is False (import-time) and when the ASL backend is available at import</span>
+<span class="sd">    time but fails at call time (e.g. missing compiled extension) — see</span>
+<span class="sd">    _eval_sensitivities_pyomo_ift, which catches that failure and routes</span>
+<span class="sd">    here instead of propagating it.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">n_v</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">all_vars</span><span class="p">)</span>
+    <span class="n">n_c</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">all_bodies</span><span class="p">)</span>
+    <span class="n">J</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">n_c</span><span class="p">,</span> <span class="n">n_v</span><span class="p">))</span>
+    <span class="k">for</span> <span class="n">ci</span><span class="p">,</span> <span class="n">body</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">all_bodies</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">vi</span><span class="p">,</span> <span class="n">var</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">all_vars</span><span class="p">):</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">J</span><span class="p">[</span><span class="n">ci</span><span class="p">,</span> <span class="n">vi</span><span class="p">]</span> <span class="o">=</span> <span class="n">_pyo</span><span class="o">.</span><span class="n">value</span><span class="p">(</span><span class="n">_pyomo_differentiate</span><span class="p">(</span><span class="n">body</span><span class="p">,</span> <span class="n">wrt</span><span class="o">=</span><span class="n">var</span><span class="p">))</span>
+            <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+                <span class="n">J</span><span class="p">[</span><span class="n">ci</span><span class="p">,</span> <span class="n">vi</span><span class="p">]</span> <span class="o">=</span> <span class="mf">0.0</span>
+    <span class="k">return</span> <span class="n">J</span>
 
 <span class="c1"># ── ASL variable ordering diagnostic ─────────────────────────────────────────</span>
 <span class="c1"># Optional: gracefully absent if pydex.utils is not installed / importable.</span>
@@ -1992,8 +2069,13 @@
 
         <span class="n">_use_pyomo_ift</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;use_pyomo_ift&#39;</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="n">_use_pyomo_ift</span><span class="p">:</span>
+            <span class="c1"># Per-parameter step, sized off each parameter&#39;s own magnitude —</span>
+            <span class="c1"># NOT a flat constant. A flat step silently corrupts the</span>
+            <span class="c1"># sensitivities of any small-magnitude parameter, and here that</span>
+            <span class="c1"># corruption propagates into the prior FIM that every subsequent</span>
+            <span class="c1"># sequential design builds on. See _resolve_fd_base_step.</span>
             <span class="n">step_generator</span> <span class="o">=</span> <span class="n">nd</span><span class="o">.</span><span class="n">step_generators</span><span class="o">.</span><span class="n">MaxStepGenerator</span><span class="p">(</span>
-                <span class="n">base_step</span>    <span class="o">=</span> <span class="mi">2</span><span class="p">,</span>
+                <span class="n">base_step</span>    <span class="o">=</span> <span class="n">_resolve_fd_base_step</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">),</span>
                 <span class="n">step_ratio</span>   <span class="o">=</span> <span class="mi">2</span><span class="p">,</span>
                 <span class="n">num_steps</span>    <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_num_steps</span><span class="p">,</span>
                 <span class="n">step_nom</span>     <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_step_nom</span><span class="p">,</span>
@@ -6184,8 +6266,12 @@
 <span class="sd">        Numerical method</span>
 <span class="sd">        ----------------</span>
 <span class="sd">        Uses the same numdifftools forward finite-difference Jacobian as</span>
-<span class="sd">        eval_sensitivities(), with identical step generator settings</span>
-<span class="sd">        (base_step, step_ratio, num_steps from _num_steps).</span>
+<span class="sd">        eval_sensitivities(), with matching step generator settings:</span>
+<span class="sd">        step_ratio, num_steps from _num_steps, and a per-parameter</span>
+<span class="sd">        base_step resolved by _resolve_fd_base_step() from each parameter&#39;s</span>
+<span class="sd">        own nominal magnitude. Note this path does not expose base_step /</span>
+<span class="sd">        relative_base_step as arguments the way eval_sensitivities() does —</span>
+<span class="sd">        it always uses the defaults.</span>
 
 <span class="sd">        Notes</span>
 <span class="sd">        -----</span>
@@ -6231,8 +6317,12 @@
         <span class="c1"># avoid division by zero for parameters that are exactly 0</span>
         <span class="n">s_theta</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">s_theta</span> <span class="o">==</span> <span class="mi">0</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="n">s_theta</span><span class="p">)</span>
 
+        <span class="c1"># Per-parameter step, sized off each parameter&#39;s own magnitude, to</span>
+        <span class="c1"># match eval_sensitivities(). s_theta above is the analogous scaling</span>
+        <span class="c1"># applied to the OUTPUT; this is the scaling of the perturbation</span>
+        <span class="c1"># itself, which is a separate thing and was previously flat.</span>
         <span class="n">step_gen</span> <span class="o">=</span> <span class="n">nd</span><span class="o">.</span><span class="n">step_generators</span><span class="o">.</span><span class="n">MaxStepGenerator</span><span class="p">(</span>
-            <span class="n">base_step</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+            <span class="n">base_step</span><span class="o">=</span><span class="n">_resolve_fd_base_step</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">),</span>
             <span class="n">step_ratio</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
             <span class="n">num_steps</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_num_steps</span><span class="p">,</span>
         <span class="p">)</span>
@@ -6573,7 +6663,8 @@
 
 <div class="viewcode-block" id="Designer.eval_sensitivities">
 <a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.eval_sensitivities">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">eval_sensitivities</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">method</span><span class="o">=</span><span class="s1">&#39;forward&#39;</span><span class="p">,</span> <span class="n">base_step</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">step_ratio</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">eval_sensitivities</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">method</span><span class="o">=</span><span class="s1">&#39;forward&#39;</span><span class="p">,</span> <span class="n">base_step</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">step_ratio</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+                           <span class="n">relative_base_step</span><span class="o">=</span><span class="mf">1e-2</span><span class="p">,</span> <span class="n">absolute_step_floor</span><span class="o">=</span><span class="mf">1e-8</span><span class="p">,</span>
                            <span class="n">store_predictions</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
                            <span class="n">plot_analysis_times</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">save_sensitivities</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
                            <span class="n">reporting_frequency</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">n_jobs</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
@@ -6591,10 +6682,42 @@
 <span class="sd">        method : str</span>
 <span class="sd">            Finite-difference method passed to numdifftools (&#39;forward&#39;, &#39;central&#39;,</span>
 <span class="sd">            etc.).  Ignored when use_pyomo_ift=True.</span>
-<span class="sd">        base_step : float</span>
-<span class="sd">            Base step size for numdifftools step generator.</span>
+<span class="sd">        base_step : float, array-like, or None</span>
+<span class="sd">            Base step size for numdifftools step generator. ``None`` (the</span>
+<span class="sd">            default, since 2026-08) means &quot;size it from the parameters</span>
+<span class="sd">            themselves&quot; — see ``relative_base_step``/``absolute_step_floor``</span>
+<span class="sd">            below. Passing an explicit float or array here reproduces the</span>
+<span class="sd">            OLD unconditional behaviour (pre-fix default was the flat,</span>
+<span class="sd">            unscaled constant 2.0 for every parameter) and disables the</span>
+<span class="sd">            per-parameter scaling entirely; only do this if you have a</span>
+<span class="sd">            specific reason to override the automatic sizing.</span>
 <span class="sd">        step_ratio : float</span>
 <span class="sd">            Step ratio for numdifftools Richardson extrapolation.</span>
+<span class="sd">        relative_base_step : float</span>
+<span class="sd">            Only used when ``base_step is None``. Each parameter&#39;s FD step</span>
+<span class="sd">            is ``max(relative_base_step * abs(theta_i), absolute_step_floor)``</span>
+<span class="sd">            — i.e. a percentage of that parameter&#39;s OWN nominal magnitude,</span>
+<span class="sd">            not one flat constant shared across all parameters. Default 1%.</span>
+
+<span class="sd">            Why this exists: the previous flat default (``base_step=2``,</span>
+<span class="sd">            inherited unexamined from numdifftools&#39; own ``MaxStepGenerator``</span>
+<span class="sd">            default) silently produced badly wrong finite-difference</span>
+<span class="sd">            sensitivities for any parameter with nominal magnitude well</span>
+<span class="sd">            below O(1) — a perturbation of 2.0 applied to a rate constant of</span>
+<span class="sd">            0.02 is 100x the parameter&#39;s own value, nowhere near the local</span>
+<span class="sd">            linear regime Richardson extrapolation assumes. This was</span>
+<span class="sd">            confirmed against an independent scipy.integrate ground truth on</span>
+<span class="sd">            a minimal 2-ODE reproduction: FD with base_step=2 disagreed with</span>
+<span class="sd">            an exact IFT/AD Jacobian by up to 65% and the disagreement grew</span>
+<span class="sd">            with sampling time, while FD with a magnitude-scaled step agreed</span>
+<span class="sd">            with both the AD Jacobian and the independent ground truth to</span>
+<span class="sd">            4-5 significant figures. IFT was never the problem; the flat FD</span>
+<span class="sd">            step was. See CHANGELOG.md for the full writeup and numbers.</span>
+<span class="sd">        absolute_step_floor : float</span>
+<span class="sd">            Only used when ``base_step is None``. Floor on the per-parameter</span>
+<span class="sd">            step so a parameter with nominal value at or near 0 still gets a</span>
+<span class="sd">            usable (small, non-zero) step rather than</span>
+<span class="sd">            ``relative_base_step * 0 == 0``. Default 1e-8.</span>
 <span class="sd">        store_predictions : bool</span>
 <span class="sd">            Whether to cache model predictions alongside sensitivities.</span>
 <span class="sd">        plot_analysis_times : bool</span>
@@ -6639,8 +6762,28 @@
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">use_finite_difference</span><span class="p">:</span>
             <span class="c1"># setting default behaviour for step generators</span>
+            <span class="c1">#</span>
+            <span class="c1"># base_step=None -&gt; size each parameter&#39;s own FD step off its own</span>
+            <span class="c1"># nominal magnitude (relative_base_step, floored by</span>
+            <span class="c1"># absolute_step_floor for near-zero parameters), rather than</span>
+            <span class="c1"># applying one flat step to every parameter regardless of scale.</span>
+            <span class="c1"># An explicit base_step (float or array) bypasses this and is</span>
+            <span class="c1"># passed straight through, unchanged, to numdifftools -- see the</span>
+            <span class="c1"># docstring above for why the OLD flat default (2.0, inherited</span>
+            <span class="c1"># from numdifftools&#39; own MaxStepGenerator default) is dangerous</span>
+            <span class="c1"># for any parameter with nominal magnitude well below O(1), and</span>
+            <span class="c1"># for the ground-truth-verified numbers behind this change.</span>
+            <span class="k">if</span> <span class="n">base_step</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">_base_step_resolved</span> <span class="o">=</span> <span class="n">_resolve_fd_base_step</span><span class="p">(</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">,</span>
+                    <span class="n">relative_base_step</span><span class="o">=</span><span class="n">relative_base_step</span><span class="p">,</span>
+                    <span class="n">absolute_step_floor</span><span class="o">=</span><span class="n">absolute_step_floor</span><span class="p">,</span>
+                <span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">_base_step_resolved</span> <span class="o">=</span> <span class="n">base_step</span>
+
             <span class="n">step_generator</span> <span class="o">=</span> <span class="n">nd</span><span class="o">.</span><span class="n">step_generators</span><span class="o">.</span><span class="n">MaxStepGenerator</span><span class="p">(</span>
-                <span class="n">base_step</span><span class="o">=</span><span class="n">base_step</span><span class="p">,</span>
+                <span class="n">base_step</span><span class="o">=</span><span class="n">_base_step_resolved</span><span class="p">,</span>
                 <span class="n">step_ratio</span><span class="o">=</span><span class="n">step_ratio</span><span class="p">,</span>
                 <span class="n">num_steps</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_num_steps</span><span class="p">,</span>
                 <span class="n">step_nom</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_step_nom</span><span class="p">,</span>
@@ -6681,6 +6824,7 @@
                 <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Use Finite Difference&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">use_finite_difference</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
                 <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">use_finite_difference</span><span class="p">:</span>
                     <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Richardson Extrapolation Steps&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_num_steps</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+                    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;FD base_step (per parameter)&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">_base_step_resolved</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Normalized by Parameter Values&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_norm_sens_by_params</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;&quot;</span><span class="o">.</span><span class="n">center</span><span class="p">(</span><span class="mi">100</span><span class="p">,</span> <span class="s2">&quot;-&quot;</span><span class="p">))</span>
         <span class="n">start</span> <span class="o">=</span> <span class="n">time</span><span class="p">()</span>
@@ -10222,8 +10366,17 @@
             <span class="ow">not</span> <span class="n">v</span><span class="o">.</span><span class="n">is_fixed</span><span class="p">()</span>
             <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">component_data_objects</span><span class="p">(</span><span class="n">_pyo</span><span class="o">.</span><span class="n">Var</span><span class="p">,</span> <span class="n">active</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
         <span class="p">)</span>
+        <span class="k">global</span> <span class="n">_PYNUMERO_ASL_AVAILABLE</span>
+        <span class="n">_asl_ok</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="k">if</span> <span class="n">_PYNUMERO_ASL_AVAILABLE</span> <span class="ow">and</span> <span class="n">_has_free_vars</span><span class="p">:</span>
-            <span class="c1"># Fast: unfix param vars, get ASL Jacobian, re-fix</span>
+            <span class="c1"># Fast path: unfix param vars, get ASL Jacobian, re-fix.</span>
+            <span class="c1"># _PYNUMERO_ASL_AVAILABLE only proves the Python class imported;</span>
+            <span class="c1"># _PyomoNLP(m) can still fail here if the compiled ASL extension</span>
+            <span class="c1"># underneath it is missing or broken. That failure must not</span>
+            <span class="c1"># propagate uncaught — fall back to the pure-Python Jacobian</span>
+            <span class="c1"># instead, and downgrade the flag so later calls in this process</span>
+            <span class="c1"># skip straight to the fallback rather than re-attempting a</span>
+            <span class="c1"># backend already shown not to work.</span>
             <span class="n">param_vars</span> <span class="o">=</span> <span class="n">all_vars</span><span class="p">[:</span><span class="n">n_mp</span><span class="p">]</span>
             <span class="k">for</span> <span class="n">pv</span> <span class="ow">in</span> <span class="n">param_vars</span><span class="p">:</span>
                 <span class="n">pv</span><span class="o">.</span><span class="n">unfix</span><span class="p">()</span>
@@ -10232,33 +10385,39 @@
                 <span class="n">J_sparse</span> <span class="o">=</span> <span class="n">nlp</span><span class="o">.</span><span class="n">evaluate_jacobian_eq</span><span class="p">()</span>
                 <span class="n">J_dense</span>  <span class="o">=</span> <span class="n">J_sparse</span><span class="o">.</span><span class="n">toarray</span><span class="p">()</span>
                 <span class="n">nlp_var_names</span> <span class="o">=</span> <span class="n">nlp</span><span class="o">.</span><span class="n">primals_names</span><span class="p">()</span>
+                <span class="n">_asl_ok</span> <span class="o">=</span> <span class="kc">True</span>
+            <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">_asl_exc</span><span class="p">:</span>
+                <span class="n">warnings</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span>
+                    <span class="s2">&quot;[Pyomo IFT / ASL] PyomoNLP failed at runtime despite &quot;</span>
+                    <span class="s2">&quot;importing successfully (likely a missing or broken &quot;</span>
+                    <span class="s2">&quot;compiled ASL extension). Falling back to the &quot;</span>
+                    <span class="s2">&quot;pure-Python differentiate() Jacobian for the &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;remainder of this process. Original error: </span><span class="si">{</span><span class="n">_asl_exc</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+                    <span class="ne">RuntimeWarning</span><span class="p">,</span>
+                <span class="p">)</span>
+                <span class="n">_PYNUMERO_ASL_AVAILABLE</span> <span class="o">=</span> <span class="kc">False</span>
             <span class="k">finally</span><span class="p">:</span>
                 <span class="k">for</span> <span class="n">pv</span> <span class="ow">in</span> <span class="n">param_vars</span><span class="p">:</span>
                     <span class="n">pv</span><span class="o">.</span><span class="n">fix</span><span class="p">()</span>
 
-            <span class="n">all_var_strs</span> <span class="o">=</span> <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">all_vars</span><span class="p">]</span>
-            <span class="n">col_order</span> <span class="o">=</span> <span class="p">[]</span>
-            <span class="k">for</span> <span class="n">vname</span> <span class="ow">in</span> <span class="n">all_var_strs</span><span class="p">:</span>
-                <span class="n">matched</span> <span class="o">=</span> <span class="n">_match_nlp_var</span><span class="p">(</span><span class="n">vname</span><span class="p">,</span> <span class="n">nlp_var_names</span><span class="p">)</span>
-                <span class="k">if</span> <span class="n">matched</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-                    <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
-                        <span class="sa">f</span><span class="s2">&quot;[Pyomo IFT / ASL] Cannot match variable &#39;</span><span class="si">{</span><span class="n">vname</span><span class="si">}</span><span class="s2">&#39; &quot;</span>
-                        <span class="sa">f</span><span class="s2">&quot;in NLP variable list.</span><span class="se">\n</span><span class="s2">NLP vars: </span><span class="si">{</span><span class="n">nlp_var_names</span><span class="si">}</span><span class="s2">&quot;</span>
-                    <span class="p">)</span>
-                <span class="n">col_order</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">matched</span><span class="p">)</span>
-            <span class="n">J</span> <span class="o">=</span> <span class="n">J_dense</span><span class="p">[:,</span> <span class="n">col_order</span><span class="p">]</span>
+            <span class="k">if</span> <span class="n">_asl_ok</span><span class="p">:</span>
+                <span class="n">all_var_strs</span> <span class="o">=</span> <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">all_vars</span><span class="p">]</span>
+                <span class="n">col_order</span> <span class="o">=</span> <span class="p">[]</span>
+                <span class="k">for</span> <span class="n">vname</span> <span class="ow">in</span> <span class="n">all_var_strs</span><span class="p">:</span>
+                    <span class="n">matched</span> <span class="o">=</span> <span class="n">_match_nlp_var</span><span class="p">(</span><span class="n">vname</span><span class="p">,</span> <span class="n">nlp_var_names</span><span class="p">)</span>
+                    <span class="k">if</span> <span class="n">matched</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                            <span class="sa">f</span><span class="s2">&quot;[Pyomo IFT / ASL] Cannot match variable &#39;</span><span class="si">{</span><span class="n">vname</span><span class="si">}</span><span class="s2">&#39; &quot;</span>
+                            <span class="sa">f</span><span class="s2">&quot;in NLP variable list.</span><span class="se">\n</span><span class="s2">NLP vars: </span><span class="si">{</span><span class="n">nlp_var_names</span><span class="si">}</span><span class="s2">&quot;</span>
+                        <span class="p">)</span>
+                    <span class="n">col_order</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">matched</span><span class="p">)</span>
+                <span class="n">J</span> <span class="o">=</span> <span class="n">J_dense</span><span class="p">[:,</span> <span class="n">col_order</span><span class="p">]</span>
 
-        <span class="k">else</span><span class="p">:</span>
-            <span class="c1"># Fallback: pure-Python differentiate() loop</span>
-            <span class="n">n_v</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">all_vars</span><span class="p">)</span>
-            <span class="n">n_c</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">all_bodies</span><span class="p">)</span>
-            <span class="n">J</span>   <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">n_c</span><span class="p">,</span> <span class="n">n_v</span><span class="p">))</span>
-            <span class="k">for</span> <span class="n">ci</span><span class="p">,</span> <span class="n">body</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">all_bodies</span><span class="p">):</span>
-                <span class="k">for</span> <span class="n">vi</span><span class="p">,</span> <span class="n">var</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">all_vars</span><span class="p">):</span>
-                    <span class="k">try</span><span class="p">:</span>
-                        <span class="n">J</span><span class="p">[</span><span class="n">ci</span><span class="p">,</span> <span class="n">vi</span><span class="p">]</span> <span class="o">=</span> <span class="n">_pyo</span><span class="o">.</span><span class="n">value</span><span class="p">(</span><span class="n">_pyomo_differentiate</span><span class="p">(</span><span class="n">body</span><span class="p">,</span> <span class="n">wrt</span><span class="o">=</span><span class="n">var</span><span class="p">))</span>
-                    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
-                        <span class="n">J</span><span class="p">[</span><span class="n">ci</span><span class="p">,</span> <span class="n">vi</span><span class="p">]</span> <span class="o">=</span> <span class="mf">0.0</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">_asl_ok</span><span class="p">:</span>
+            <span class="c1"># Fallback: pure-Python differentiate() loop. Reached either</span>
+            <span class="c1"># because _PYNUMERO_ASL_AVAILABLE was False to begin with, or</span>
+            <span class="c1"># because the ASL backend just failed above at runtime.</span>
+            <span class="n">J</span> <span class="o">=</span> <span class="n">_pyomo_ift_fd_jacobian</span><span class="p">(</span><span class="n">all_vars</span><span class="p">,</span> <span class="n">all_bodies</span><span class="p">)</span>
 
         <span class="c1"># 4. Split J into parameter and state columns</span>
         <span class="n">J_p</span> <span class="o">=</span> <span class="n">J</span><span class="p">[:,</span> <span class="p">:</span><span class="n">n_mp</span><span class="p">]</span>
@@ -10323,7 +10482,11 @@
                         <span class="p">)</span>
                     <span class="n">n_mp_t</span> <span class="o">=</span> <span class="n">n_mp</span>   <span class="c1"># same number of parameters</span>
                     <span class="n">state_var_strs_t</span> <span class="o">=</span> <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">all_vars_t</span><span class="p">[</span><span class="n">n_mp_t</span><span class="p">:]]</span>
-                    <span class="c1"># Build Jacobian for this sub-model</span>
+                    <span class="c1"># Build Jacobian for this sub-model. Same runtime-failure</span>
+                    <span class="c1"># guard as the main build above: a True</span>
+                    <span class="c1"># _PYNUMERO_ASL_AVAILABLE only means the Python class</span>
+                    <span class="c1"># imported, not that _PyomoNLP(m_t) will actually work.</span>
+                    <span class="n">_asl_ok_t</span> <span class="o">=</span> <span class="kc">False</span>
                     <span class="k">if</span> <span class="n">_PYNUMERO_ASL_AVAILABLE</span><span class="p">:</span>
                         <span class="n">param_vars_t</span> <span class="o">=</span> <span class="n">all_vars_t</span><span class="p">[:</span><span class="n">n_mp_t</span><span class="p">]</span>
                         <span class="k">for</span> <span class="n">pv</span> <span class="ow">in</span> <span class="n">param_vars_t</span><span class="p">:</span>
@@ -10333,30 +10496,35 @@
                             <span class="n">J_sparse_t</span> <span class="o">=</span> <span class="n">nlp_t</span><span class="o">.</span><span class="n">evaluate_jacobian_eq</span><span class="p">()</span>
                             <span class="n">J_dense_t</span>  <span class="o">=</span> <span class="n">J_sparse_t</span><span class="o">.</span><span class="n">toarray</span><span class="p">()</span>
                             <span class="n">nlp_vars_t</span> <span class="o">=</span> <span class="n">nlp_t</span><span class="o">.</span><span class="n">primals_names</span><span class="p">()</span>
+                            <span class="n">_asl_ok_t</span>  <span class="o">=</span> <span class="kc">True</span>
+                        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">_asl_exc_t</span><span class="p">:</span>
+                            <span class="n">warnings</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span>
+                                <span class="s2">&quot;[Pyomo IFT causal / ASL] PyomoNLP failed at &quot;</span>
+                                <span class="s2">&quot;runtime despite importing successfully. &quot;</span>
+                                <span class="s2">&quot;Falling back to the pure-Python &quot;</span>
+                                <span class="s2">&quot;differentiate() Jacobian for the remainder &quot;</span>
+                                <span class="sa">f</span><span class="s2">&quot;of this process. Original error: </span><span class="si">{</span><span class="n">_asl_exc_t</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+                                <span class="ne">RuntimeWarning</span><span class="p">,</span>
+                            <span class="p">)</span>
+                            <span class="n">_PYNUMERO_ASL_AVAILABLE</span> <span class="o">=</span> <span class="kc">False</span>
                         <span class="k">finally</span><span class="p">:</span>
                             <span class="k">for</span> <span class="n">pv</span> <span class="ow">in</span> <span class="n">param_vars_t</span><span class="p">:</span>
                                 <span class="n">pv</span><span class="o">.</span><span class="n">fix</span><span class="p">()</span>
-                        <span class="n">all_var_strs_t</span> <span class="o">=</span> <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">all_vars_t</span><span class="p">]</span>
-                        <span class="n">col_order_t</span> <span class="o">=</span> <span class="p">[]</span>
-                        <span class="k">for</span> <span class="n">vname</span> <span class="ow">in</span> <span class="n">all_var_strs_t</span><span class="p">:</span>
-                            <span class="n">matched</span> <span class="o">=</span> <span class="n">_match_nlp_var</span><span class="p">(</span><span class="n">vname</span><span class="p">,</span> <span class="n">nlp_vars_t</span><span class="p">)</span>
-                            <span class="k">if</span> <span class="n">matched</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-                                <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
-                                    <span class="sa">f</span><span class="s2">&quot;[Pyomo IFT causal] Cannot match &#39;</span><span class="si">{</span><span class="n">vname</span><span class="si">}</span><span class="s2">&#39;&quot;</span>
-                                <span class="p">)</span>
-                            <span class="n">col_order_t</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">matched</span><span class="p">)</span>
-                        <span class="n">J_t</span> <span class="o">=</span> <span class="n">J_dense_t</span><span class="p">[:,</span> <span class="n">col_order_t</span><span class="p">]</span>
-                    <span class="k">else</span><span class="p">:</span>
-                        <span class="n">n_v_t</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">all_vars_t</span><span class="p">)</span>
-                        <span class="n">n_c_t</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">all_bodies_t</span><span class="p">)</span>
-                        <span class="n">J_t</span>   <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">n_c_t</span><span class="p">,</span> <span class="n">n_v_t</span><span class="p">))</span>
-                        <span class="k">for</span> <span class="n">ci</span><span class="p">,</span> <span class="n">body</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">all_bodies_t</span><span class="p">):</span>
-                            <span class="k">for</span> <span class="n">vi</span><span class="p">,</span> <span class="n">var</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">all_vars_t</span><span class="p">):</span>
-                                <span class="k">try</span><span class="p">:</span>
-                                    <span class="n">J_t</span><span class="p">[</span><span class="n">ci</span><span class="p">,</span> <span class="n">vi</span><span class="p">]</span> <span class="o">=</span> <span class="n">_pyo</span><span class="o">.</span><span class="n">value</span><span class="p">(</span>
-                                        <span class="n">_pyomo_differentiate</span><span class="p">(</span><span class="n">body</span><span class="p">,</span> <span class="n">wrt</span><span class="o">=</span><span class="n">var</span><span class="p">))</span>
-                                <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
-                                    <span class="n">J_t</span><span class="p">[</span><span class="n">ci</span><span class="p">,</span> <span class="n">vi</span><span class="p">]</span> <span class="o">=</span> <span class="mf">0.0</span>
+
+                        <span class="k">if</span> <span class="n">_asl_ok_t</span><span class="p">:</span>
+                            <span class="n">all_var_strs_t</span> <span class="o">=</span> <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">all_vars_t</span><span class="p">]</span>
+                            <span class="n">col_order_t</span> <span class="o">=</span> <span class="p">[]</span>
+                            <span class="k">for</span> <span class="n">vname</span> <span class="ow">in</span> <span class="n">all_var_strs_t</span><span class="p">:</span>
+                                <span class="n">matched</span> <span class="o">=</span> <span class="n">_match_nlp_var</span><span class="p">(</span><span class="n">vname</span><span class="p">,</span> <span class="n">nlp_vars_t</span><span class="p">)</span>
+                                <span class="k">if</span> <span class="n">matched</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                                    <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                                        <span class="sa">f</span><span class="s2">&quot;[Pyomo IFT causal] Cannot match &#39;</span><span class="si">{</span><span class="n">vname</span><span class="si">}</span><span class="s2">&#39;&quot;</span>
+                                    <span class="p">)</span>
+                                <span class="n">col_order_t</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">matched</span><span class="p">)</span>
+                            <span class="n">J_t</span> <span class="o">=</span> <span class="n">J_dense_t</span><span class="p">[:,</span> <span class="n">col_order_t</span><span class="p">]</span>
+
+                    <span class="k">if</span> <span class="ow">not</span> <span class="n">_asl_ok_t</span><span class="p">:</span>
+                        <span class="n">J_t</span> <span class="o">=</span> <span class="n">_pyomo_ift_fd_jacobian</span><span class="p">(</span><span class="n">all_vars_t</span><span class="p">,</span> <span class="n">all_bodies_t</span><span class="p">)</span>
                     <span class="n">J_p_t</span> <span class="o">=</span> <span class="n">J_t</span><span class="p">[:,</span> <span class="p">:</span><span class="n">n_mp_t</span><span class="p">]</span>
                     <span class="n">J_z_t</span> <span class="o">=</span> <span class="n">J_t</span><span class="p">[:,</span> <span class="n">n_mp_t</span><span class="p">:]</span>
                     <span class="k">try</span><span class="p">:</span>

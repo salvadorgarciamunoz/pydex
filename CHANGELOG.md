@@ -5,6 +5,137 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-11
+
+### Fixed
+
+- **The finite-difference step was a flat constant applied to every model
+  parameter regardless of its magnitude, at three separate call sites.**
+  numdifftools builds its step sequence as
+  `step_nom * base_step * step_ratio ** i`, where the default `step_nom`
+  heuristic is `max(log(e + |x|), 1)`. That heuristic floors at 1, so it
+  scales the step *up* for parameters larger than O(1) and does nothing at
+  all for parameters smaller than O(1). With a flat `base_step = 2`, a
+  parameter of nominal value 0.02 therefore received an initial
+  perturbation of ~2.0 — a hundred times its own value. Richardson
+  extrapolation then worked downward from a starting point far outside the
+  local linear regime it assumes, fitting curvature and saturation rather
+  than a derivative.
+
+  The failure was silent — no warning, no exception, no convergence
+  complaint — and selective in a way that disguised it. Parameters with
+  nominal magnitude near or above 1 (Michaelis constants, concentrations)
+  were unaffected; small-magnitude kinetic rate constants were badly wrong,
+  and the error grew with elapsed time along a trajectory. On a minimal
+  two-ODE reproduction this produced a 65% disagreement between the
+  finite-difference and IFT sensitivity paths at the longest sampling time.
+  The IFT path was correct throughout; the finite-difference step was the
+  defect. Confirmed against an independent `scipy.integrate` Radau solution
+  at `rtol=1e-13`, converged across five step sizes: IFT matched ground
+  truth to 4–5 significant figures, finite differences did not.
+
+  Step resolution is now a single module-level helper,
+  `_resolve_fd_base_step()`, returning a per-parameter array:
+  `max(relative_base_step * abs(theta_i), absolute_step_floor)` with
+  defaults `1e-2` and `1e-8`. The floor exists because a pure percentage
+  gives a parameter of nominal value exactly 0 a step of exactly 0.
+  Magnitude is used rather than signed value, so a negative parameter does
+  not get a sign-flipped perturbation. For a pseudo-Bayesian scenario set
+  (shape `(n_scr, n_mp)`) the magnitude is the per-parameter maximum across
+  scenarios, so no scenario silently under-steps relative to the others.
+
+  All three finite-difference sites now call it:
+
+  1. **`eval_sensitivities()`** — `base_step` now defaults to `None`,
+     meaning "resolve per parameter". Passing an explicit `base_step`
+     (scalar or array) reproduces the previous unconditional behaviour
+     exactly and bypasses the scaling; `relative_base_step` and
+     `absolute_step_floor` are exposed as arguments.
+  2. **`set_prior_experiments()`** — was flat `2`. This one compounds: the
+     corrupted sensitivities propagate into the prior FIM that every
+     subsequent sequential design builds on.
+  3. **`_eval_W_matrix()`** (V-optimal weighting matrix) — was flat `2`,
+     while its own docstring claimed "identical step generator settings" to
+     `eval_sensitivities()`. That claim was false and is corrected; this
+     path uses the defaults and does not expose the arguments.
+
+  The clearest evidence is capability-suite §53, which compares the
+  finite-difference sensitivities against a **closed-form analytic**
+  derivative rather than against another numerical path:
+
+  | | FD vs analytic |
+  |---|---|
+  | before | `7.343e-04` |
+  | after  | `5.258e-13` |
+
+  Nine orders of magnitude, on a case where the correct answer is known
+  exactly. §52's IFT-vs-FD cross-check also tightened across all nine
+  criteria plus both Ds subsets (`d_opt` `1e-4 -> 0`, `e_opt` `1e-4 -> 0`,
+  `eg_opt` `2e-4 -> 0`, `ds_opt` one-parameter subset `3e-4 -> 0`): the two
+  independent paths now agree more closely than before, with FD having
+  moved toward IFT.
+
+  Fixing sites 2 and 3 moved exactly three values in the suite and nothing
+  else — sequential D-optimal `32.89070549 -> 32.89095883`, and the
+  V-optimal criterion `9.993E-04 -> 9.981E-04` / `-0.00100701 ->
+  -0.00100586`. §52 and §53 were byte-identical across that run, confirming
+  the refactor of `eval_sensitivities()` onto the shared helper was
+  behaviour-preserving. The shifts are small because the suite's models use
+  well-scaled parameters near O(1), which is where a flat step of 2 happens
+  to be roughly right; models with small rate constants are where these
+  paths were badly wrong, and the suite contains none.
+
+  **Sites 2 and 3 remain untested at their defaults.** They survived the
+  first pass of this fix precisely because the capability suite passes
+  explicit `base_step` overrides in the sections that reach them
+  (`base_step=0.01` and `base_step=1e-4`), masking the default. Anyone
+  adding coverage here should omit the override.
+
+  A side effect worth recording: §07 (pseudo-Bayesian type 0) got roughly
+  12–14% faster (sensitivity analysis `220.39 -> 189.60` CPU seconds
+  sequential, `220.31 -> 194.66` parallel) with its criterion unchanged to
+  four decimal places. Perturbed models are now a small displacement from
+  the nominal solution rather than a hundredfold one, so IPOPT converges in
+  fewer iterations. Not the goal of the change, but consistent with it.
+
+  No assertion required re-baselining — every pinned tolerance in the suite
+  was loose enough to absorb the improvement.
+
+  Verbose output at level >= 2 now prints the resolved per-parameter step
+  under `FD base_step (per parameter)`. The step being invisible is a large
+  part of why this survived as long as it did.
+
+- **`_PYNUMERO_ASL_AVAILABLE` was treated as a runtime guarantee when it is
+  only an import-time one.** The flag is set by a `try: import ... except:`
+  around `PyomoNLP`. That import tests whether the *Python* class is
+  importable; PyNumero's Python interface ships with Pyomo and always is.
+  The ASL Jacobian machinery it wraps depends on a separately-built
+  compiled extension that can be missing or broken while the import above
+  still succeeds — so the flag can read `True` on a machine where
+  `PyomoNLP(m)` raises the moment it is called.
+
+  Both call sites in `_eval_sensitivities_pyomo_ift()` — the main build and
+  the causal per-sampling-time rebuild — branched on that flag and wrapped
+  the call in `try/finally`, not `try/except`. The `finally` re-fixed the
+  parameter Vars correctly, but any exception from `PyomoNLP` propagated
+  uncaught. Because the branch had already been chosen by the frozen flag,
+  the pure-Python `differentiate()` fallback sitting in the `else` arm was
+  unreachable in exactly the situation it exists for: the run died instead
+  of falling back.
+
+  Both sites now catch the failure, emit a `RuntimeWarning` naming the
+  original exception, downgrade `_PYNUMERO_ASL_AVAILABLE` so the remainder
+  of the process goes straight to the fallback rather than re-attempting a
+  backend already shown not to work, and continue on the pure-Python
+  Jacobian. The parameter-refixing `finally` is unchanged. The fallback
+  loop itself, previously duplicated verbatim at both sites, is now a
+  single module-level `_pyomo_ift_fd_jacobian()` helper.
+
+  **Verified by inspection only.** This branch does not execute on a
+  machine with a working ASL extension, which includes every machine the
+  capability suite has been run on, so the suite does not cover it. It is
+  deliberately minimal for that reason.
+
 ## [0.2.1] - 2026-08-10
 
 ### Removed

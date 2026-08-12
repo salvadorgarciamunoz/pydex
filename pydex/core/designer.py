@@ -13,6 +13,7 @@ from pickle import dump, load
 from string import Template
 from time import time
 import itertools
+import warnings
 import __main__ as main
 import dill
 import sys
@@ -42,6 +43,82 @@ try:
     _PYNUMERO_ASL_AVAILABLE = True
 except Exception:
     _PYNUMERO_ASL_AVAILABLE = False
+
+# NOTE: _PYNUMERO_ASL_AVAILABLE only reflects whether the *Python* PyomoNLP
+# class imported successfully. PyNumero's Python interface is pure-Python
+# and always importable with Pyomo; the ASL Jacobian machinery it wraps
+# depends on a separately-built compiled extension that can be missing or
+# broken even when the import above succeeds. So this flag can be True on
+# a machine where _PyomoNLP(m) itself raises at call time. Call sites must
+# not treat a True value here as a runtime guarantee — see
+# _pyomo_ift_fd_jacobian below and its use in _eval_sensitivities_pyomo_ift.
+
+
+# Default per-parameter finite-difference step controls. See
+# _resolve_fd_base_step below for what these mean and why they exist.
+_FD_RELATIVE_BASE_STEP = 1e-2
+_FD_ABSOLUTE_STEP_FLOOR = 1e-8
+
+
+def _resolve_fd_base_step(model_parameters,
+                          relative_base_step=_FD_RELATIVE_BASE_STEP,
+                          absolute_step_floor=_FD_ABSOLUTE_STEP_FLOOR):
+    """
+    Size a finite-difference step for each model parameter from that
+    parameter's OWN nominal magnitude, returning an array numdifftools can
+    consume as a per-parameter ``base_step``.
+
+    step_i = max(relative_base_step * abs(theta_i), absolute_step_floor)
+
+    Why this is not simply a constant
+    ---------------------------------
+    numdifftools builds its step sequence as
+    ``step_nom * base_step * step_ratio ** i``, where the default
+    ``step_nom`` heuristic is ``max(log(e + |x|), 1)``. That heuristic
+    floors at 1, so it scales the step *up* for parameters larger than
+    O(1) and does nothing whatsoever for parameters smaller than O(1).
+    A flat ``base_step`` therefore perturbs a parameter of nominal value
+    0.02 by ~100x its own magnitude — far outside the local linear regime
+    Richardson extrapolation assumes — while leaving a parameter of
+    nominal value 2.0 correctly scaled. The failure is silent (no warning,
+    no exception) and selective, hitting only small-magnitude parameters,
+    which disguises it as a structural problem with the model rather than
+    a step-size problem. See CHANGELOG.md 0.3.0 for the ground-truth
+    verification behind this.
+
+    The floor exists because a pure percentage gives a parameter whose
+    nominal value is exactly 0 a step of exactly 0.
+
+    For a pseudo-Bayesian scenario set (shape ``(n_scr, n_mp)``) the
+    magnitude is taken as the per-parameter maximum across scenarios, so
+    no single scenario's small value silently under-steps relative to the
+    others.
+    """
+    theta = np.asarray(model_parameters, dtype=float)
+    theta_mag = (np.max(np.abs(theta), axis=0) if theta.ndim == 2
+                 else np.abs(theta))
+    return np.maximum(theta_mag * relative_base_step, absolute_step_floor)
+
+
+def _pyomo_ift_fd_jacobian(all_vars, all_bodies):
+    """
+    Pure-Python fallback Jacobian: differentiate() every constraint body
+    with respect to every variable. Used both when _PYNUMERO_ASL_AVAILABLE
+    is False (import-time) and when the ASL backend is available at import
+    time but fails at call time (e.g. missing compiled extension) — see
+    _eval_sensitivities_pyomo_ift, which catches that failure and routes
+    here instead of propagating it.
+    """
+    n_v = len(all_vars)
+    n_c = len(all_bodies)
+    J = np.zeros((n_c, n_v))
+    for ci, body in enumerate(all_bodies):
+        for vi, var in enumerate(all_vars):
+            try:
+                J[ci, vi] = _pyo.value(_pyomo_differentiate(body, wrt=var))
+            except Exception:
+                J[ci, vi] = 0.0
+    return J
 
 # ── ASL variable ordering diagnostic ─────────────────────────────────────────
 # Optional: gracefully absent if pydex.utils is not installed / importable.
@@ -1894,8 +1971,13 @@ class Designer:
 
         _use_pyomo_ift = getattr(self, 'use_pyomo_ift', False)
         if not _use_pyomo_ift:
+            # Per-parameter step, sized off each parameter's own magnitude —
+            # NOT a flat constant. A flat step silently corrupts the
+            # sensitivities of any small-magnitude parameter, and here that
+            # corruption propagates into the prior FIM that every subsequent
+            # sequential design builds on. See _resolve_fd_base_step.
             step_generator = nd.step_generators.MaxStepGenerator(
-                base_step    = 2,
+                base_step    = _resolve_fd_base_step(self.model_parameters),
                 step_ratio   = 2,
                 num_steps    = self._num_steps,
                 step_nom     = self._step_nom,
@@ -5959,8 +6041,12 @@ class Designer:
         Numerical method
         ----------------
         Uses the same numdifftools forward finite-difference Jacobian as
-        eval_sensitivities(), with identical step generator settings
-        (base_step, step_ratio, num_steps from _num_steps).
+        eval_sensitivities(), with matching step generator settings:
+        step_ratio, num_steps from _num_steps, and a per-parameter
+        base_step resolved by _resolve_fd_base_step() from each parameter's
+        own nominal magnitude. Note this path does not expose base_step /
+        relative_base_step as arguments the way eval_sensitivities() does —
+        it always uses the defaults.
 
         Notes
         -----
@@ -6006,8 +6092,12 @@ class Designer:
         # avoid division by zero for parameters that are exactly 0
         s_theta = np.where(s_theta == 0, 1.0, s_theta)
 
+        # Per-parameter step, sized off each parameter's own magnitude, to
+        # match eval_sensitivities(). s_theta above is the analogous scaling
+        # applied to the OUTPUT; this is the scaling of the perturbation
+        # itself, which is a separate thing and was previously flat.
         step_gen = nd.step_generators.MaxStepGenerator(
-            base_step=2,
+            base_step=_resolve_fd_base_step(self.model_parameters),
             step_ratio=2,
             num_steps=self._num_steps,
         )
@@ -6331,7 +6421,8 @@ class Designer:
 
     """ evaluators """
 
-    def eval_sensitivities(self, method='forward', base_step=2, step_ratio=2,
+    def eval_sensitivities(self, method='forward', base_step=None, step_ratio=2,
+                           relative_base_step=1e-2, absolute_step_floor=1e-8,
                            store_predictions=True,
                            plot_analysis_times=False, save_sensitivities=None,
                            reporting_frequency=None, n_jobs=None):
@@ -6349,10 +6440,42 @@ class Designer:
         method : str
             Finite-difference method passed to numdifftools ('forward', 'central',
             etc.).  Ignored when use_pyomo_ift=True.
-        base_step : float
-            Base step size for numdifftools step generator.
+        base_step : float, array-like, or None
+            Base step size for numdifftools step generator. ``None`` (the
+            default, since 2026-08) means "size it from the parameters
+            themselves" — see ``relative_base_step``/``absolute_step_floor``
+            below. Passing an explicit float or array here reproduces the
+            OLD unconditional behaviour (pre-fix default was the flat,
+            unscaled constant 2.0 for every parameter) and disables the
+            per-parameter scaling entirely; only do this if you have a
+            specific reason to override the automatic sizing.
         step_ratio : float
             Step ratio for numdifftools Richardson extrapolation.
+        relative_base_step : float
+            Only used when ``base_step is None``. Each parameter's FD step
+            is ``max(relative_base_step * abs(theta_i), absolute_step_floor)``
+            — i.e. a percentage of that parameter's OWN nominal magnitude,
+            not one flat constant shared across all parameters. Default 1%.
+
+            Why this exists: the previous flat default (``base_step=2``,
+            inherited unexamined from numdifftools' own ``MaxStepGenerator``
+            default) silently produced badly wrong finite-difference
+            sensitivities for any parameter with nominal magnitude well
+            below O(1) — a perturbation of 2.0 applied to a rate constant of
+            0.02 is 100x the parameter's own value, nowhere near the local
+            linear regime Richardson extrapolation assumes. This was
+            confirmed against an independent scipy.integrate ground truth on
+            a minimal 2-ODE reproduction: FD with base_step=2 disagreed with
+            an exact IFT/AD Jacobian by up to 65% and the disagreement grew
+            with sampling time, while FD with a magnitude-scaled step agreed
+            with both the AD Jacobian and the independent ground truth to
+            4-5 significant figures. IFT was never the problem; the flat FD
+            step was. See CHANGELOG.md for the full writeup and numbers.
+        absolute_step_floor : float
+            Only used when ``base_step is None``. Floor on the per-parameter
+            step so a parameter with nominal value at or near 0 still gets a
+            usable (small, non-zero) step rather than
+            ``relative_base_step * 0 == 0``. Default 1e-8.
         store_predictions : bool
             Whether to cache model predictions alongside sensitivities.
         plot_analysis_times : bool
@@ -6397,8 +6520,28 @@ class Designer:
 
         if self.use_finite_difference:
             # setting default behaviour for step generators
+            #
+            # base_step=None -> size each parameter's own FD step off its own
+            # nominal magnitude (relative_base_step, floored by
+            # absolute_step_floor for near-zero parameters), rather than
+            # applying one flat step to every parameter regardless of scale.
+            # An explicit base_step (float or array) bypasses this and is
+            # passed straight through, unchanged, to numdifftools -- see the
+            # docstring above for why the OLD flat default (2.0, inherited
+            # from numdifftools' own MaxStepGenerator default) is dangerous
+            # for any parameter with nominal magnitude well below O(1), and
+            # for the ground-truth-verified numbers behind this change.
+            if base_step is None:
+                _base_step_resolved = _resolve_fd_base_step(
+                    self.model_parameters,
+                    relative_base_step=relative_base_step,
+                    absolute_step_floor=absolute_step_floor,
+                )
+            else:
+                _base_step_resolved = base_step
+
             step_generator = nd.step_generators.MaxStepGenerator(
-                base_step=base_step,
+                base_step=_base_step_resolved,
                 step_ratio=step_ratio,
                 num_steps=self._num_steps,
                 step_nom=self._step_nom,
@@ -6439,6 +6582,7 @@ class Designer:
                 print(f"{'Use Finite Difference':<40}: {self.use_finite_difference}")
                 if self.use_finite_difference:
                     print(f"{'Richardson Extrapolation Steps':<40}: {self._num_steps}")
+                    print(f"{'FD base_step (per parameter)':<40}: {_base_step_resolved}")
             print(f"{'Normalized by Parameter Values':<40}: {self._norm_sens_by_params}")
             print(f"".center(100, "-"))
         start = time()
@@ -9955,8 +10099,17 @@ class Designer:
             not v.is_fixed()
             for v in m.component_data_objects(_pyo.Var, active=True)
         )
+        global _PYNUMERO_ASL_AVAILABLE
+        _asl_ok = False
         if _PYNUMERO_ASL_AVAILABLE and _has_free_vars:
-            # Fast: unfix param vars, get ASL Jacobian, re-fix
+            # Fast path: unfix param vars, get ASL Jacobian, re-fix.
+            # _PYNUMERO_ASL_AVAILABLE only proves the Python class imported;
+            # _PyomoNLP(m) can still fail here if the compiled ASL extension
+            # underneath it is missing or broken. That failure must not
+            # propagate uncaught — fall back to the pure-Python Jacobian
+            # instead, and downgrade the flag so later calls in this process
+            # skip straight to the fallback rather than re-attempting a
+            # backend already shown not to work.
             param_vars = all_vars[:n_mp]
             for pv in param_vars:
                 pv.unfix()
@@ -9965,33 +10118,39 @@ class Designer:
                 J_sparse = nlp.evaluate_jacobian_eq()
                 J_dense  = J_sparse.toarray()
                 nlp_var_names = nlp.primals_names()
+                _asl_ok = True
+            except Exception as _asl_exc:
+                warnings.warn(
+                    "[Pyomo IFT / ASL] PyomoNLP failed at runtime despite "
+                    "importing successfully (likely a missing or broken "
+                    "compiled ASL extension). Falling back to the "
+                    "pure-Python differentiate() Jacobian for the "
+                    f"remainder of this process. Original error: {_asl_exc}",
+                    RuntimeWarning,
+                )
+                _PYNUMERO_ASL_AVAILABLE = False
             finally:
                 for pv in param_vars:
                     pv.fix()
 
-            all_var_strs = [str(v) for v in all_vars]
-            col_order = []
-            for vname in all_var_strs:
-                matched = _match_nlp_var(vname, nlp_var_names)
-                if matched is None:
-                    raise RuntimeError(
-                        f"[Pyomo IFT / ASL] Cannot match variable '{vname}' "
-                        f"in NLP variable list.\nNLP vars: {nlp_var_names}"
-                    )
-                col_order.append(matched)
-            J = J_dense[:, col_order]
+            if _asl_ok:
+                all_var_strs = [str(v) for v in all_vars]
+                col_order = []
+                for vname in all_var_strs:
+                    matched = _match_nlp_var(vname, nlp_var_names)
+                    if matched is None:
+                        raise RuntimeError(
+                            f"[Pyomo IFT / ASL] Cannot match variable '{vname}' "
+                            f"in NLP variable list.\nNLP vars: {nlp_var_names}"
+                        )
+                    col_order.append(matched)
+                J = J_dense[:, col_order]
 
-        else:
-            # Fallback: pure-Python differentiate() loop
-            n_v = len(all_vars)
-            n_c = len(all_bodies)
-            J   = np.zeros((n_c, n_v))
-            for ci, body in enumerate(all_bodies):
-                for vi, var in enumerate(all_vars):
-                    try:
-                        J[ci, vi] = _pyo.value(_pyomo_differentiate(body, wrt=var))
-                    except Exception:
-                        J[ci, vi] = 0.0
+        if not _asl_ok:
+            # Fallback: pure-Python differentiate() loop. Reached either
+            # because _PYNUMERO_ASL_AVAILABLE was False to begin with, or
+            # because the ASL backend just failed above at runtime.
+            J = _pyomo_ift_fd_jacobian(all_vars, all_bodies)
 
         # 4. Split J into parameter and state columns
         J_p = J[:, :n_mp]
@@ -10056,7 +10215,11 @@ class Designer:
                         )
                     n_mp_t = n_mp   # same number of parameters
                     state_var_strs_t = [str(v) for v in all_vars_t[n_mp_t:]]
-                    # Build Jacobian for this sub-model
+                    # Build Jacobian for this sub-model. Same runtime-failure
+                    # guard as the main build above: a True
+                    # _PYNUMERO_ASL_AVAILABLE only means the Python class
+                    # imported, not that _PyomoNLP(m_t) will actually work.
+                    _asl_ok_t = False
                     if _PYNUMERO_ASL_AVAILABLE:
                         param_vars_t = all_vars_t[:n_mp_t]
                         for pv in param_vars_t:
@@ -10066,30 +10229,35 @@ class Designer:
                             J_sparse_t = nlp_t.evaluate_jacobian_eq()
                             J_dense_t  = J_sparse_t.toarray()
                             nlp_vars_t = nlp_t.primals_names()
+                            _asl_ok_t  = True
+                        except Exception as _asl_exc_t:
+                            warnings.warn(
+                                "[Pyomo IFT causal / ASL] PyomoNLP failed at "
+                                "runtime despite importing successfully. "
+                                "Falling back to the pure-Python "
+                                "differentiate() Jacobian for the remainder "
+                                f"of this process. Original error: {_asl_exc_t}",
+                                RuntimeWarning,
+                            )
+                            _PYNUMERO_ASL_AVAILABLE = False
                         finally:
                             for pv in param_vars_t:
                                 pv.fix()
-                        all_var_strs_t = [str(v) for v in all_vars_t]
-                        col_order_t = []
-                        for vname in all_var_strs_t:
-                            matched = _match_nlp_var(vname, nlp_vars_t)
-                            if matched is None:
-                                raise RuntimeError(
-                                    f"[Pyomo IFT causal] Cannot match '{vname}'"
-                                )
-                            col_order_t.append(matched)
-                        J_t = J_dense_t[:, col_order_t]
-                    else:
-                        n_v_t = len(all_vars_t)
-                        n_c_t = len(all_bodies_t)
-                        J_t   = np.zeros((n_c_t, n_v_t))
-                        for ci, body in enumerate(all_bodies_t):
-                            for vi, var in enumerate(all_vars_t):
-                                try:
-                                    J_t[ci, vi] = _pyo.value(
-                                        _pyomo_differentiate(body, wrt=var))
-                                except Exception:
-                                    J_t[ci, vi] = 0.0
+
+                        if _asl_ok_t:
+                            all_var_strs_t = [str(v) for v in all_vars_t]
+                            col_order_t = []
+                            for vname in all_var_strs_t:
+                                matched = _match_nlp_var(vname, nlp_vars_t)
+                                if matched is None:
+                                    raise RuntimeError(
+                                        f"[Pyomo IFT causal] Cannot match '{vname}'"
+                                    )
+                                col_order_t.append(matched)
+                            J_t = J_dense_t[:, col_order_t]
+
+                    if not _asl_ok_t:
+                        J_t = _pyomo_ift_fd_jacobian(all_vars_t, all_bodies_t)
                     J_p_t = J_t[:, :n_mp_t]
                     J_z_t = J_t[:, n_mp_t:]
                     try:
