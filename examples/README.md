@@ -75,6 +75,24 @@ example, and the one where the sensitivity path matters most.
   KKT conditions of the collocation NLP. This is the fast version, and the
   best illustration of why the IFT path exists.
 
+Both run `run_estimability()` before designing, and both act on the result:
+the nine-parameter form is structurally singular — the rate law has an exact
+invariance, since adding a constant to every `theta_i0` at once (or to every
+`theta_i1`) leaves every prediction identical — so `design_experiment()`
+refuses it. Each script fixes the two parameters its own analysis flags,
+re-runs estimability on the reduced seven, and then designs.
+
+`case_3.py` makes the complementary point: **estimability analysis needs no
+tractable model.** `run_estimability()` reads the sensitivity matrix and does
+not care that these sensitivities are finite differences over an opaque
+integrator rather than exact derivatives — `simulate()` could be a legacy
+binary or a commercial simulator. Two things follow from the lower accuracy.
+The UNRESOLVABLE threshold is inferred from the sensitivity method (`1e-3` for
+finite differences against `1e-7` for IFT), and the two parameters flagged are
+*different*: `case_3_ift.py` fixes `theta_20` and `theta_21`, `case_3.py` fixes
+`theta_21` and `theta_31`. Both are correct — which member of a triple you hold
+still is a convention, and finite differences break the tie differently.
+
 ### Case 4 / Case 5 — local vs pseudo-Bayesian D-optimal, A→B→C network
 
 A different reaction network from case_1/2/3: A→B→C with one control each,

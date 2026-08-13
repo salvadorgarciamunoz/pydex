@@ -199,6 +199,30 @@ clearest illustration of why the IFT path exists. Timings are from the
 example’s own documentation, so treat them as indicative of the ratio rather
 than as measurements on your hardware.</p></li>
 </ul>
+<p>Both scripts run <a class="reference internal" href="api.html#pydex.core.designer.Designer.run_estimability" title="pydex.core.designer.Designer.run_estimability"><code class="xref py py-meth docutils literal notranslate"><span class="pre">run_estimability()</span></code></a> before
+designing, and both act on what it says. The nine-parameter form is structurally
+singular: the rate law carries an exact invariance — adding a constant to every
+<code class="docutils literal notranslate"><span class="pre">theta_i0</span></code> at once, or to every <code class="docutils literal notranslate"><span class="pre">theta_i1</span></code>, leaves every prediction
+unchanged — so <code class="docutils literal notranslate"><span class="pre">design_experiment()</span></code> refuses it. Each script fixes the two
+parameters its own analysis flags as unresolvable, re-runs estimability on the
+reduced seven to see what the reduction did and did not fix, and then designs.</p>
+<p><code class="docutils literal notranslate"><span class="pre">case_3.py</span></code> makes the complementary point, which is that <strong>estimability
+analysis does not require a tractable model</strong>.
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.run_estimability" title="pydex.core.designer.Designer.run_estimability"><code class="xref py py-meth docutils literal notranslate"><span class="pre">run_estimability()</span></code></a> reads
+<code class="xref py py-attr docutils literal notranslate"><span class="pre">sensitivities</span></code> and is indifferent to their
+provenance: here they are finite differences over scipy’s Radau integrator, and
+<code class="docutils literal notranslate"><span class="pre">simulate()</span></code> could equally be a legacy binary, a commercial process simulator
+or a network call.</p>
+<p>Two things follow from the lower accuracy of that path. The <code class="docutils literal notranslate"><span class="pre">UNRESOLVABLE</span></code>
+threshold is inferred from the sensitivity method — about <code class="docutils literal notranslate"><span class="pre">1e-3</span></code> for finite
+differences against <code class="docutils literal notranslate"><span class="pre">1e-7</span></code> for exact IFT derivatives — so the flag should be
+read as “cannot be resolved by this analysis” rather than as a verdict on the
+model. And the two parameters named differ: <code class="docutils literal notranslate"><span class="pre">case_3_ift.py</span></code> fixes <code class="docutils literal notranslate"><span class="pre">theta_20</span></code>
+and <code class="docutils literal notranslate"><span class="pre">theta_21</span></code>, <code class="docutils literal notranslate"><span class="pre">case_3.py</span></code> fixes <code class="docutils literal notranslate"><span class="pre">theta_21</span></code> and <code class="docutils literal notranslate"><span class="pre">theta_31</span></code>. Both are
+correct. The redundancy is a common shift within an Arrhenius triple, so which
+member is held still is a convention, and at finite-difference accuracy the
+residuals deciding the order sit close enough together that the tie breaks
+differently.</p>
 </section>
 <section id="case-4-case-5-local-vs-pseudo-bayesian-d-optimal-a-b-c-network">
 <h3>Case 4 / Case 5 — local vs pseudo-Bayesian D-optimal, A -&gt; B -&gt; C network<a class="headerlink" href="#case-4-case-5-local-vs-pseudo-bayesian-d-optimal-a-b-c-network" title="Link to this heading"></a></h3>

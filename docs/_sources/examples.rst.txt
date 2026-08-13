@@ -107,6 +107,33 @@ and the one where the sensitivity path matters most.
   example's own documentation, so treat them as indicative of the ratio rather
   than as measurements on your hardware.
 
+Both scripts run :meth:`~pydex.core.designer.Designer.run_estimability` before
+designing, and both act on what it says. The nine-parameter form is structurally
+singular: the rate law carries an exact invariance — adding a constant to every
+``theta_i0`` at once, or to every ``theta_i1``, leaves every prediction
+unchanged — so ``design_experiment()`` refuses it. Each script fixes the two
+parameters its own analysis flags as unresolvable, re-runs estimability on the
+reduced seven to see what the reduction did and did not fix, and then designs.
+
+``case_3.py`` makes the complementary point, which is that **estimability
+analysis does not require a tractable model**.
+:meth:`~pydex.core.designer.Designer.run_estimability` reads
+:attr:`~pydex.core.designer.Designer.sensitivities` and is indifferent to their
+provenance: here they are finite differences over scipy's Radau integrator, and
+``simulate()`` could equally be a legacy binary, a commercial process simulator
+or a network call.
+
+Two things follow from the lower accuracy of that path. The ``UNRESOLVABLE``
+threshold is inferred from the sensitivity method — about ``1e-3`` for finite
+differences against ``1e-7`` for exact IFT derivatives — so the flag should be
+read as "cannot be resolved by this analysis" rather than as a verdict on the
+model. And the two parameters named differ: ``case_3_ift.py`` fixes ``theta_20``
+and ``theta_21``, ``case_3.py`` fixes ``theta_21`` and ``theta_31``. Both are
+correct. The redundancy is a common shift within an Arrhenius triple, so which
+member is held still is a convention, and at finite-difference accuracy the
+residuals deciding the order sit close enough together that the tie breaks
+differently.
+
 Case 4 / Case 5 — local vs pseudo-Bayesian D-optimal, A -> B -> C network
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
