@@ -876,6 +876,16 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_prior_fim_mp</span>       <span class="o">=</span> <span class="kc">None</span>   <span class="c1"># model_parameters at which _prior_fim was computed</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_prior_n_exp</span>        <span class="o">=</span> <span class="mi">0</span>      <span class="c1"># number of prior experiments (for reporting)</span>
 
+<span class="w">        </span><span class="sd">&quot;&quot;&quot; Bracketing-optimal (b_opt_criterion) state -- isolated to this</span>
+<span class="sd">            criterion only; read via getattr(..., default) elsewhere so</span>
+<span class="sd">            their absence never affects any other criterion. &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_output_weight</span>       <span class="o">=</span> <span class="mf">0.5</span>    <span class="c1"># last-used output_weight, for _b_opt_criterion()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_min_sep_frac</span>        <span class="o">=</span> <span class="mf">0.0</span>    <span class="c1"># anti-clustering threshold; 0 = off</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_selected_idx</span>        <span class="o">=</span> <span class="kc">None</span>   <span class="c1"># convenience: selected candidate indices</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_apportion_redundant</span> <span class="o">=</span> <span class="kc">False</span>  <span class="c1"># set True after a b_opt solve</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_termination</span>         <span class="o">=</span> <span class="kc">None</span>   <span class="c1"># last MINLP termination condition (str)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_proven_optimal</span>      <span class="o">=</span> <span class="kc">None</span>   <span class="c1"># True only if that was &#39;optimal&#39;</span>
+
 
         <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_defaulted</span> <span class="o">=</span> <span class="kc">False</span>
@@ -2538,7 +2548,41 @@
         <span class="n">is_a</span>   <span class="o">=</span> <span class="s1">&#39;a_opt&#39;</span>  <span class="ow">in</span> <span class="n">crit_name</span> <span class="ow">and</span> <span class="s1">&#39;pb&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">crit_name</span>
         <span class="n">is_e</span>   <span class="o">=</span> <span class="s1">&#39;e_opt&#39;</span>  <span class="ow">in</span> <span class="n">crit_name</span> <span class="ow">and</span> <span class="s1">&#39;pb&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">crit_name</span>
         <span class="n">is_v</span>   <span class="o">=</span> <span class="s1">&#39;v_opt&#39;</span>  <span class="ow">in</span> <span class="n">crit_name</span>
+        <span class="n">is_b</span>   <span class="o">=</span> <span class="s1">&#39;b_opt&#39;</span>  <span class="ow">in</span> <span class="n">crit_name</span>   <span class="c1"># Bracketing-optimal (Chen et al. 2018)</span>
         <span class="n">is_pb</span>  <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_bayesian</span>   <span class="c1"># set by design_experiment() before we get here</span>
+
+        <span class="c1"># --- Bracketing-optimal (b_opt) is FULLY ISOLATED from everything</span>
+        <span class="c1"># below: it is dispatched to its own dedicated method before the</span>
+        <span class="c1"># atomic-FIM computation, the structural-singularity gate, and the</span>
+        <span class="c1"># Ds feasibility pre-check ever run. None of those are meaningful</span>
+        <span class="c1"># for b_opt (it designs directly on input-factor values and</span>
+        <span class="c1"># predicted responses, not on parameter sensitivities), and this</span>
+        <span class="c1"># early return guarantees the new code path can never interact with</span>
+        <span class="c1"># -- or be broken by future changes to -- the D/A/E/V/Ds machinery,</span>
+        <span class="c1"># and vice versa.</span>
+        <span class="k">if</span> <span class="n">is_b</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">is_pb</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="s2">&quot;b_opt_criterion (Bracketing-optimal) has no &quot;</span>
+                    <span class="s2">&quot;pseudo-Bayesian counterpart: it designs directly on &quot;</span>
+                    <span class="s2">&quot;the input-factor space and predicted responses, not &quot;</span>
+                    <span class="s2">&quot;on parameter sensitivities, so there is no meaningful &quot;</span>
+                    <span class="s2">&quot;way to average it over parameter scenarios. Use a &quot;</span>
+                    <span class="s2">&quot;fixed (non-scenario) model_parameters array.&quot;</span>
+                <span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dynamic_system</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span>
+                    <span class="s2">&quot;b_opt_criterion currently supports only static &quot;</span>
+                    <span class="s2">&quot;(non-dynamic) systems -- i.e. designer.simulate() with &quot;</span>
+                    <span class="s2">&quot;no time dimension, one response per candidate. &quot;</span>
+                    <span class="s2">&quot;Combining candidate AND sampling-time subset selection &quot;</span>
+                    <span class="s2">&quot;is not yet implemented.&quot;</span>
+                <span class="p">)</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_solve_pyomo_b_opt</span><span class="p">(</span>
+                <span class="n">e0</span><span class="p">,</span> <span class="n">fix_effort</span><span class="p">,</span> <span class="n">solver_options</span><span class="p">,</span>
+                <span class="n">n_exp</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;n_exp&#39;</span><span class="p">),</span>
+                <span class="n">output_weight</span><span class="o">=</span><span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;output_weight&#39;</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">),</span>
+            <span class="p">)</span>
 
         <span class="c1"># Pseudo-Bayesian &quot;average information&quot; (type 0) evaluates the criterion</span>
         <span class="c1"># at the SCENARIO-AVERAGED information matrix, f(meanₛ FIMₛ(e)). Since</span>
@@ -3044,6 +3088,325 @@
         <span class="k">else</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">efforts</span> <span class="o">=</span> <span class="n">e_opt</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span><span class="p">))</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_efforts_transformed</span> <span class="o">=</span> <span class="kc">False</span>
+
+        <span class="n">obj_val</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">pyo</span><span class="o">.</span><span class="n">value</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">obj</span><span class="p">))</span>
+        <span class="k">return</span> <span class="o">-</span><span class="n">obj_val</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_solve_pyomo_b_opt</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">e0</span><span class="p">,</span> <span class="n">fix_effort</span><span class="p">,</span> <span class="n">solver_options</span><span class="p">,</span>
+                            <span class="n">n_exp</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">output_weight</span><span class="o">=</span><span class="mf">0.5</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Bracketing-optimal (b_opt) design -- Chen, Paulavicius &amp; Adjiman</span>
+<span class="sd">        (2018), AIChE J. 64:3944-3957. Combines two objectives via</span>
+<span class="sd">        weighted-sum scalarization (their Eq. 24):</span>
+
+<span class="sd">          (1) INPUT-SPACE bracketing: D-optimality applied DIRECTLY to the</span>
+<span class="sd">              (scaled) input-factor values themselves -- NOT to parameter</span>
+<span class="sd">              sensitivities. Uses self.ti_controls_candidates directly; has</span>
+<span class="sd">              nothing to do with self.atomic_fims / eval_fim().</span>
+
+<span class="sd">          (2) OUTPUT-SPACE coverage: maximise the volume of the ellipsoid</span>
+<span class="sd">              spanned by the selected candidates&#39; PREDICTED RESPONSES</span>
+<span class="sd">              (self.response), via a centered-covariance log-det.</span>
+
+<span class="sd">        Both log-dets are lifted through their OWN Cholesky factor,</span>
+<span class="sd">        mirroring the is_d branch in _solve_pyomo exactly: FIM-like matrix</span>
+<span class="sd">        M = L @ L.T, log-det(M) = 2*sum(log(L[j,j])). This ONLY EVER</span>
+<span class="sd">        introduces pairwise (bilinear) products L[j,r]*L[k,r] -- deliberately</span>
+<span class="sd">        NOT an LDL/division recursion, which for 3+ input factors produces</span>
+<span class="sd">        genuine trilinear monomials. That distinction matters: an LDL-based</span>
+<span class="sd">        version of this exact model was empirically found to let BARON</span>
+<span class="sd">        (via GAMS) report an incorrect zero optimality gap on a design that</span>
+<span class="sd">        a verified true-determinant check showed was NOT optimal, at</span>
+<span class="sd">        n_exp=4 with only 3 input factors, on the tablet-coater case study</span>
+<span class="sd">        from the same paper. Bonmin (also tested) never produced an</span>
+<span class="sd">        incorrect certificate across ~10 independent test cases against the</span>
+<span class="sd">        same ground truth. Cholesky lifting removes the specific mechanism</span>
+<span class="sd">        (trilinear terms) identified as the likely cause, so BARON may well</span>
+<span class="sd">        be reliable on THIS formulation, but bonmin is the recommended</span>
+<span class="sd">        default until that is independently re-verified.</span>
+
+<span class="sd">        This method is FULLY ISOLATED from the rest of _solve_pyomo -- it</span>
+<span class="sd">        is called from an early-return dispatch before any FIM/atomic_fims/</span>
+<span class="sd">        singularity-gate code runs, is never reached by any other</span>
+<span class="sd">        criterion, and touches no state (self.atomic_fims, self.fim, etc.)</span>
+<span class="sd">        that any other criterion depends on.</span>
+
+<span class="sd">        n_exp is the SAME n_exp already accepted by design_experiment() for</span>
+<span class="sd">        every other criterion (used there only for apportion()) -- for</span>
+<span class="sd">        b_opt it additionally becomes a hard cardinality constraint driving</span>
+<span class="sd">        the solve itself, rather than a separate new argument.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="kn">import</span><span class="w"> </span><span class="nn">pyomo.environ</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pyo</span>
+
+        <span class="k">if</span> <span class="n">n_exp</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;b_opt_criterion requires an exact number of experiments: &quot;</span>
+                <span class="s2">&quot;call design_experiment(designer.b_opt_criterion, n_exp=&lt;int&gt;, &quot;</span>
+                <span class="s2">&quot;...).&quot;</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">n_exp</span><span class="p">,</span> <span class="nb">int</span><span class="p">)</span> <span class="ow">or</span> <span class="n">n_exp</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;n_exp must be an integer &gt;= 2 for b_opt_criterion &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;(covariance needs at least 2 selected candidates); got &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">n_exp</span><span class="si">!r}</span><span class="s2">.&quot;</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">response</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="s2">&quot;b_opt_criterion needs predicted responses at every &quot;</span>
+                <span class="s2">&quot;candidate. Call designer.simulate_candidates() before &quot;</span>
+                <span class="s2">&quot;design_experiment().&quot;</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="p">(</span><span class="mf">0.0</span> <span class="o">&lt;=</span> <span class="n">output_weight</span> <span class="o">&lt;=</span> <span class="mf">1.0</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;output_weight must be in [0, 1]; got </span><span class="si">{</span><span class="n">output_weight</span><span class="si">!r}</span><span class="s2">.&quot;</span>
+            <span class="p">)</span>
+
+        <span class="n">U_raw</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ti_controls_candidates</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+        <span class="n">n_c</span><span class="p">,</span> <span class="n">phi</span> <span class="o">=</span> <span class="n">U_raw</span><span class="o">.</span><span class="n">shape</span>
+        <span class="k">if</span> <span class="n">n_c</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="s2">&quot;Internal inconsistency: ti_controls_candidates row count &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;(</span><span class="si">{</span><span class="n">n_c</span><span class="si">}</span><span class="s2">) != self.n_c (</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="si">}</span><span class="s2">).&quot;</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="n">n_exp</span> <span class="o">&gt;</span> <span class="n">n_c</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;n_exp (</span><span class="si">{</span><span class="n">n_exp</span><span class="si">}</span><span class="s2">) cannot exceed the number of candidates &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;(</span><span class="si">{</span><span class="n">n_c</span><span class="si">}</span><span class="s2">).&quot;</span>
+            <span class="p">)</span>
+
+        <span class="n">lb</span><span class="p">,</span> <span class="n">ub</span> <span class="o">=</span> <span class="n">U_raw</span><span class="o">.</span><span class="n">min</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">),</span> <span class="n">U_raw</span><span class="o">.</span><span class="n">max</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">span</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">ub</span> <span class="o">&gt;</span> <span class="n">lb</span><span class="p">,</span> <span class="n">ub</span> <span class="o">-</span> <span class="n">lb</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">)</span>
+        <span class="n">U</span> <span class="o">=</span> <span class="mf">2.0</span> <span class="o">*</span> <span class="p">(</span><span class="n">U_raw</span> <span class="o">-</span> <span class="n">lb</span><span class="p">)</span> <span class="o">/</span> <span class="n">span</span> <span class="o">-</span> <span class="mf">1.0</span>   <span class="c1"># scaled to [-1, 1], per factor</span>
+
+        <span class="n">Y_raw</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">response</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">n_c</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">n_resp</span> <span class="o">=</span> <span class="n">Y_raw</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+
+        <span class="c1"># ---- rank feasibility of the two Cholesky lifts -------------------</span>
+        <span class="c1"># Both lifts below are built UNCONDITIONALLY, whatever output_weight</span>
+        <span class="c1"># is, and both floor their Cholesky diagonal at 1e-8. That floor is</span>
+        <span class="c1"># what turns an under-sized n_exp into a HARD INFEASIBILITY rather</span>
+        <span class="c1"># than a merely ill-conditioned solve:</span>
+        <span class="c1">#</span>
+        <span class="c1">#   input  M_in  is phi x phi,      rank &lt;= n_exp      -&gt; n_exp &gt;= phi</span>
+        <span class="c1">#   output M_out is n_resp x n_resp and CENTERED, so</span>
+        <span class="c1">#                                   rank &lt;= n_exp - 1</span>
+        <span class="c1">#</span>
+        <span class="c1"># For M_out the ALGEBRAIC bound is n_exp &gt;= n_resp + 1, but that is not</span>
+        <span class="c1"># sufficient in practice and the difference is measured, not guessed.</span>
+        <span class="c1"># At n_exp == n_resp + 1 the centered covariance is rank-EXACTLY-n_resp</span>
+        <span class="c1"># with no margin, and the Cholesky floor demands strict positive</span>
+        <span class="c1"># definiteness with room to spare; bonmin then reports the problem</span>
+        <span class="c1"># INFEASIBLE whenever the output term carries weight. Observed on a</span>
+        <span class="c1"># 10-candidate phi=2/n_resp=2 pool: n_exp=3 infeasible at</span>
+        <span class="c1"># output_weight &gt;= 0.5, n_exp=4 solving immediately. Hence + 2.</span>
+        <span class="c1">#</span>
+        <span class="c1"># Do not &quot;correct&quot; this back to + 1 on the strength of the algebra.</span>
+        <span class="c1">#</span>
+        <span class="c1"># M == L L^T with every L[j,j] &gt;= 1e-8 forces det(M) &gt;= 1e-8**(2*dim),</span>
+        <span class="c1"># so a rank-deficient M cannot be represented at all.</span>
+        <span class="c1">#</span>
+        <span class="c1"># Caught HERE rather than left to the solver, because proving</span>
+        <span class="c1"># infeasibility of a nonconvex MINLP is the expensive direction:</span>
+        <span class="c1"># measured on a 70-candidate phi=6 pool, n_exp=5 ran for over 17</span>
+        <span class="c1"># minutes of bonmin CPU without terminating, while n_exp=6 solved in</span>
+        <span class="c1"># seconds. Without this guard a mistyped n_exp costs an unbounded</span>
+        <span class="c1"># hang and prints no diagnosis at all.</span>
+        <span class="n">n_exp_min</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">phi</span><span class="p">,</span> <span class="n">n_resp</span> <span class="o">+</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">n_exp</span> <span class="o">&lt;</span> <span class="n">n_exp_min</span><span class="p">:</span>
+            <span class="n">reasons</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="k">if</span> <span class="n">n_exp</span> <span class="o">&lt;</span> <span class="n">phi</span><span class="p">:</span>
+                <span class="n">reasons</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">&quot;the input-space matrix is </span><span class="si">{</span><span class="n">phi</span><span class="si">}</span><span class="s2">x</span><span class="si">{</span><span class="n">phi</span><span class="si">}</span><span class="s2">, so it needs &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;n_exp &gt;= </span><span class="si">{</span><span class="n">phi</span><span class="si">}</span><span class="s2">&quot;</span>
+                <span class="p">)</span>
+            <span class="k">if</span> <span class="n">n_exp</span> <span class="o">&lt;</span> <span class="n">n_resp</span> <span class="o">+</span> <span class="mi">2</span><span class="p">:</span>
+                <span class="n">reasons</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">&quot;the centered output covariance is </span><span class="si">{</span><span class="n">n_resp</span><span class="si">}</span><span class="s2">x</span><span class="si">{</span><span class="n">n_resp</span><span class="si">}</span><span class="s2">, &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;and needs a rank margin above the Cholesky floor, so it &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;needs n_exp &gt;= </span><span class="si">{</span><span class="n">n_resp</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">2</span><span class="si">}</span><span class="s2">&quot;</span>
+                <span class="p">)</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;n_exp (</span><span class="si">{</span><span class="n">n_exp</span><span class="si">}</span><span class="s2">) is too small for b_opt_criterion: &quot;</span>
+                <span class="o">+</span> <span class="s2">&quot;; &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">reasons</span><span class="p">)</span>
+                <span class="o">+</span> <span class="sa">f</span><span class="s2">&quot;. With </span><span class="si">{</span><span class="n">phi</span><span class="si">}</span><span class="s2"> input factor(s) and </span><span class="si">{</span><span class="n">n_resp</span><span class="si">}</span><span class="s2"> response(s), &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;use n_exp &gt;= </span><span class="si">{</span><span class="n">n_exp_min</span><span class="si">}</span><span class="s2">. Below that the Cholesky lift &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;(diagonal floored at 1e-8) makes the problem strictly &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;infeasible, and an MINLP solver will not report that &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;quickly -- it will appear to hang.&quot;</span>
+            <span class="p">)</span>
+        <span class="n">Y_mean</span><span class="p">,</span> <span class="n">Y_std</span> <span class="o">=</span> <span class="n">Y_raw</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">),</span> <span class="n">Y_raw</span><span class="o">.</span><span class="n">std</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">Y_std</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Y_std</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">,</span> <span class="n">Y_std</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">)</span>
+        <span class="n">Y</span> <span class="o">=</span> <span class="p">(</span><span class="n">Y_raw</span> <span class="o">-</span> <span class="n">Y_mean</span><span class="p">)</span> <span class="o">/</span> <span class="n">Y_std</span>   <span class="c1"># z-scored responses</span>
+
+        <span class="n">win</span><span class="p">,</span> <span class="n">wout</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">-</span> <span class="nb">float</span><span class="p">(</span><span class="n">output_weight</span><span class="p">),</span> <span class="nb">float</span><span class="p">(</span><span class="n">output_weight</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_output_weight</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">output_weight</span><span class="p">)</span>   <span class="c1"># for _b_opt_criterion()</span>
+
+        <span class="n">m</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">ConcreteModel</span><span class="p">()</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">E</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">RangeSet</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">n_c</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">b</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Var</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">,</span> <span class="n">domain</span><span class="o">=</span><span class="n">pyo</span><span class="o">.</span><span class="n">Binary</span><span class="p">)</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">e</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Var</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">,</span> <span class="n">domain</span><span class="o">=</span><span class="n">pyo</span><span class="o">.</span><span class="n">NonNegativeReals</span><span class="p">,</span> <span class="n">bounds</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+
+        <span class="c1"># exact cardinality + equal weight -- b_opt ONLY; the existing</span>
+        <span class="c1"># sparsity (min_effort) constraints in _solve_pyomo are never</span>
+        <span class="c1"># touched by this method and this method never touches them.</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">cardinality_con</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Constraint</span><span class="p">(</span><span class="n">expr</span><span class="o">=</span><span class="nb">sum</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">b</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">)</span> <span class="o">==</span> <span class="n">n_exp</span><span class="p">)</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">equal_weight_con</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Constraint</span><span class="p">(</span>
+            <span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">,</span> <span class="n">rule</span><span class="o">=</span><span class="k">lambda</span> <span class="n">m</span><span class="p">,</span> <span class="n">i</span><span class="p">:</span> <span class="n">m</span><span class="o">.</span><span class="n">e</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="n">m</span><span class="o">.</span><span class="n">b</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">/</span> <span class="n">n_exp</span><span class="p">)</span>
+
+        <span class="n">e0_flat</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">e0</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">fix_effort</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">fixed</span> <span class="o">=</span> <span class="p">(</span><span class="n">fix_effort</span> <span class="o">/</span> <span class="n">fix_effort</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span>
+            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">:</span>
+                <span class="n">m</span><span class="o">.</span><span class="n">b</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">fix</span><span class="p">(</span><span class="mf">1.0</span> <span class="k">if</span> <span class="n">fixed</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mf">1e-9</span> <span class="k">else</span> <span class="mf">0.0</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">m</span><span class="o">.</span><span class="n">b</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">fixed</span><span class="p">:</span>
+                <span class="n">m</span><span class="o">.</span><span class="n">b</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="mf">1.0</span> <span class="k">if</span> <span class="n">e0_flat</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mf">1e-9</span> <span class="k">else</span> <span class="mf">0.0</span><span class="p">)</span>
+
+        <span class="c1"># ---- input-space bracketing: M_in[p,q] = sum_i b[i]*U[i,p]*U[i,q] ----</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">PHI</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">RangeSet</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">phi</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="n">M_in</span> <span class="o">=</span> <span class="p">{(</span><span class="n">p</span><span class="p">,</span> <span class="n">q</span><span class="p">):</span> <span class="nb">sum</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">b</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">*</span> <span class="nb">float</span><span class="p">(</span><span class="n">U</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="n">p</span><span class="p">]</span> <span class="o">*</span> <span class="n">U</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="n">q</span><span class="p">])</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">)</span>
+                <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">phi</span><span class="p">)</span> <span class="k">for</span> <span class="n">q</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">phi</span><span class="p">)}</span>
+
+        <span class="n">m</span><span class="o">.</span><span class="n">L</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Var</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">PHI</span><span class="p">,</span> <span class="n">m</span><span class="o">.</span><span class="n">PHI</span><span class="p">,</span> <span class="n">initialize</span><span class="o">=</span><span class="mf">0.0</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">phi</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">q</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">p</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">phi</span><span class="p">):</span>
+                <span class="n">m</span><span class="o">.</span><span class="n">L</span><span class="p">[</span><span class="n">p</span><span class="p">,</span> <span class="n">q</span><span class="p">]</span><span class="o">.</span><span class="n">fix</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>
+            <span class="n">m</span><span class="o">.</span><span class="n">L</span><span class="p">[</span><span class="n">p</span><span class="p">,</span> <span class="n">p</span><span class="p">]</span><span class="o">.</span><span class="n">setlb</span><span class="p">(</span><span class="mf">1e-8</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">chol_in_rule</span><span class="p">(</span><span class="n">m</span><span class="p">,</span> <span class="n">p</span><span class="p">,</span> <span class="n">q</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">q</span> <span class="o">&gt;</span> <span class="n">p</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Constraint</span><span class="o">.</span><span class="n">Skip</span>
+            <span class="k">return</span> <span class="n">M_in</span><span class="p">[</span><span class="n">p</span><span class="p">,</span> <span class="n">q</span><span class="p">]</span> <span class="o">==</span> <span class="nb">sum</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">L</span><span class="p">[</span><span class="n">p</span><span class="p">,</span> <span class="n">r</span><span class="p">]</span> <span class="o">*</span> <span class="n">m</span><span class="o">.</span><span class="n">L</span><span class="p">[</span><span class="n">q</span><span class="p">,</span> <span class="n">r</span><span class="p">]</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">q</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">chol_in_con</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Constraint</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">PHI</span><span class="p">,</span> <span class="n">m</span><span class="o">.</span><span class="n">PHI</span><span class="p">,</span> <span class="n">rule</span><span class="o">=</span><span class="n">chol_in_rule</span><span class="p">)</span>
+
+        <span class="c1"># ---- output-space coverage: centered covariance via a collapsed</span>
+        <span class="c1"># identity: sum_i b_i*(y_i-yc)(y_i-yc)^T = sum_i b_i*y_i*y_i^T - n*yc*yc^T</span>
+        <span class="c1"># -- only n_resp^2 bilinear (yc*yc) terms, not O(n_c^2) ----</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">RESP</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">RangeSet</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">n_resp</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="n">yc_vars</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_resp</span><span class="p">):</span>
+            <span class="n">v</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Var</span><span class="p">(</span><span class="n">initialize</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">bounds</span><span class="o">=</span><span class="p">(</span><span class="o">-</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">))</span>
+            <span class="n">m</span><span class="o">.</span><span class="n">add_component</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;b_opt_yc_</span><span class="si">{</span><span class="n">c</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+            <span class="n">con</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Constraint</span><span class="p">(</span>
+                <span class="n">expr</span><span class="o">=</span><span class="n">n_exp</span> <span class="o">*</span> <span class="n">v</span> <span class="o">==</span> <span class="nb">sum</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">b</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">*</span> <span class="nb">float</span><span class="p">(</span><span class="n">Y</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="n">c</span><span class="p">])</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">))</span>
+            <span class="n">m</span><span class="o">.</span><span class="n">add_component</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;b_opt_yc_con_</span><span class="si">{</span><span class="n">c</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">con</span><span class="p">)</span>
+            <span class="n">yc_vars</span><span class="p">[</span><span class="n">c</span><span class="p">]</span> <span class="o">=</span> <span class="n">v</span>
+
+        <span class="n">P</span> <span class="o">=</span> <span class="p">{(</span><span class="n">c</span><span class="p">,</span> <span class="n">d</span><span class="p">):</span> <span class="n">Y</span><span class="p">[:,</span> <span class="n">c</span><span class="p">]</span> <span class="o">*</span> <span class="n">Y</span><span class="p">[:,</span> <span class="n">d</span><span class="p">]</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_resp</span><span class="p">)</span> <span class="k">for</span> <span class="n">d</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_resp</span><span class="p">)}</span>
+        <span class="n">M_out</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_resp</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">d</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_resp</span><span class="p">):</span>
+                <span class="n">lin</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">b</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">*</span> <span class="nb">float</span><span class="p">(</span><span class="n">P</span><span class="p">[</span><span class="n">c</span><span class="p">,</span> <span class="n">d</span><span class="p">][</span><span class="n">i</span><span class="p">])</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">)</span>
+                <span class="n">M_out</span><span class="p">[</span><span class="n">c</span><span class="p">,</span> <span class="n">d</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">lin</span> <span class="o">-</span> <span class="n">n_exp</span> <span class="o">*</span> <span class="n">yc_vars</span><span class="p">[</span><span class="n">c</span><span class="p">]</span> <span class="o">*</span> <span class="n">yc_vars</span><span class="p">[</span><span class="n">d</span><span class="p">])</span> <span class="o">/</span> <span class="nb">max</span><span class="p">(</span><span class="n">n_exp</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+
+        <span class="n">m</span><span class="o">.</span><span class="n">Lo</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Var</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">RESP</span><span class="p">,</span> <span class="n">m</span><span class="o">.</span><span class="n">RESP</span><span class="p">,</span> <span class="n">initialize</span><span class="o">=</span><span class="mf">0.0</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_resp</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">d</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">c</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">n_resp</span><span class="p">):</span>
+                <span class="n">m</span><span class="o">.</span><span class="n">Lo</span><span class="p">[</span><span class="n">c</span><span class="p">,</span> <span class="n">d</span><span class="p">]</span><span class="o">.</span><span class="n">fix</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>
+            <span class="n">m</span><span class="o">.</span><span class="n">Lo</span><span class="p">[</span><span class="n">c</span><span class="p">,</span> <span class="n">c</span><span class="p">]</span><span class="o">.</span><span class="n">setlb</span><span class="p">(</span><span class="mf">1e-8</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">chol_out_rule</span><span class="p">(</span><span class="n">m</span><span class="p">,</span> <span class="n">c</span><span class="p">,</span> <span class="n">d</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">d</span> <span class="o">&gt;</span> <span class="n">c</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Constraint</span><span class="o">.</span><span class="n">Skip</span>
+            <span class="k">return</span> <span class="n">M_out</span><span class="p">[</span><span class="n">c</span><span class="p">,</span> <span class="n">d</span><span class="p">]</span> <span class="o">==</span> <span class="nb">sum</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">Lo</span><span class="p">[</span><span class="n">c</span><span class="p">,</span> <span class="n">r</span><span class="p">]</span> <span class="o">*</span> <span class="n">m</span><span class="o">.</span><span class="n">Lo</span><span class="p">[</span><span class="n">d</span><span class="p">,</span> <span class="n">r</span><span class="p">]</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">d</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">chol_out_con</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Constraint</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">RESP</span><span class="p">,</span> <span class="n">m</span><span class="o">.</span><span class="n">RESP</span><span class="p">,</span> <span class="n">rule</span><span class="o">=</span><span class="n">chol_out_rule</span><span class="p">)</span>
+
+        <span class="c1"># ---- anti-clustering: mutual exclusion on near-duplicate response</span>
+        <span class="c1"># candidates. Candidates are FIXED, so pairwise response distances</span>
+        <span class="c1"># are precomputable constants -- a discrete-problem simplification</span>
+        <span class="c1"># of Chen et al.&#39;s continuous log-barrier penalty (mu). Off by</span>
+        <span class="c1"># default; opt in via designer._b_opt_min_sep_frac. ----</span>
+        <span class="n">min_sep_frac</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;_b_opt_min_sep_frac&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">min_sep_frac</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">diffs</span> <span class="o">=</span> <span class="n">Y</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:]</span> <span class="o">-</span> <span class="n">Y</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span>
+            <span class="n">dist2</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">diffs</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">axis</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">thresh</span> <span class="o">=</span> <span class="n">min_sep_frac</span> <span class="o">*</span> <span class="n">dist2</span><span class="o">.</span><span class="n">max</span><span class="p">()</span>
+            <span class="n">m</span><span class="o">.</span><span class="n">b_opt_excl</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">ConstraintList</span><span class="p">()</span>
+            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_c</span><span class="p">):</span>
+                <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">n_c</span><span class="p">):</span>
+                    <span class="k">if</span> <span class="n">dist2</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="n">j</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">thresh</span><span class="p">:</span>
+                        <span class="n">m</span><span class="o">.</span><span class="n">b_opt_excl</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">b</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">+</span> <span class="n">m</span><span class="o">.</span><span class="n">b</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="mi">1</span><span class="p">)</span>
+
+        <span class="c1"># ---- combined weighted-sum objective (Chen et al. Eq. 24) ----</span>
+        <span class="n">eps</span> <span class="o">=</span> <span class="mf">1e-9</span>
+        <span class="n">fin_log</span> <span class="o">=</span> <span class="mf">2.0</span> <span class="o">*</span> <span class="nb">sum</span><span class="p">(</span><span class="n">pyo</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">L</span><span class="p">[</span><span class="n">p</span><span class="p">,</span> <span class="n">p</span><span class="p">]</span> <span class="o">+</span> <span class="n">eps</span><span class="p">)</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">phi</span><span class="p">))</span>
+        <span class="n">fout_log</span> <span class="o">=</span> <span class="mf">2.0</span> <span class="o">*</span> <span class="nb">sum</span><span class="p">(</span><span class="n">pyo</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">Lo</span><span class="p">[</span><span class="n">c</span><span class="p">,</span> <span class="n">c</span><span class="p">]</span> <span class="o">+</span> <span class="n">eps</span><span class="p">)</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_resp</span><span class="p">))</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">obj</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Objective</span><span class="p">(</span>
+            <span class="n">expr</span><span class="o">=-</span><span class="p">(</span><span class="n">win</span> <span class="o">*</span> <span class="n">fin_log</span> <span class="o">+</span> <span class="n">wout</span> <span class="o">*</span> <span class="n">fout_log</span><span class="p">),</span> <span class="n">sense</span><span class="o">=</span><span class="n">pyo</span><span class="o">.</span><span class="n">minimize</span><span class="p">)</span>
+
+        <span class="n">slvr</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_make_pyomo_solver</span><span class="p">(</span><span class="n">solver_options</span><span class="p">)</span>
+        <span class="n">gams_kwargs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pyomo_solve_kwargs</span><span class="p">(</span><span class="n">solver_options</span><span class="p">)</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">slvr</span><span class="o">.</span><span class="n">solve</span><span class="p">(</span><span class="n">m</span><span class="p">,</span> <span class="n">tee</span><span class="o">=</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">2</span><span class="p">),</span> <span class="o">**</span><span class="n">gams_kwargs</span><span class="p">)</span>
+
+        <span class="n">tc</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">solver</span><span class="o">.</span><span class="n">termination_condition</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_termination</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">tc</span><span class="p">)</span>
+        <span class="n">ok_conditions</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="n">pyo</span><span class="o">.</span><span class="n">TerminationCondition</span><span class="o">.</span><span class="n">optimal</span><span class="p">,</span>
+            <span class="n">pyo</span><span class="o">.</span><span class="n">TerminationCondition</span><span class="o">.</span><span class="n">locallyOptimal</span><span class="p">,</span>
+            <span class="n">pyo</span><span class="o">.</span><span class="n">TerminationCondition</span><span class="o">.</span><span class="n">feasible</span><span class="p">,</span>
+        <span class="p">}</span>
+        <span class="c1"># A FAILED solve must not yield a design. When bonmin reports</span>
+        <span class="c1"># `infeasible`, pyo.value(m.b[i]) returns 1.0 for EVERY candidate, so</span>
+        <span class="c1"># the old warn-and-continue produced e_opt = 1/n_exp across the whole</span>
+        <span class="c1"># pool: a &quot;design&quot; that selects every candidate, breaches the</span>
+        <span class="c1"># cardinality constraint outright, and has efforts summing to n_c/n_exp</span>
+        <span class="c1"># instead of 1. That is not a suboptimal answer, it is not an answer,</span>
+        <span class="c1"># and printing a warning while returning it means anyone not reading</span>
+        <span class="c1"># stderr treats it as a result.</span>
+        <span class="n">_hard_failures</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="n">pyo</span><span class="o">.</span><span class="n">TerminationCondition</span><span class="o">.</span><span class="n">infeasible</span><span class="p">,</span>
+            <span class="n">pyo</span><span class="o">.</span><span class="n">TerminationCondition</span><span class="o">.</span><span class="n">infeasibleOrUnbounded</span><span class="p">,</span>
+            <span class="n">pyo</span><span class="o">.</span><span class="n">TerminationCondition</span><span class="o">.</span><span class="n">unbounded</span><span class="p">,</span>
+            <span class="n">pyo</span><span class="o">.</span><span class="n">TerminationCondition</span><span class="o">.</span><span class="n">error</span><span class="p">,</span>
+            <span class="n">pyo</span><span class="o">.</span><span class="n">TerminationCondition</span><span class="o">.</span><span class="n">internalSolverError</span><span class="p">,</span>
+        <span class="p">}</span>
+        <span class="k">if</span> <span class="n">tc</span> <span class="ow">in</span> <span class="n">_hard_failures</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;b_opt_criterion: the MINLP solver returned &#39;</span><span class="si">{</span><span class="n">tc</span><span class="si">}</span><span class="s2">&#39;, so there &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;is no design to report. Most often this means n_exp is too &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;close to the rank bound -- with </span><span class="si">{</span><span class="n">phi</span><span class="si">}</span><span class="s2"> input factor(s) and &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">n_resp</span><span class="si">}</span><span class="s2"> response(s), try n_exp &gt;= </span><span class="si">{</span><span class="nb">max</span><span class="p">(</span><span class="n">phi</span><span class="p">,</span><span class="w"> </span><span class="n">n_resp</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="si">}</span><span class="s2"> &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;(currently </span><span class="si">{</span><span class="n">n_exp</span><span class="si">}</span><span class="s2">); the centered output covariance needs a &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;margin above the Cholesky floor, not merely full rank. &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;Other causes: a candidate pool with duplicate or collinear &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;rows, or an over-tight _b_opt_min_sep_frac.&quot;</span>
+            <span class="p">)</span>
+        <span class="c1"># Limit conditions are different: there IS an incumbent, it is just not</span>
+        <span class="c1"># proven optimal. Report it, and record the fact so a caller (or an</span>
+        <span class="c1"># example printing a table) can distinguish a proven optimum from a</span>
+        <span class="c1"># best-so-far. Silently mixing the two is how a solver artefact gets</span>
+        <span class="c1"># read as a non-monotonic Pareto front.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_proven_optimal</span> <span class="o">=</span> <span class="p">(</span><span class="n">tc</span> <span class="o">==</span> <span class="n">pyo</span><span class="o">.</span><span class="n">TerminationCondition</span><span class="o">.</span><span class="n">optimal</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">tc</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">ok_conditions</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[WARNING] Solver termination: </span><span class="si">{</span><span class="n">tc</span><span class="si">}</span><span class="s2">. The design below &quot;</span>
+                      <span class="sa">f</span><span class="s2">&quot;is the solver&#39;s best incumbent, NOT a proven optimum.&quot;</span><span class="p">)</span>
+
+        <span class="n">b_opt_val</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">pyo</span><span class="o">.</span><span class="n">value</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">b</span><span class="p">[</span><span class="n">i</span><span class="p">])</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">])</span>
+
+        <span class="c1"># Validate independently of what the solver reported. This catches the</span>
+        <span class="c1"># failure mode above even if a future solver returns a status not in</span>
+        <span class="c1"># _hard_failures, and it is cheap: the selection is binary by</span>
+        <span class="c1"># construction, so anything else means the values did not come from a</span>
+        <span class="c1"># completed solve.</span>
+        <span class="n">_n_sel</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">b_opt_val</span> <span class="o">&gt;</span> <span class="mf">0.5</span><span class="p">))</span>
+        <span class="n">_binary_ok</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">((</span><span class="n">b_opt_val</span> <span class="o">&lt;</span> <span class="mf">1e-4</span><span class="p">)</span> <span class="o">|</span> <span class="p">(</span><span class="n">b_opt_val</span> <span class="o">&gt;</span> <span class="mf">1.0</span> <span class="o">-</span> <span class="mf">1e-4</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">_n_sel</span> <span class="o">!=</span> <span class="n">n_exp</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">_binary_ok</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;b_opt_criterion: the solver reported &#39;</span><span class="si">{</span><span class="n">tc</span><span class="si">}</span><span class="s2">&#39; but the returned &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;selection is not a valid design -- </span><span class="si">{</span><span class="n">_n_sel</span><span class="si">}</span><span class="s2"> candidate(s) &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;selected where n_exp=</span><span class="si">{</span><span class="n">n_exp</span><span class="si">}</span><span class="s2">&quot;</span>
+                <span class="o">+</span> <span class="p">(</span><span class="s2">&quot;&quot;</span> <span class="k">if</span> <span class="n">_binary_ok</span> <span class="k">else</span> <span class="s2">&quot;, and the selection variables are not &quot;</span>
+                   <span class="s2">&quot;binary&quot;</span><span class="p">)</span>
+                <span class="o">+</span> <span class="s2">&quot;. Refusing to report it. Please raise this as an issue &quot;</span>
+                  <span class="s2">&quot;with the candidate pool and arguments used.&quot;</span>
+            <span class="p">)</span>
+
+        <span class="n">e_opt</span> <span class="o">=</span> <span class="n">b_opt_val</span> <span class="o">/</span> <span class="n">n_exp</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">efforts</span> <span class="o">=</span> <span class="n">e_opt</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_efforts_transformed</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_selected_idx</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">b_opt_val</span> <span class="o">&gt;</span> <span class="mf">0.5</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>   <span class="c1"># convenience</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_apportion_redundant</span> <span class="o">=</span> <span class="kc">True</span>   <span class="c1"># design is already exact/equal-weight</span>
 
         <span class="n">obj_val</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">pyo</span><span class="o">.</span><span class="n">value</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">obj</span><span class="p">))</span>
         <span class="k">return</span> <span class="o">-</span><span class="n">obj_val</span>
@@ -3730,7 +4093,8 @@
                           <span class="n">save_sensitivities</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">trim_fim</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
                           <span class="n">pseudo_bayesian_type</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">regularize_fim</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">beta</span><span class="o">=</span><span class="mf">0.90</span><span class="p">,</span>
                           <span class="n">min_expected_value</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">fix_effort</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">save_atomics</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
-                          <span class="n">min_effort</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">allow_singular_fim</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+                          <span class="n">min_effort</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">allow_singular_fim</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">output_weight</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span>
+                          <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Solve for the optimal continuous experimental design.</span>
 
 <span class="sd">        The central method of the package. Allocates a unit budget of</span>
@@ -3784,6 +4148,12 @@
 <span class="sd">                diagnosis naming the responsible parameters, because a criterion</span>
 <span class="sd">                value obtained from a rank-deficient FIM rests on the Cholesky</span>
 <span class="sd">                floor rather than on information the data contains.</span>
+<span class="sd">            output_weight (float): ONLY used by ``b_opt_criterion``</span>
+<span class="sd">                (Bracketing-optimal). Weight in [0, 1] on the output-space</span>
+<span class="sd">                coverage objective; the input-space bracketing objective gets</span>
+<span class="sd">                weight ``1 - output_weight``. See Chen, Paulavicius &amp; Adjiman</span>
+<span class="sd">                (2018), AIChE J. 64:3944-3957, Eq. 24. Ignored by every other</span>
+<span class="sd">                criterion.</span>
 <span class="sd">            **kwargs: Forwarded to the solver interface.</span>
 
 <span class="sd">        Returns:</span>
@@ -3824,6 +4194,8 @@
 
 <span class="w">        </span><span class="sd">&quot;&quot;&quot; resetting optimal candidates &quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">optimal_candidates</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_apportion_redundant</span> <span class="o">=</span> <span class="kc">False</span>   <span class="c1"># reset each call; set True inside</span>
+                                                    <span class="c1"># _solve_pyomo_b_opt only on success</span>
 
 <span class="w">        </span><span class="sd">&quot;&quot;&quot; setting verbal behaviour &quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">2</span><span class="p">:</span>
@@ -3977,13 +4349,17 @@
         <span class="n">start</span> <span class="o">=</span> <span class="n">time</span><span class="p">()</span>
 
         <span class="c1"># single unified Pyomo dispatch</span>
+        <span class="c1"># n_exp/output_weight are forwarded via kwargs -- they are read only</span>
+        <span class="c1"># by the b_opt_criterion early-dispatch branch inside _solve_pyomo;</span>
+        <span class="c1"># every other criterion ignores unknown kwargs exactly as before.</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cvar_problem</span><span class="p">:</span>
             <span class="n">opt_fun</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_solve_pyomo_cvar</span><span class="p">(</span>
                 <span class="n">criterion</span><span class="p">,</span> <span class="n">beta</span><span class="p">,</span> <span class="n">e0</span><span class="p">,</span> <span class="n">min_expected_value</span><span class="p">,</span> <span class="n">solver_options</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span>
             <span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="n">opt_fun</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_solve_pyomo</span><span class="p">(</span>
-                <span class="n">criterion</span><span class="p">,</span> <span class="n">e0</span><span class="p">,</span> <span class="n">fix_effort</span><span class="p">,</span> <span class="n">solver_options</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span>
+                <span class="n">criterion</span><span class="p">,</span> <span class="n">e0</span><span class="p">,</span> <span class="n">fix_effort</span><span class="p">,</span> <span class="n">solver_options</span><span class="p">,</span>
+                <span class="n">n_exp</span><span class="o">=</span><span class="n">n_exp</span><span class="p">,</span> <span class="n">output_weight</span><span class="o">=</span><span class="n">output_weight</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span>
             <span class="p">)</span>
 
         <span class="n">finish</span> <span class="o">=</span> <span class="n">time</span><span class="p">()</span>
@@ -4268,6 +4644,15 @@
 <span class="sd">            means the continuous optimum rests on a near-singular direction that</span>
 <span class="sd">            rounding destroys — check :meth:`diagnose_fim_structure` if so.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;_b_opt_apportion_redundant&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">):</span>
+            <span class="nb">print</span><span class="p">(</span>
+                <span class="s2">&quot;[Warning] The current design was produced by &quot;</span>
+                <span class="s2">&quot;b_opt_criterion, which already solves for an EXACT, &quot;</span>
+                <span class="s2">&quot;equal-weighted subset of exactly n_exp candidates -- &quot;</span>
+                <span class="s2">&quot;there is no continuous design left to round. Proceeding, &quot;</span>
+                <span class="s2">&quot;but apportion() is redundant here; the design in &quot;</span>
+                <span class="s2">&quot;designer.efforts is already the final discrete design.&quot;</span>
+            <span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">n_exp</span> <span class="o">=</span> <span class="n">n_exp</span>
 
         <span class="n">_original_save_atomics</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_save_atomics</span><span class="p">)</span>
@@ -5943,6 +6328,58 @@
             <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pb_d_opt_criterion</span><span class="p">(</span><span class="n">efforts</span><span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_d_opt_criterion</span><span class="p">(</span><span class="n">efforts</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Designer.b_opt_criterion">
+<a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.b_opt_criterion">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">b_opt_criterion</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">efforts</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Bracketing-optimal (b_opt) design -- Chen, Paulavicius &amp; Adjiman</span>
+<span class="sd">        (2018), AIChE J. 64:3944-3957, &quot;An Optimization Framework to</span>
+<span class="sd">        Combine Operable Space Maximization with Design of Experiments&quot;.</span>
+
+<span class="sd">        Combines two objectives, matched to the two things a regulator and</span>
+<span class="sd">        a process engineer respectively care about in a pharmaceutical</span>
+<span class="sd">        bracketing study:</span>
+
+<span class="sd">          (1) INPUT-SPACE bracketing -- D-optimality applied directly to</span>
+<span class="sd">              the (scaled) input-factor values, i.e. an orthogonal,</span>
+<span class="sd">              corner-seeking design in the process INPUTS (the classical</span>
+<span class="sd">              &quot;bracketing study&quot;). NOT parameter-sensitivity-based --</span>
+<span class="sd">              unrelated to d_opt_criterion / self.atomic_fims.</span>
+
+<span class="sd">          (2) OUTPUT-SPACE coverage -- maximises the volume spanned by the</span>
+<span class="sd">              candidates&#39; PREDICTED RESPONSES, so the design also explores</span>
+<span class="sd">              the process OUTPUT space rather than mapping only a sliver</span>
+<span class="sd">              of it (Chen et al.&#39;s motivating example: two similarly</span>
+<span class="sd">              input-orthogonal 4-point designs can cover 10% vs 63% of the</span>
+<span class="sd">              achievable output space).</span>
+
+<span class="sd">        The two are combined via weighted-sum scalarization (Eq. 24 in the</span>
+<span class="sd">        paper); see design_experiment(output_weight=...).</span>
+
+<span class="sd">        Requirements, all different from every other criterion here:</span>
+<span class="sd">          * Must be called with design_experiment(..., n_exp=&lt;int&gt;) --</span>
+<span class="sd">            n_exp is a HARD requirement (exact subset selection), not just</span>
+<span class="sd">            an apportion() target.</span>
+<span class="sd">          * designer.simulate_candidates() must be called first, to</span>
+<span class="sd">            populate self.response (the criterion needs predicted outputs,</span>
+<span class="sd">            not sensitivities).</span>
+<span class="sd">          * No pseudo-Bayesian counterpart -- raises if</span>
+<span class="sd">            self.model_parameters is a scenario array.</span>
+<span class="sd">          * Static (non-dynamic) systems only, for now.</span>
+<span class="sd">          * apportion() is redundant afterward: the design produced is</span>
+<span class="sd">            already exact and equal-weighted.</span>
+
+<span class="sd">        Recommended solver: &quot;bonmin&quot;. See the docstring of</span>
+<span class="sd">        _solve_pyomo_b_opt for why BARON is not the current default.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_bayesian</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;b_opt_criterion has no pseudo-Bayesian counterpart. See &quot;</span>
+                <span class="s2">&quot;the method docstring.&quot;</span>
+            <span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_b_opt_criterion</span><span class="p">(</span><span class="n">efforts</span><span class="p">)</span></div>
 
 
 <div class="viewcode-block" id="Designer.ds_opt_criterion">
@@ -8896,6 +9333,52 @@
             <span class="n">fim_inv</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">fim</span><span class="p">)</span>
             <span class="n">jac</span> <span class="o">=</span> <span class="o">-</span><span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">fim_inv</span><span class="o">.</span><span class="n">T</span> <span class="o">*</span> <span class="n">m</span><span class="p">)</span> <span class="k">for</span> <span class="n">m</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">atomic_fims</span><span class="p">])</span>
             <span class="k">return</span> <span class="p">(</span><span class="o">-</span><span class="n">d_opt</span><span class="p">,</span> <span class="n">jac</span><span class="p">)</span> <span class="k">if</span> <span class="n">sign</span> <span class="o">==</span> <span class="mi">1</span> <span class="k">else</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">inf</span><span class="p">,</span> <span class="n">jac</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_b_opt_criterion</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">efforts</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Numpy evaluator for a GIVEN discrete design -- post-hoc reporting</span>
+<span class="sd">        only (e.g. compute_criterion_value() on an already-solved design).</span>
+<span class="sd">        The actual OPTIMIZATION happens in _solve_pyomo_b_opt via the</span>
+<span class="sd">        Pyomo/solver path; this never calls self.eval_fim() and never</span>
+<span class="sd">        touches self.atomic_fims / self.fim, by design -- b_opt is not a</span>
+<span class="sd">        parameter-sensitivity criterion.</span>
+
+<span class="sd">        Returns the value to MINIMISE, matching every other criterion&#39;s</span>
+<span class="sd">        sign convention (b_opt maximises the combined log-det, so this</span>
+<span class="sd">        returns its negative).</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">efforts</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">efforts</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span>
+        <span class="n">selected</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">efforts</span> <span class="o">&gt;</span> <span class="mf">1e-6</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">selected</span><span class="o">.</span><span class="n">size</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span>
+
+        <span class="n">U_raw</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ti_controls_candidates</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+        <span class="n">lb</span><span class="p">,</span> <span class="n">ub</span> <span class="o">=</span> <span class="n">U_raw</span><span class="o">.</span><span class="n">min</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">),</span> <span class="n">U_raw</span><span class="o">.</span><span class="n">max</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">span</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">ub</span> <span class="o">&gt;</span> <span class="n">lb</span><span class="p">,</span> <span class="n">ub</span> <span class="o">-</span> <span class="n">lb</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">)</span>
+        <span class="n">U</span> <span class="o">=</span> <span class="mf">2.0</span> <span class="o">*</span> <span class="p">(</span><span class="n">U_raw</span> <span class="o">-</span> <span class="n">lb</span><span class="p">)</span> <span class="o">/</span> <span class="n">span</span> <span class="o">-</span> <span class="mf">1.0</span>
+        <span class="n">M_in</span> <span class="o">=</span> <span class="n">U</span><span class="p">[</span><span class="n">selected</span><span class="p">]</span><span class="o">.</span><span class="n">T</span> <span class="o">@</span> <span class="n">U</span><span class="p">[</span><span class="n">selected</span><span class="p">]</span>
+        <span class="n">sign_in</span><span class="p">,</span> <span class="n">logdet_in</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">slogdet</span><span class="p">(</span><span class="n">M_in</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">sign_in</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">response</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="s2">&quot;b_opt_criterion needs predicted responses. Call &quot;</span>
+                <span class="s2">&quot;designer.simulate_candidates() first.&quot;</span>
+            <span class="p">)</span>
+        <span class="n">Y_raw</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">response</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">U_raw</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">Y_mean</span><span class="p">,</span> <span class="n">Y_std</span> <span class="o">=</span> <span class="n">Y_raw</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">),</span> <span class="n">Y_raw</span><span class="o">.</span><span class="n">std</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">Y_std</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Y_std</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">,</span> <span class="n">Y_std</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">)</span>
+        <span class="n">Y_sel</span> <span class="o">=</span> <span class="p">(</span><span class="n">Y_raw</span><span class="p">[</span><span class="n">selected</span><span class="p">]</span> <span class="o">-</span> <span class="n">Y_mean</span><span class="p">)</span> <span class="o">/</span> <span class="n">Y_std</span>
+        <span class="n">yc</span> <span class="o">=</span> <span class="n">Y_sel</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">M_out</span> <span class="o">=</span> <span class="p">(</span><span class="n">Y_sel</span> <span class="o">-</span> <span class="n">yc</span><span class="p">)</span><span class="o">.</span><span class="n">T</span> <span class="o">@</span> <span class="p">(</span><span class="n">Y_sel</span> <span class="o">-</span> <span class="n">yc</span><span class="p">)</span> <span class="o">/</span> <span class="nb">max</span><span class="p">(</span><span class="n">selected</span><span class="o">.</span><span class="n">size</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="n">sign_out</span><span class="p">,</span> <span class="n">logdet_out</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">slogdet</span><span class="p">(</span><span class="n">M_out</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">sign_out</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span>
+
+        <span class="n">wout</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;_b_opt_output_weight&quot;</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">))</span>
+        <span class="n">win</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">-</span> <span class="n">wout</span>
+        <span class="k">return</span> <span class="o">-</span><span class="p">(</span><span class="n">win</span> <span class="o">*</span> <span class="n">logdet_in</span> <span class="o">+</span> <span class="n">wout</span> <span class="o">*</span> <span class="n">logdet_out</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_resolve_ds_idx</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>

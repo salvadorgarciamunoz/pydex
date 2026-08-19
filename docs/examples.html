@@ -55,6 +55,10 @@
 <li class="toctree-l3"><a class="reference internal" href="#bayesian-inference-in-case-4-py-via-pymc-not-pydex">Bayesian inference in <code class="docutils literal notranslate"><span class="pre">case_4.py</span></code> – via PyMC, not pydex</a></li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="#bracketing-optimal-design">Bracketing-optimal design</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#running-them">Running them</a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="#asl-elimination">ASL elimination</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#jupyter-notebooks">Jupyter notebooks</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#test-scripts-as-worked-examples">Test scripts as worked examples</a></li>
@@ -285,6 +289,124 @@ values, with r_hat typically landing around 1.01-1.04 — inside PyMC’s own
 “probably fine, more draws would help” range rather than fully converged.
 The draw/tune/chain/core counts are constants at the top of that section
 if tighter diagnostics are needed, at the cost of runtime.</p>
+</section>
+</section>
+<section id="bracketing-optimal-design">
+<h2>Bracketing-optimal design<a class="headerlink" href="#bracketing-optimal-design" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">examples/b_optimal/</span></code></p>
+<p>Worked scenarios for <a class="reference internal" href="api.html#pydex.core.designer.Designer.b_opt_criterion" title="pydex.core.designer.Designer.b_opt_criterion"><code class="xref py py-meth docutils literal notranslate"><span class="pre">b_opt_criterion()</span></code></a>,
+which implements the bracketing-optimal design of Chen, Paulavičius, Adjiman
+and García-Muñoz (2018), <em>AIChE J.</em> 64(11):3944–3957,
+<a class="reference external" href="https://doi.org/10.1002/aic.16214">doi:10.1002/aic.16214</a>.</p>
+<p>This criterion answers a different question from every other criterion in
+pydex. Not “which experiments best determine my parameters”, but “which
+experiments best bracket my operating space” — the regulator’s question in a
+pharmaceutical bracketing study. It is not sensitivity-based and does not
+involve the Fisher information matrix at all. Two objectives are combined by
+weighted sum, selected with <code class="docutils literal notranslate"><span class="pre">output_weight</span></code>:</p>
+<ul class="simple">
+<li><p><strong>input-space bracketing</strong> (<code class="docutils literal notranslate"><span class="pre">output_weight=0</span></code>) — D-optimality applied to
+the scaled input-factor values themselves, giving an orthogonal,
+corner-seeking design in the process inputs;</p></li>
+<li><p><strong>output-space coverage</strong> (<code class="docutils literal notranslate"><span class="pre">output_weight=1</span></code>) — maximise the volume
+spanned by the candidates’ predicted responses, so the design maps the
+output space rather than a sliver of it.</p></li>
+</ul>
+<p>The problem is posed as binary subset selection over a pre-evaluated
+candidate pool, so it needs an MINLP solver (<code class="docutils literal notranslate"><span class="pre">solver=&quot;bonmin&quot;</span></code>) and an
+exact design size (<code class="docutils literal notranslate"><span class="pre">n_exp</span></code>):</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">designer</span><span class="o">.</span><span class="n">simulate_candidates</span><span class="p">()</span>          <span class="c1"># REQUIRED: b_opt reads responses</span>
+<span class="n">designer</span><span class="o">.</span><span class="n">design_experiment</span><span class="p">(</span>
+    <span class="n">designer</span><span class="o">.</span><span class="n">b_opt_criterion</span><span class="p">,</span>
+    <span class="n">n_exp</span>         <span class="o">=</span> <span class="mi">5</span><span class="p">,</span>
+    <span class="n">output_weight</span> <span class="o">=</span> <span class="mf">0.5</span><span class="p">,</span>
+    <span class="n">solver</span>        <span class="o">=</span> <span class="s2">&quot;bonmin&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>Two usage requirements are enforced up front, both raising rather than
+failing quietly:</p>
+<ul>
+<li><p><a class="reference internal" href="api.html#pydex.core.designer.Designer.simulate_candidates" title="pydex.core.designer.Designer.simulate_candidates"><code class="xref py py-meth docutils literal notranslate"><span class="pre">simulate_candidates()</span></code></a> must be called
+first. b_opt is the only criterion that reads
+<code class="xref py py-attr docutils literal notranslate"><span class="pre">response</span></code>, so omitting it raises
+<code class="docutils literal notranslate"><span class="pre">RuntimeError</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">n_exp</span> <span class="pre">&gt;=</span> <span class="pre">max(phi,</span> <span class="pre">n_resp</span> <span class="pre">+</span> <span class="pre">2)</span></code>, where <code class="docutils literal notranslate"><span class="pre">phi</span></code> is the number of input
+factors. Both Cholesky lifts floor their diagonal at <code class="docutils literal notranslate"><span class="pre">1e-8</span></code>, so a
+rank-deficient matrix cannot be represented and the program becomes
+strictly infeasible. An MINLP solver does not report infeasibility
+quickly; it appears to hang. Hence the explicit <code class="docutils literal notranslate"><span class="pre">ValueError</span></code>.</p>
+<p>The output term is the subtle one. Its covariance is <em>centered</em>, so its
+rank is at most <code class="docutils literal notranslate"><span class="pre">n_exp</span> <span class="pre">-</span> <span class="pre">1</span></code> and the algebraic bound is
+<code class="docutils literal notranslate"><span class="pre">n_exp</span> <span class="pre">&gt;=</span> <span class="pre">n_resp</span> <span class="pre">+</span> <span class="pre">1</span></code>. That proves insufficient in practice: at exactly
+that value the covariance is full rank with no margin above the Cholesky
+floor, and the solver reports the problem infeasible whenever the output
+term carries weight. The implemented bound is therefore <code class="docutils literal notranslate"><span class="pre">n_resp</span> <span class="pre">+</span> <span class="pre">2</span></code>,
+which is why <code class="docutils literal notranslate"><span class="pre">scenario_1</span></code>’s design-size sweep starts at four rather than
+three.</p>
+</li>
+</ul>
+<p>Failure handling is deliberately strict. If the MINLP terminates
+<code class="docutils literal notranslate"><span class="pre">infeasible</span></code>, <code class="docutils literal notranslate"><span class="pre">unbounded</span></code> or <code class="docutils literal notranslate"><span class="pre">error</span></code>,
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.design_experiment" title="pydex.core.designer.Designer.design_experiment"><code class="xref py py-meth docutils literal notranslate"><span class="pre">design_experiment()</span></code></a> raises
+<code class="docutils literal notranslate"><span class="pre">RuntimeError</span></code> rather than returning a design, and the returned selection
+is validated against <code class="docutils literal notranslate"><span class="pre">n_exp</span></code> independently of the reported status. Solves
+that stop at a time or iteration limit do return their incumbent, but warn
+that it is not a proven optimum and record it in
+<code class="docutils literal notranslate"><span class="pre">designer._b_opt_termination</span></code> and <code class="docutils literal notranslate"><span class="pre">designer._b_opt_proven_optimal</span></code>, so a
+caller can distinguish a proven optimum from a best-so-far.</p>
+<p>The scenarios:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">scenario_1_film_coating.py</span></code> with <code class="docutils literal notranslate"><span class="pre">film_coating_model.py</span></code> — the
+paper’s motivating example, a tablet film coater: three inputs (inlet air
+temperature, coating-solution flow, air flow) to two outputs (exhaust
+temperature and exhaust %RH). Reproduces the paper’s Table 1 and Figures
+2 to 5, including the Pareto front swept over <code class="docutils literal notranslate"><span class="pre">output_weight</span></code> and the
+Pareto-front family as the design size grows. The coater model is a
+physically grounded thermodynamic model rather than the paper’s own
+Supporting-Information equations, so the trends and figure structure
+correspond while the absolute numbers do not.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">scenario_2_cstr.py</span></code> with <code class="docutils literal notranslate"><span class="pre">cstr_model.py</span></code> — the paper’s second case
+study, two CSTRs in series: six inputs to three outputs, reproducing
+Figures 8 and 9. The kinetic and energy model is transcribed from the
+authors’ own GAMS source, so this scenario does carry the paper’s actual
+numbers.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">scenario_3_suzuki.py</span></code> with <code class="docutils literal notranslate"><span class="pre">suzuki_model.py</span></code> — a Suzuki-Miyaura
+coupling, <strong>not</strong> from the paper: five inputs to three critical quality
+attributes under real process constraints. This is the practitioner-facing
+walkthrough and the one that verifies the machinery. Part A cross-checks
+the returned design against <strong>exhaustive enumeration</strong> of all 658,008
+five-point subsets and prints the gap; Part B covers choosing a design
+size; Part C exercises the anti-clustering control; Part D exercises the
+guards. The kinetics are representative of a realistic system rather than
+fitted to a particular substrate.</p></li>
+</ul>
+<section id="running-them">
+<h3>Running them<a class="headerlink" href="#running-them" title="Link to this heading"></a></h3>
+<p>Each script may be run from any working directory: the model modules are
+imported relative to the script’s own location rather than the cwd, matching
+<code class="docutils literal notranslate"><span class="pre">examples/ode/case_2_no_ift_no_collocation.py</span></code>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">python</span> <span class="n">examples</span><span class="o">/</span><span class="n">b_optimal</span><span class="o">/</span><span class="n">scenario_1_film_coating</span><span class="o">.</span><span class="n">py</span>
+</pre></div>
+</div>
+<p>Figures are written to the <strong>working</strong> directory (<code class="docutils literal notranslate"><span class="pre">OUT_DIR</span> <span class="pre">=</span> <span class="pre">&quot;.&quot;</span></code>), so the
+destination is the caller’s choice. That is deliberate rather than an
+oversight — pinning output to the script directory would drop generated PNGs
+inside the repository. The figures should not be committed.</p>
+<p><code class="docutils literal notranslate"><span class="pre">scenario_1</span></code> takes a couple of minutes and <code class="docutils literal notranslate"><span class="pre">scenario_2</span></code> about three.
+<code class="docutils literal notranslate"><span class="pre">scenario_3</span></code> is slower: Part A’s exhaustive enumeration alone runs for
+several minutes, and Parts B and C cap each solve with
+<code class="docutils literal notranslate"><span class="pre">solver_options={&quot;bonmin.time_limit&quot;:</span> <span class="pre">90}</span></code>. <strong>A capped solve returns
+bonmin’s best incumbent rather than a proven optimum</strong>, so individual rows
+in those tables are indicative rather than exact — the pure-input instances
+(<code class="docutils literal notranslate"><span class="pre">output_weight=0</span></code>) are much the hardest and are the ones that reach the
+cap. Part A runs uncapped, which is why it is the single place global
+optimality is claimed, and it is checked by enumeration rather than
+asserted.</p>
+<p>Bonmin offers no global-optimality guarantee for nonconvex MINLP. Its record
+on these instances is perfect — four independent brute-force cross-checks
+agreeing exactly — but that is empirical evidence about these problems, not
+a proof.</p>
 </section>
 </section>
 <section id="asl-elimination">

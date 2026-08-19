@@ -168,6 +168,27 @@ failure modes and when to prefer one criterion over another, are in the
 | V-optimal | `v_opt_criterion` | prediction variance at a specific operating condition `dw`, via a two-stage workflow — see [V-optimal MBDoE](#v-optimal-mbdoe) below |
 | vdi | `vdi_criterion` | prediction variance aggregated over the whole operating-point grid, rather than one `dw` — distinct from V-optimal only when there are fewer measured responses than parameters |
 | CVaR-D (risk-averse) | `cvar_d_opt_criterion` | average D-criterion over the worst `(1-beta)` fraction of parameter scenarios, via `solve_cvar_problem()` rather than `design_experiment()` |
+| **b-optimal (bracketing)** | `b_opt_criterion` | NOT parameter-precision at all: brackets the operating space. Weighted sum of input-space D-optimality on the scaled input factors and output-space coverage of the predicted responses, traded off by `output_weight`. Needs an MINLP solver, an exact `n_exp`, and `simulate_candidates()` first — see below |
+
+`b_opt_criterion` is the odd one out and worth reading the row twice: it does
+not involve the Fisher information matrix, does not use sensitivities, and does
+not try to determine parameters. It answers the regulator's question in a
+bracketing study — which experiments span the operating space — and is posed as
+binary subset selection over a pre-evaluated candidate pool. Implements Chen,
+Paulavičius, Adjiman & García-Muñoz (2018), *AIChE J.* 64(11):3944–3957. Worked
+examples in `examples/b_optimal/`; the reachability limitation of the
+weighted-sum formulation is recorded in `CHANGELOG.md` under 0.4.0.
+
+**What this table deliberately omits.** `u_opt_criterion` is marked
+`# experimental` in the source, has zero coverage in the capability suite and is
+not a term from the standard DoE literature. The six other prediction-variance
+criteria (`dg`, `di`, `ag`, `ai`, `eg`, `ei`) are real and correctly
+implemented, but are only ever evaluated on a fixed effort vector — none has
+completed an actual `design_experiment()` optimisation, unlike `vdi_criterion`,
+which has. Both omissions are intentional and should stay until that changes:
+this list has previously been wrong in both directions, and the check is
+`grep "_opt_criterion" pydex/core/designer.py` against the capability suite,
+not what a previous pass wrote here.
 
 **Pseudo-Bayesian designs** are not a separate criterion but a mode:
 supply `model_parameters` as a scenario array (shape `(n_scenarios, n_mp)`)

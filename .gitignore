@@ -145,6 +145,8 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+# Figures written by the b_optimal example scenarios (OUT_DIR = ".")
+examples/b_optimal/*.png
 
 # PyBuilder
 target/

@@ -103,6 +103,7 @@
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.load_sensitivity"><code class="docutils literal notranslate"><span class="pre">Designer.load_sensitivity()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.load_atomics"><code class="docutils literal notranslate"><span class="pre">Designer.load_atomics()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.d_opt_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.d_opt_criterion()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.b_opt_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.b_opt_criterion()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.ds_opt_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.ds_opt_criterion()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.a_opt_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.a_opt_criterion()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.e_opt_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.e_opt_criterion()</span></code></a></li>
@@ -1211,7 +1212,7 @@ using Pyomo (maximize mean subject to CVaR constraint).</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="pydex.core.designer.Designer.design_experiment">
-<span class="sig-name descname"><span class="pre">design_experiment</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">criterion</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_spt</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_exp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">optimize_sampling_times</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'ipopt'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver_options</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">e0</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">write</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_sensitivities</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trim_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pseudo_bayesian_type</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">regularize_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">beta</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.9</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_expected_value</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fix_effort</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_atomics</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_effort</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">allow_singular_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.design_experiment"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.design_experiment" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">design_experiment</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">criterion</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_spt</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_exp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">optimize_sampling_times</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'ipopt'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver_options</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">e0</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">write</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_sensitivities</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trim_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pseudo_bayesian_type</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">regularize_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">beta</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.9</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_expected_value</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fix_effort</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_atomics</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_effort</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">allow_singular_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_weight</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.5</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.design_experiment"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.design_experiment" title="Link to this definition"></a></dt>
 <dd><p>Solve for the optimal continuous experimental design.</p>
 <p>The central method of the package. Allocates a unit budget of
 experimental effort across the candidate grid so as to optimise
@@ -1264,6 +1265,12 @@ structurally singular. By default the solve is refused with a
 diagnosis naming the responsible parameters, because a criterion
 value obtained from a rank-deficient FIM rests on the Cholesky
 floor rather than on information the data contains.</p></li>
+<li><p><strong>output_weight</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – ONLY used by <code class="docutils literal notranslate"><span class="pre">b_opt_criterion</span></code>
+(Bracketing-optimal). Weight in [0, 1] on the output-space
+coverage objective; the input-space bracketing objective gets
+weight <code class="docutils literal notranslate"><span class="pre">1</span> <span class="pre">-</span> <span class="pre">output_weight</span></code>. See Chen, Paulavicius &amp; Adjiman
+(2018), AIChE J. 64:3944-3957, Eq. 24. Ignored by every other
+criterion.</p></li>
 <li><p><strong>**kwargs</strong> – Forwarded to the solver interface.</p></li>
 </ul>
 </dd>
@@ -1687,6 +1694,52 @@ grid is not checked.</p>
 <dt class="sig sig-object py" id="pydex.core.designer.Designer.d_opt_criterion">
 <span class="sig-name descname"><span class="pre">d_opt_criterion</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">efforts</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.d_opt_criterion"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.d_opt_criterion" title="Link to this definition"></a></dt>
 <dd><p>it is a PSD criterion, with exponential cone</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="pydex.core.designer.Designer.b_opt_criterion">
+<span class="sig-name descname"><span class="pre">b_opt_criterion</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">efforts</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.b_opt_criterion"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.b_opt_criterion" title="Link to this definition"></a></dt>
+<dd><p>Bracketing-optimal (b_opt) design – Chen, Paulavicius &amp; Adjiman
+(2018), AIChE J. 64:3944-3957, “An Optimization Framework to
+Combine Operable Space Maximization with Design of Experiments”.</p>
+<p>Combines two objectives, matched to the two things a regulator and
+a process engineer respectively care about in a pharmaceutical
+bracketing study:</p>
+<blockquote>
+<div><ol class="arabic simple">
+<li><p>INPUT-SPACE bracketing – D-optimality applied directly to
+the (scaled) input-factor values, i.e. an orthogonal,
+corner-seeking design in the process INPUTS (the classical
+“bracketing study”). NOT parameter-sensitivity-based –
+unrelated to d_opt_criterion / self.atomic_fims.</p></li>
+<li><p>OUTPUT-SPACE coverage – maximises the volume spanned by the
+candidates’ PREDICTED RESPONSES, so the design also explores
+the process OUTPUT space rather than mapping only a sliver
+of it (Chen et al.’s motivating example: two similarly
+input-orthogonal 4-point designs can cover 10% vs 63% of the
+achievable output space).</p></li>
+</ol>
+</div></blockquote>
+<p>The two are combined via weighted-sum scalarization (Eq. 24 in the
+paper); see design_experiment(output_weight=…).</p>
+<dl class="simple">
+<dt>Requirements, all different from every other criterion here:</dt><dd><ul class="simple">
+<li><p>Must be called with design_experiment(…, n_exp=&lt;int&gt;) –
+n_exp is a HARD requirement (exact subset selection), not just
+an apportion() target.</p></li>
+<li><p>designer.simulate_candidates() must be called first, to
+populate self.response (the criterion needs predicted outputs,
+not sensitivities).</p></li>
+<li><p>No pseudo-Bayesian counterpart – raises if
+self.model_parameters is a scenario array.</p></li>
+<li><p>Static (non-dynamic) systems only, for now.</p></li>
+<li><p>apportion() is redundant afterward: the design produced is
+already exact and equal-weighted.</p></li>
+</ul>
+</dd>
+</dl>
+<p>Recommended solver: “bonmin”. See the docstring of
+_solve_pyomo_b_opt for why BARON is not the current default.</p>
 </dd></dl>
 
 <dl class="py method">

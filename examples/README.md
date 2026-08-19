@@ -154,7 +154,112 @@ fine, more draws would help" range rather than fully converged. The
 draw/tune/chain/core counts are constants at the top of that section if you
 want tighter diagnostics at the cost of runtime.
 
-## ASL elimination — `examples/ASL Elimination/`
+## Bracketing-optimal design — `examples/b_optimal/`
+
+Worked scenarios for `b_opt_criterion`, which implements the
+bracketing-optimal design of Chen, Paulavičius, Adjiman & García-Muñoz
+(2018), *AIChE J.* 64(11):3944–3957, doi:10.1002/aic.16214. This criterion
+answers a different question from the rest of pydex: **not** "which
+experiments best determine my parameters" but "which experiments best
+bracket my operating space" — the regulator's question in a pharmaceutical
+bracketing study. It is not sensitivity-based and has nothing to do with
+the FIM.
+
+Two objectives are combined by weighted sum, controlled by `output_weight`:
+
+- **input-space bracketing** (`output_weight=0`) — D-optimality applied to
+  the scaled input-factor values themselves, giving an orthogonal,
+  corner-seeking design in the process inputs;
+- **output-space coverage** (`output_weight=1`) — maximise the volume
+  spanned by the candidates' predicted responses, so the design maps the
+  output space rather than a sliver of it.
+
+The problem is posed as binary subset selection over a pre-evaluated
+candidate pool, so it needs an MINLP solver (`solver="bonmin"`) and an exact
+design size (`n_exp`).
+
+**Two usage requirements, both of which raise rather than fail quietly:**
+
+- **`simulate_candidates()` must be called first.** b_opt is the only
+  criterion that reads `designer.response`, so forgetting this is a new
+  mistake; it raises `RuntimeError`.
+- **`n_exp >= max(phi, n_resp + 2)`**, where `phi` is the number of input
+  factors. Both Cholesky lifts floor their diagonal at `1e-8`, so a
+  rank-deficient matrix cannot be represented and the program becomes
+  strictly infeasible — and an MINLP solver does not report infeasibility
+  quickly, it appears to hang. Hence the up-front `ValueError`.
+
+  The output term is the subtle one. Its covariance is *centered*, so its
+  rank is at most `n_exp - 1`, which makes the algebraic bound
+  `n_exp >= n_resp + 1`. That is not sufficient in practice: at exactly that
+  value the covariance is full rank with no margin above the Cholesky floor,
+  and the solver reports infeasible whenever the output term carries weight.
+  The implemented bound is therefore `n_resp + 2`, which is why
+  `scenario_1`'s design-size sweep starts at 4 rather than 3.
+
+- **A failed solve raises rather than returning a design.** If the MINLP
+  comes back `infeasible`, `unbounded` or `error`, `design_experiment()`
+  raises `RuntimeError`; the returned selection is also validated against
+  `n_exp` independently of what the solver reported. Time- or
+  iteration-limited solves still return their incumbent, but warn that it is
+  not a proven optimum, and record `designer._b_opt_termination` and
+  `designer._b_opt_proven_optimal` so a caller can tell the two apart.
+
+Scenarios:
+
+- `scenario_1_film_coating.py` + `film_coating_model.py` — the paper's
+  motivating example, a tablet film coater: 3 inputs (inlet air
+  temperature, coating-solution flow, air flow) to 2 outputs (exhaust
+  temperature, exhaust %RH). Reproduces the paper's Table 1 and Figures
+  2–5, including the Pareto front swept over `output_weight` and the
+  Pareto-front family as design size grows. The coater model is a
+  physically grounded thermodynamic model, **not** the paper's own
+  Supporting-Information equations, so trends and figure structure match
+  while absolute numbers do not.
+- `scenario_2_cstr.py` + `cstr_model.py` — the paper's second case study,
+  two CSTRs in series: 6 inputs to 3 outputs, reproducing Figures 8 and 9.
+  The kinetic and energy model is transcribed from the authors' own GAMS
+  source, so this one does carry the paper's actual numbers.
+- `scenario_3_suzuki.py` + `suzuki_model.py` — a Suzuki–Miyaura coupling,
+  **not** from the paper: 5 inputs to 3 critical quality attributes, with
+  real process constraints. This is the practitioner-oriented walkthrough
+  and the one that verifies the machinery: Part A cross-checks the design
+  against **exhaustive enumeration** of all 658,008 five-point subsets and
+  reports the gap; Part B covers choosing a design size; Part C exercises
+  the anti-clustering control; Part D exercises the guards. The kinetics
+  are representative of a realistic system rather than fitted to a
+  substrate.
+
+### Running these
+
+Each script can be run from any working directory — the model modules are
+imported relative to the script's own location:
+
+```
+python examples/b_optimal/scenario_1_film_coating.py
+```
+
+**Figures are written to the working directory** (`OUT_DIR = "."`), so you
+choose where they land by choosing where you run from. Deliberately not
+pinned to the script directory, which would drop generated PNGs inside the
+repository — `publications/` already carries 59 MB of those, and that is not
+worth repeating. Don't commit the output.
+
+`scenario_1` runs in a couple of minutes and `scenario_2` in about three.
+`scenario_3` is the slow one: its Part A exhaustive enumeration alone is
+several minutes, and Parts B/C cap each solve with
+`solver_options={"bonmin.time_limit": 90}`. **A capped solve returns
+bonmin's best incumbent, not a proven optimum**, so treat individual rows in
+those tables as indicative — the pure-input instances (`output_weight=0`)
+are by far the hardest and are the ones that hit the cap. Part A runs
+uncapped, which is why it is the one place global optimality is claimed, and
+it is checked by enumeration rather than asserted.
+
+Note also that bonmin gives no global-optimality guarantee for nonconvex
+MINLP. Its record on these instances is perfect — four independent
+brute-force cross-checks agreeing exactly — but that is empirical evidence
+for these problems, not a proof.
+
 
 - `asl_elimination_demo.py` — demonstrates the diagnostic in
   `pydex.utils.diagnose_asl_elimination`, which checks that every parameter

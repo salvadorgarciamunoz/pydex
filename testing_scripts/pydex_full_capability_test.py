@@ -75,6 +75,8 @@ Capabilities exercised (in order)
  51.  vdi_criterion on the goal-oriented grid  (records a known gap)
  52.  Criteria on BOTH sensitivity paths — filling the empty cells
  53.  STATIC model with MULTIPLE responses
+ 54.  run_estimability — FD and exact IFT vs an ANALYTIC reference
+ 55.  b_opt_criterion (bracketing-optimal) vs EXHAUSTIVE enumeration
 
 Runner behaviour
 ----------------
@@ -4462,6 +4464,442 @@ def test_53_static_multi_response():
     ok(f"pseudo-Bayesian type 0, static multi-response: {v0:.8f}")
 
 
+# ==========================================================================
+# Section 54 helpers — an over-parameterised first-order decay whose
+# redundancy is EXACT and known on paper.
+#
+#     A(t) = exp(p1 + p2) * exp(-k*t),   parameters (k, p1, p2)
+#
+# p1 and p2 enter ONLY as a sum, so the closed-form sensitivities are
+#
+#     dA/dk = -t*A        dA/dp1 = A        dA/dp2 = A
+#
+# dA/dp1 and dA/dp2 are IDENTICAL. Hence, on paper and not by reference to
+# any previous run: correlation(p1, p2) = +1 exactly, the FIM has rank 2 of
+# 3, and there is exactly one null direction. That makes every expected
+# estimability outcome derivable rather than recorded, which is the point —
+# run_estimability() is the capability with the most documentation
+# promising specific behaviour and (before this section) no guard at all.
+#
+# It also makes one thing PROVABLE that case_3 only suggests: because the
+# two columns are analytically equal, the choice of WHICH member of the
+# pair gets flagged is decided by floating-point noise alone. The
+# assertions below therefore check the SET, never the member. A test that
+# pinned the member would fail on a different BLAS.
+# ==========================================================================
+
+_S54_K, _S54_P1, _S54_P2 = 0.7, 0.4, -0.1
+_S54_THETA = np.array([_S54_K, _S54_P1, _S54_P2])
+_S54_NAMES = ["k", "p1", "p2"]
+_S54_TF = np.array([[0.5], [1.0], [1.5], [2.0], [3.0]])
+
+
+def _s54_simulate(ti_controls, model_parameters):
+    """Static signature — t_f is a CONTROL, not a sampling time (as in 20/24)."""
+    k, p1, p2 = (float(v) for v in model_parameters)
+    return np.array([np.exp(p1 + p2) * np.exp(-k * float(ti_controls[0]))])
+
+
+def _s54_simulate_reduced(ti_controls, model_parameters):
+    """p2 held at nominal; estimate (k, p1) only."""
+    k, p1 = (float(v) for v in model_parameters)
+    return _s54_simulate(ti_controls, [k, p1, _S54_P2])
+
+
+def _s54_analytic_sens():
+    """Closed-form sensitivity array, shape (n_c, n_spt, n_m_r, n_mp)."""
+    S = np.zeros((len(_S54_TF), 1, 1, 3))
+    for i, tf in enumerate(_S54_TF[:, 0]):
+        A = np.exp(_S54_P1 + _S54_P2) * np.exp(-_S54_K * tf)
+        S[i, 0, 0, :] = [-tf * A, A, A]
+    return S
+
+
+def _s54_build_pyomo(ti_controls, model_parameters, sampling_times=None,
+                     nfe=20, ncp=3):
+    """Collocation model for the IFT path, per the pydex IFT contract."""
+    k, p1, p2 = (float(v) for v in model_parameters)
+    tf = float(ti_controls[0])
+    m = pyo.ConcreteModel()
+    m.t = dae.ContinuousSet(initialize=np.linspace(0.0, tf, nfe + 1).tolist())
+    m.k = pyo.Var(initialize=k);   m.k.fix(k)
+    m.p1 = pyo.Var(initialize=p1); m.p1.fix(p1)
+    m.p2 = pyo.Var(initialize=p2); m.p2.fix(p2)
+    m.A = pyo.Var(m.t, initialize=np.exp(p1 + p2))
+    m.dAdt = dae.DerivativeVar(m.A, withrespectto=m.t)
+
+    @m.Constraint(m.t)
+    def ode(m, t):
+        return m.dAdt[t] == -m.k * m.A[t]
+
+    # The initial condition MUST be an equality Constraint, not a fixed Var:
+    # Pyomo's presolve drops a fixed Var from the ASL primal vector and the
+    # IFT column matching then silently returns the wrong sensitivities.
+    @m.Constraint()
+    def ic(m):
+        return m.A[0.0] == pyo.exp(m.p1 + m.p2)
+
+    m.obj = pyo.Objective(expr=0.0)
+    pyo.TransformationFactory("dae.collocation").apply_to(
+        m, nfe=nfe, ncp=ncp, scheme="LAGRANGE-RADAU")
+    slv = pyo.SolverFactory("ipopt")
+    slv.options["print_level"] = 0
+    slv.options["tol"] = 1e-12
+    res = slv.solve(m, tee=False)
+    if res.solver.termination_condition != pyo.TerminationCondition.optimal:
+        raise RuntimeError(f"IPOPT did not converge for t_f={tf}")
+
+    t_sorted_full = sorted(m.t)
+    t_sorted = ([t_sorted_full[-1]] if not sampling_times else
+                sorted(set(min(t_sorted_full, key=lambda x: abs(x - float(v)))
+                           for v in sampling_times)))
+    all_vars = ([m.k, m.p1, m.p2]
+                + [m.A[t] for t in t_sorted_full]
+                + [m.dAdt[t] for t in t_sorted_full])
+    all_bodies = []
+    for con in m.component_objects(pyo.Constraint, active=True):
+        for idx in con:
+            c = con[idx]
+            if c.equality:
+                all_bodies.append(c.body - c.upper)
+    return m, all_vars, all_bodies, t_sorted
+
+
+def _s54_designer(use_ift, reduced=False):
+    d = Designer()
+    d.simulate = _s54_simulate_reduced if reduced else _s54_simulate
+    if use_ift and not reduced:
+        d.pyomo_model_fn = _s54_build_pyomo
+    d.model_parameters = (np.array([_S54_K, _S54_P1]) if reduced
+                          else _S54_THETA.copy())
+    d.model_parameter_names = ["k", "p1"] if reduced else list(_S54_NAMES)
+    d.ti_controls_candidates = _S54_TF
+    d._norm_sens_by_params = False      # compare RAW sensitivities to closed form
+    d.n_jobs = 1
+    d.error_cov = np.eye(1)
+    d.initialize(verbose=0)
+    return d
+
+
+def test_54_estimability_fd_vs_ift_vs_analytic():
+    section("54 — run_estimability: FD and exact IFT against an ANALYTIC reference")
+
+    if not _PYOMO_AVAILABLE:
+        ok("SKIPPED — Pyomo not available")
+        return
+
+    REF = _s54_analytic_sens()
+    assert np.array_equal(REF[..., 1], REF[..., 2]), \
+        "fixture broken: dA/dp1 and dA/dp2 must be bit-identical"
+    ok("fixture: dA/dp1 and dA/dp2 are analytically identical (rank 2 of 3 by construction)")
+
+    results = {}
+    for tag, use_ift in (("FD", False), ("IFT", True)):
+        d = _s54_designer(use_ift)
+        # NO base_step override on purpose. Every other section that reaches
+        # a finite-difference step passes an explicit one, which would hide a
+        # broken DEFAULT indefinitely. The default per-parameter step is
+        # exactly what this section exists to guard.
+        d.eval_sensitivities(save_sensitivities=False)
+        S = np.asarray(d.sensitivities)
+        assert S.shape == REF.shape, f"{tag}: shape {S.shape} != {REF.shape}"
+        rel = np.max(np.abs(S - REF)) / np.max(np.abs(REF))
+        ok(f"{tag} sensitivities vs CLOSED FORM: max rel diff {rel:.3e}")
+        assert rel < 1e-6, f"{tag} sensitivities disagree with the closed form: {rel:.3e}"
+
+        d.eval_fim(np.ones(d.n_c * d.n_spt) / (d.n_c * d.n_spt))
+        diag = d.diagnose_fim_structure(report=False)
+        assert diag["rank"] == 2 and diag["n_mp"] == 3, \
+            f"{tag}: expected rank 2 of 3, got {diag['rank']} of {diag['n_mp']}"
+        assert diag["singular"], f"{tag}: exact invariance must be reported singular"
+        assert set(diag["culprits"]) == {"p1", "p2"}, \
+            f"{tag}: culprits should be the redundant pair, got {diag['culprits']}"
+        ok(f"{tag} diagnose_fim_structure: rank 2 of 3, culprits {sorted(diag['culprits'])}")
+
+        est = d.run_estimability(plot=False, report=False)
+        tab = est["table"]
+        order = tab["parameter"].tolist()
+        Evals = np.asarray(tab["E"], dtype=float)
+        flagged = tab.loc[tab["unresolvable"], "parameter"].tolist()
+
+        assert order[0] == "k", f"{tag}: k must rank first, got {order}"
+        assert set(order[1:]) == {"p1", "p2"}, f"{tag}: unexpected ranking {order}"
+        # WHICH member of the identical pair is flagged is decided by
+        # floating-point noise, so assert the set and the count only.
+        assert len(flagged) == 1, f"{tag}: expected exactly 1 flagged, got {flagged}"
+        assert flagged[0] in ("p1", "p2"), f"{tag}: wrong parameter flagged: {flagged}"
+        assert Evals[-1] < est["tol"], \
+            f"{tag}: redundant direction E={Evals[-1]:.3e} not below tol {est['tol']:.0e}"
+        assert len(est["groups"]) == 1 and set(est["groups"][0]) == {"p1", "p2"}, \
+            f"{tag}: expected one correlation group {{p1,p2}}, got {est['groups']}"
+        ok(f"{tag} estimability: ranked {order}, flagged {flagged}, "
+           f"E_min {Evals[-1]:.3e} < tol {est['tol']:.0e}")
+
+        results[tag] = dict(E=Evals, tol=est["tol"], flagged=flagged)
+
+    # The inferred resolution floor is a documented promise about the METHOD,
+    # and the two examples in examples/ now depend on it. Guard it explicitly:
+    # a silent change here would invalidate case_3.py and case_3_ift.py at once.
+    assert abs(results["FD"]["tol"] - 1e-3) < 1e-15, \
+        f"FD floor should be 1e-3, got {results['FD']['tol']:.0e}"
+    assert abs(results["IFT"]["tol"] - 1e-7) < 1e-15, \
+        f"IFT floor should be 1e-7, got {results['IFT']['tol']:.0e}"
+    ok("inferred E-index floor: 1e-03 for finite differences, 1e-07 for exact IFT")
+
+    # The two well-determined parameters are NOT tied, so their indices must
+    # agree across paths even though the tied pair's ordering need not.
+    assert abs(results["FD"]["E"][1] - results["IFT"]["E"][1]) < 1e-6, \
+        (f"E of the second-ranked parameter differs across paths: "
+         f"{results['FD']['E'][1]:.6f} vs {results['IFT']['E'][1]:.6f}")
+    ok(f"non-degenerate E agrees across paths ({results['FD']['E'][1]:.4f} "
+       f"vs {results['IFT']['E'][1]:.4f})")
+
+    # The two paths may name DIFFERENT members of the identical pair. That is
+    # a convention, not a contradiction, and it is the miniature of the
+    # FD/IFT disagreement documented in case_3.py vs case_3_ift.py.
+    if results["FD"]["flagged"] != results["IFT"]["flagged"]:
+        ok(f"paths flag different members of the tied pair "
+           f"({results['FD']['flagged']} vs {results['IFT']['flagged']}) — "
+           f"a convention, since the two columns are analytically equal")
+    else:
+        ok(f"both paths flag {results['FD']['flagged']} (also acceptable — "
+           f"the tie may break either way)")
+
+    # ---- fixing one member must clear the deficiency entirely -------------
+    d_red = _s54_designer(use_ift=False, reduced=True)
+    d_red.eval_sensitivities(save_sensitivities=False)
+    d_red.eval_fim(np.ones(d_red.n_c * d_red.n_spt) / (d_red.n_c * d_red.n_spt))
+    diag_red = d_red.diagnose_fim_structure(report=False)
+    assert diag_red["rank"] == 2 and diag_red["n_mp"] == 2, \
+        f"reduced FIM should be rank 2 of 2, got {diag_red['rank']} of {diag_red['n_mp']}"
+    assert not diag_red["singular"], "reduced FIM must not be singular"
+    est_red = d_red.run_estimability(plot=False, report=False)
+    assert not est_red["table"]["unresolvable"].any(), \
+        "no parameter should be flagged once the redundancy is removed"
+    assert est_red["groups"] == [] or all(
+        len(g) < 2 for g in est_red["groups"]), \
+        f"no correlation group should survive, got {est_red['groups']}"
+    ok("fixing one member of the pair: rank 2 of 2, nothing flagged, no groups")
+
+
+# ==========================================================================
+# Section 55 helpers — bracketing-optimal design on a pool small enough to
+# verify by EXHAUSTIVE ENUMERATION inside the test.
+#
+# The pool is 10 candidates and the design size is 4, so C(10,4) = 210
+# subsets: brute force runs in milliseconds and the section can assert that
+# bonmin returned the true global optimum rather than merely a good design.
+# That is the strongest verification available for a nonconvex MINLP, and it
+# is the reason the pool is small — b_opt is NP-hard in general and bonmin
+# offers no global-optimality guarantee, so "agrees with the optimum" has to
+# be demonstrated on an instance where the optimum is computable.
+#
+# The candidate coordinates are HARD-CODED rather than sampled. A seeded RNG
+# would also be reproducible, but hard-coding removes any dependence on
+# numpy's generator behaviour and makes the fixture readable.
+#
+# The response map is deliberately NONLINEAR (a quadratic and an exponential)
+# so that the input-optimal and output-optimal designs genuinely differ. On a
+# linear map the two objectives would tend to agree and the section would
+# pass while testing almost nothing.
+#
+# Note n_exp = 4, not 3: with n_resp = 2 the implemented bound is
+# max(phi, n_resp + 2) = 4. At n_exp = 3 the centered output covariance has
+# no rank margin above the Cholesky floor and the solver reports the problem
+# infeasible — see the guard in _solve_pyomo_b_opt.
+# ==========================================================================
+
+_S55_TIC = np.array([
+    [0.05, 0.10], [0.20, 0.85], [0.35, 0.40], [0.50, 0.05], [0.60, 0.95],
+    [0.70, 0.30], [0.80, 0.70], [0.90, 0.15], [0.95, 0.55], [0.15, 0.60],
+])
+_S55_N_EXP = 4
+
+
+def _s55_simulate(ti_controls, model_parameters):
+    """Two inputs to two responses; nonlinear so input- and output-optimal
+    designs differ. model_parameters is unused — b_opt is not
+    sensitivity-based and fits nothing."""
+    x1, x2 = (float(v) for v in ti_controls)
+    return np.array([x1 + 0.5 * x2 ** 2, np.exp(x1 * x2)])
+
+
+def _s55_designer():
+    d = Designer()
+    d.simulate = _s55_simulate
+    d.model_parameters = np.array([1.0])
+    d.model_parameter_names = ["dummy"]
+    d.ti_controls_candidates = _S55_TIC
+    d.error_cov = np.eye(2)
+    d.initialize(verbose=0)
+    d.simulate_candidates()          # REQUIRED: b_opt reads designer.response
+    return d
+
+
+def _s55_reference(Y):
+    """Independent reimplementation of the two objective terms, from the
+    paper's definitions — NOT by calling back into pydex. Returns closures
+    over the scaled inputs and z-scored responses."""
+    lb, ub = _S55_TIC.min(axis=0), _S55_TIC.max(axis=0)
+    U = 2.0 * (_S55_TIC - lb) / (ub - lb) - 1.0        # inputs scaled to [-1, 1]
+    Yz = (Y - Y.mean(axis=0)) / Y.std(axis=0)          # responses z-scored
+
+    def fin_fout(idx):
+        idx = np.asarray(idx)
+        f_in = np.linalg.det(U[idx].T @ U[idx])
+        S = Yz[idx]
+        C = (S - S.mean(axis=0)).T @ (S - S.mean(axis=0)) / (len(idx) - 1)
+        return f_in, np.linalg.det(C)
+
+    def objective(idx, w):
+        f_in, f_out = fin_fout(idx)
+        if f_in <= 0 or f_out <= 0:
+            return -np.inf
+        return (1.0 - w) * np.log(f_in) + w * np.log(f_out)
+
+    return fin_fout, objective
+
+
+def test_55_b_opt_vs_exhaustive_enumeration():
+    section("55 — b_opt_criterion (bracketing-optimal) vs EXHAUSTIVE enumeration")
+
+    import itertools
+
+    if not _PYOMO_AVAILABLE:
+        ok("SKIPPED — Pyomo not available")
+        return
+    if not pyo.SolverFactory("bonmin").available(exception_flag=False):
+        ok("SKIPPED — bonmin not available (b_opt is an MINLP)")
+        return
+
+    d = _s55_designer()
+    N = d.n_c
+    Y = np.asarray(d.response, dtype=float).reshape(N, -1)
+    phi, n_resp = _S55_TIC.shape[1], Y.shape[1]
+    n_subsets = len(list(itertools.combinations(range(N), _S55_N_EXP)))
+    ok(f"pool: {N} candidates, phi={phi}, n_resp={n_resp}, n_exp={_S55_N_EXP} "
+       f"-> C({N},{_S55_N_EXP}) = {n_subsets} subsets to enumerate")
+    assert _S55_N_EXP >= max(phi, n_resp + 2), "fixture violates the n_exp bound"
+
+    fin_fout, objective = _s55_reference(Y)
+
+    def design(w):
+        d.design_experiment(d.b_opt_criterion, n_exp=_S55_N_EXP,
+                            solver="bonmin", output_weight=w,
+                            e0=np.ones((N, 1)) / N, verbose=0)
+        eff = np.asarray(d.efforts).ravel()
+        return sorted(np.where(eff > 1e-6)[0].tolist()), eff
+
+    def brute(w):
+        best, best_idx = -np.inf, None
+        for combo in itertools.combinations(range(N), _S55_N_EXP):
+            val = objective(combo, w)
+            if val > best:
+                best, best_idx = val, sorted(combo)
+        return best, best_idx
+
+    # ---- the two extremes and the balanced case, each against brute force --
+    # w=0 is pure input bracketing, w=1 pure output coverage. Both must
+    # recover the corresponding brute-force optimum EXACTLY, which is what
+    # establishes that the weighted sum is wired to the right two objectives.
+    designs = {}
+    for w in (0.0, 0.5, 1.0):
+        got, eff = design(w)
+        best_val, best_idx = brute(w)
+        gap = best_val - objective(got, w)
+        ok(f"output_weight={w}: bonmin {got}, brute force {best_idx}, "
+           f"gap {gap:+.3e}")
+        assert got == best_idx, \
+            f"w={w}: bonmin returned {got}, global optimum is {best_idx}"
+        assert abs(gap) < 1e-9, f"w={w}: objective gap {gap:.3e} is not zero"
+
+        # an exact design: n_exp candidates, each at equal effort, summing to 1
+        assert len(got) == _S55_N_EXP, \
+            f"w={w}: {len(got)} candidates selected, expected {_S55_N_EXP}"
+        assert np.allclose(eff[eff > 1e-6], 1.0 / _S55_N_EXP, atol=1e-6), \
+            f"w={w}: efforts are not equal-weighted: {eff[eff > 1e-6]}"
+        assert abs(eff.sum() - 1.0) < 1e-6, f"w={w}: efforts sum to {eff.sum()}"
+        designs[w] = got
+
+    # ---- the criterion must actually respond to the weight ----------------
+    # Without this the three assertions above could all pass on a criterion
+    # that ignored output_weight entirely.
+    assert designs[0.0] != designs[1.0], \
+        (f"pure-input and pure-output designs are identical ({designs[0.0]}); "
+         f"the fixture is not discriminating and the section proves nothing")
+    ok(f"the extremes select different designs: input-only {designs[0.0]} "
+       f"vs output-only {designs[1.0]}")
+
+    # ---- solver status must be reported, not assumed ----------------------
+    # These instances are small enough that bonmin closes the gap, so the
+    # status must be 'optimal' rather than a limit. A design taken from a
+    # capped or failed solve is not comparable with a proven optimum, and
+    # conflating the two is how a solver artefact gets read as a result.
+    assert d._b_opt_termination == "optimal", \
+        f"expected termination 'optimal', got {d._b_opt_termination!r}"
+    assert d._b_opt_proven_optimal is True, "proven-optimal flag not set"
+    ok(f"solver termination recorded: {d._b_opt_termination} "
+       f"(proven optimal: {d._b_opt_proven_optimal})")
+
+    # ---- convenience state -------------------------------------------------
+    assert sorted(np.asarray(d._b_opt_selected_idx).tolist()) == designs[1.0], \
+        "_b_opt_selected_idx disagrees with the effort vector"
+    assert d._b_opt_apportion_redundant is True, \
+        "apportion-redundancy flag should be set after a b_opt solve"
+    ok("_b_opt_selected_idx matches the efforts; apportion flagged redundant")
+
+    # ---- the weight sweep must trade the two objectives monotonically -----
+    # Over a FIXED finite candidate set a weighted-sum sweep can only move
+    # along the upper-right boundary of the convex hull of achievable
+    # (f_in, f_out) pairs, so raising w must never increase f_in nor decrease
+    # f_out. Ties are expected — several weights map to the same design.
+    prev_in, prev_out = None, None
+    sweep = []
+    for w in (0.0, 0.25, 0.5, 0.75, 1.0):
+        got, _ = design(w)
+        f_in, f_out = fin_fout(got)
+        sweep.append((w, got, f_in, f_out))
+        if prev_in is not None:
+            assert f_in <= prev_in + 1e-9, \
+                (f"f_in increased with output_weight ({prev_in:.6f} -> "
+                 f"{f_in:.6f} at w={w}): the sweep is not monotone")
+            assert f_out >= prev_out - 1e-9, \
+                (f"f_out decreased with output_weight ({prev_out:.6e} -> "
+                 f"{f_out:.6e} at w={w}): the sweep is not monotone")
+        prev_in, prev_out = f_in, f_out
+    ok("weight sweep is monotone: f_in non-increasing, f_out non-decreasing")
+    for w, got, f_in, f_out in sweep:
+        ok(f"  w={w:4.2f}  design={got}  f_in={f_in:.5f}  f_out={f_out:.5e}")
+
+    # ---- no point on the sweep is dominated -------------------------------
+    pts = [(f_in, f_out) for _, _, f_in, f_out in sweep]
+    for i, (a_in, a_out) in enumerate(pts):
+        for j, (b_in, b_out) in enumerate(pts):
+            if i == j:
+                continue
+            assert not (b_in > a_in + 1e-9 and b_out > a_out + 1e-9), \
+                f"sweep point {i} is dominated by point {j}"
+    ok("no sweep point is dominated by another")
+
+    # ---- the n_exp rank bound is enforced ---------------------------------
+    # n_exp=3 satisfies the algebraic bound (n_resp+1) but not the implemented
+    # one; below it the program is strictly infeasible and the solver does not
+    # say so quickly. Guarding it here as well as in tests/ ties the two
+    # together: the capability suite is where the solver actually runs, so
+    # this is the only place the *reason* for the bound is exercised.
+    try:
+        d.design_experiment(d.b_opt_criterion, n_exp=n_resp + 1,
+                            solver="bonmin", output_weight=0.5,
+                            e0=np.ones((N, 1)) / N, verbose=0)
+        raise AssertionError(
+            f"n_exp={n_resp + 1} should have been rejected (bound is "
+            f"{max(phi, n_resp + 2)})")
+    except ValueError as exc:
+        assert "too small" in str(exc), f"unexpected ValueError: {exc}"
+        ok(f"n_exp={n_resp + 1} rejected up front "
+           f"(bound is max(phi, n_resp+2) = {max(phi, n_resp + 2)})")
+
+
 # =============================================================================
 #  R U N N E R
 # =============================================================================
@@ -4592,6 +5030,12 @@ if __name__ == "__main__":
     run(test_51_vdi_criterion)
     run(test_52_criterion_sensitivity_path_matrix)
     run(test_53_static_multi_response)
+
+    # ── estimability regression (was the largest documented-but-unguarded gap)
+    run(test_54_estimability_fd_vs_ift_vs_analytic)
+
+    # ── bracketing-optimal design (new criterion, verified by enumeration)
+    run(test_55_b_opt_vs_exhaustive_enumeration)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print_pyomo_noise_summary()

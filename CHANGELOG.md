@@ -5,6 +5,225 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-19
+
+### Added
+
+- **`b_opt_criterion` — bracketing-optimal design**, implementing Chen,
+  Paulavičius, Adjiman & García-Muñoz (2018), *AIChE J.* 64(11):3944–3957,
+  doi:10.1002/aic.16214. This answers a different question from every other
+  criterion in pydex: not "which experiments best determine my parameters"
+  but "which experiments best bracket my operating space" — the regulator's
+  question in a pharmaceutical bracketing study. It is not
+  sensitivity-based and does not involve the Fisher information matrix at
+  all. Two objectives are combined by weighted-sum scalarisation (the
+  paper's Eq. 24), selected with `output_weight`: input-space bracketing
+  (D-optimality applied to the scaled input-factor values, giving an
+  orthogonal corner-seeking design) at `0`, and output-space coverage
+  (maximising the volume spanned by the candidates' predicted responses) at
+  `1`.
+
+  Where the paper solves a continuous multiobjective/bilevel NLP, this is
+  posed as **binary subset selection over a pre-evaluated candidate pool**:
+  the process model is evaluated once per candidate offline, and the MINLP
+  contains only a cardinality constraint, two Cholesky lifts and the
+  objective — no process model at all. Both log-determinants are lifted
+  through Cholesky factors (`M = LLᵀ`, `log det M = 2 Σ log L_jj`), reusing
+  the existing `is_d` pattern, so every monomial is bilinear. An earlier
+  LDL-with-division formulation produced trilinear monomials, which have
+  weaker relaxation envelopes.
+
+  Requires an MINLP solver (`solver="bonmin"`), an exact design size
+  (`n_exp`), and `simulate_candidates()` beforehand — b_opt is the only
+  criterion that reads `designer.response`.
+
+  The criterion is isolated by construction: `is_b = 'b_opt' in crit_name`
+  is collision-free against all 36 existing criterion names, and an early
+  return in `_solve_pyomo` dispatches to a dedicated `_solve_pyomo_b_opt`
+  ahead of the atomic-FIM computation, the structural-singularity gate and
+  the Ds feasibility pre-check, none of which are meaningful here.
+  `is_native` and `use_minlp` are unmodified and the `min_effort` sparsity
+  constraints are unmoved; only two lines change outside the new code —
+  `design_experiment`'s signature and its dispatch call.
+
+- **Two guards on `b_opt_criterion`, both measured rather than derived.**
+
+  `n_exp >= max(phi, n_resp + 2)`, where `phi` is the number of input
+  factors. Both Cholesky lifts are built unconditionally, whatever
+  `output_weight` is, and both floor their diagonal at `1e-8`; since
+  `M == L Lᵀ` with every `L[j,j] >= 1e-8` forces
+  `det(M) >= 1e-8**(2*dim)`, a rank-deficient `M` cannot be represented and
+  the program is strictly infeasible. The output covariance is *centered*,
+  so its rank is at most `n_exp - 1` and the algebraic bound is
+  `n_resp + 1` — but that proves insufficient in practice: at exactly that
+  value the covariance is full rank with no margin above the floor, and
+  bonmin reports the problem infeasible whenever the output term carries
+  weight. Measured on a 10-candidate `phi=2`/`n_resp=2` pool: `n_exp=3`
+  infeasible at `output_weight >= 0.5`, `n_exp=4` solving at once.
+
+  The check is up front rather than left to the solver because proving
+  infeasibility of a nonconvex MINLP is the expensive direction. On a
+  70-candidate `phi=6` pool, `n_exp=5` ran for over 17 minutes of bonmin CPU
+  without terminating, while `n_exp=6` solved in seconds — so without the
+  guard, a mistyped `n_exp` costs an unbounded hang and prints no diagnosis.
+
+  A **failed solve no longer yields a design**. When bonmin returns
+  `infeasible`, `pyo.value(m.b[i])` evaluates to 1.0 for every candidate, so
+  the previous warn-and-continue produced a "design" selecting the entire
+  pool at effort `1/n_exp` each — breaching the cardinality constraint, with
+  efforts summing to `n_c/n_exp` rather than 1 — behind nothing but a
+  printed warning. Hard terminations (`infeasible`, `unbounded`, `error`)
+  now raise `RuntimeError` before any extraction, and the returned selection
+  is validated against `n_exp` and for binariness independently of what the
+  solver reported. Solves stopping at a time or iteration limit still return
+  their incumbent, but say so, and record `_b_opt_termination` and
+  `_b_opt_proven_optimal` so a caller can tell an incumbent from a proven
+  optimum.
+
+- **`tests/test_b_opt_guards.py`** — 23 solver-free argument-validation
+  tests, so CI covers the b_opt guards on py3.9/3.11/3.12. The `tests/`
+  total goes 26 → 51. The behaviour tests need an MINLP solver and live in
+  the capability suite, which CI does not run; splitting them this way means
+  a brand-new criterion is not left with documentation promising specific
+  behaviour and no automatic guard.
+
+- **Capability suite section 55** — `b_opt_criterion` verified against
+  **exhaustive enumeration**. On a 10-candidate pool at `n_exp=4`, all
+  C(10,4)=210 subsets are enumerated in-process and bonmin's design is
+  asserted to be the true global optimum, not merely a good one: exact
+  agreement at `output_weight` 0.0, 0.5 and 1.0 with objective gap
+  `0.000e+00`. Also asserts that the two extremes select *different*
+  designs (without which the section would pass on a criterion that ignored
+  `output_weight`), that efforts are exactly `1/n_exp` and sum to 1, that
+  the weight sweep is monotone in both objectives with no dominated point,
+  and that the `n_exp` bound is enforced.
+
+- **Capability suite section 54** — `run_estimability` regression on both
+  sensitivity paths against an **analytic reference**, closing the gap
+  recorded under Known issues in 0.2.0. The fixture is an over-parameterised
+  first-order decay, `A(t) = exp(p1 + p2) * exp(-k*t)`, in which `p1` and
+  `p2` enter only as a sum: the closed-form sensitivities `dA/dp1` and
+  `dA/dp2` are therefore *identical*, so correlation `+1`, FIM rank exactly
+  2 of 3 and one null direction are all known on paper rather than recorded
+  from a previous run. Finite differences agree with the closed form to
+  `1.8e-12` and exact IFT to `3.5e-09`; both find rank 2 of 3 with the
+  redundant pair as culprits, and the documented E-index floors (`1e-3` for
+  finite differences, `1e-7` for IFT) are pinned explicitly, since
+  `examples/ode/case_3.py` and `case_3_ift.py` both now depend on them.
+
+  Because the two columns are analytically equal, *which* member of the pair
+  gets flagged is decided by floating-point noise — and the two paths do
+  disagree, which is the `case_3` FD-versus-IFT disagreement in miniature
+  and provably a convention rather than a contradiction. The section
+  therefore asserts the set and the count, never the member.
+
+  The section passes **no** `base_step` override, so the default
+  per-parameter finite-difference step introduced in 0.3.0 is what is
+  tested; run with the pre-0.3.0 flat `base_step=2` the same fixture returns
+  `2.3e-03` and fails. Every other section reaching a finite-difference step
+  passes an explicit one, which would have masked a broken default
+  indefinitely.
+
+  Suite totals: 261 → 287 assertions across 57 sections. The absorbed-noise
+  fingerprint is unchanged at 865 + 1.
+
+- **`examples/b_optimal/`** — three worked scenarios. `scenario_1` and
+  `scenario_2` reproduce the paper's film-coating and two-CSTR case studies
+  (Table 1 and Figures 2–5, and Figures 8–9 respectively); `scenario_3`
+  applies the criterion to a Suzuki–Miyaura coupling not from the paper and
+  cross-checks its design against exhaustive enumeration of all 658,008
+  five-point subsets. Model fidelity differs and is stated in each file: the
+  CSTR model is transcribed from the GAMS source published with the paper
+  and carries its actual numbers, whereas the coater model is an independent
+  thermodynamic model rather than the paper's Supporting-Information
+  equations, and the Suzuki kinetics are representative rather than fitted.
+
+- **`examples/ode/case_3.py` gained the estimability workflow** already
+  present in `case_3_ift.py` (previously un-versioned, on `main` since
+  `f68a635`): estimability on all nine parameters, fix the two flagged
+  unresolvable, estimability again on the reduced seven, then design. With
+  all nine free `design_experiment()` refuses the model, since the rate law
+  has an exact invariance — adding a constant to every `theta_i0` at once,
+  or to every `theta_i1`, leaves every prediction unchanged. The point of
+  the finite-difference version is that estimability analysis needs no
+  tractable model: `run_estimability()` reads the sensitivity matrix and is
+  indifferent to its provenance. Reference criterion values for the
+  seven-parameter form are `69.59152865937244` (fixed sampling times) and
+  `55.96287449735705` (5 of 11 times optimised).
+
+### Known issues
+
+- **The weighted sum reaches only the convex-hull portion of the Pareto
+  frontier.** This is a real limit on what a user can ask for, and it is
+  measured rather than argued. Maximising
+  `(1-w)*log f_in + w*log f_out` is geometrically a straight line of slope
+  `-(1-w)/w` swept in from outside the achievable set, so the winner is
+  always a point on the convex hull of that set. A design that is genuinely
+  Pareto-efficient but sits slightly *inside* the hull — in a dent of the
+  frontier — is therefore optimal for **no weight at all** and cannot be
+  returned however finely `output_weight` is swept. Enumerated exhaustively
+  on the `scenario_1` coater pool (36 candidates, `n_exp=4`, all 58,905
+  subsets): 13 Pareto-efficient designs, of which **5 are reachable and 8 are
+  not**. The Pareto figures in `scenario_1` and `scenario_2` consequently
+  under-report the frontier, and a practitioner sweeping the weight is never
+  shown those designs.
+
+  The restriction is not purely a loss, which is why it is recorded here
+  rather than treated as a defect. A hull design is optimal over a *range* of
+  weights and is properly Pareto-optimal, with a bounded marginal trade-off
+  between bracketing and coverage; dent designs are optimal at knife-edge
+  preferences where that exchange rate can be arbitrarily extreme. The
+  monotone weight sweep asserted in capability-suite section 55 — `f_in`
+  non-increasing and `f_out` non-decreasing in `output_weight` — is a
+  *consequence* of traversing a convex hull over a fixed finite candidate
+  set, not an independent property, and it is what makes the sweep figures
+  legible. And `output_weight` has a clean reading as a marginal rate of
+  substitution, so "0.5 is the balanced compromise" is meaningful.
+
+  Two candidate completions, neither implemented:
+
+  The paper's own Tchebycheff / L∞ scalarisation (Eq. 27) minimises the worst
+  weighted shortfall from a reference point. Its level sets are right-angled
+  cones rather than straight lines, and a corner can reach into a dent that no
+  line can. Cheap here: one extra continuous variable and two linear
+  constraints over log-determinant expressions the model already builds, with
+  the reference point available free from the two single-objective solves any
+  sweep already performs. But the plain weighted form admits **weakly**
+  Pareto-optimal points, i.e. designs that are dominated — for a regulatory
+  bracketing study that is a worse failure than an unreachable design, so it
+  would need the augmented form (a small `rho * sum` term) to restore a
+  proper-efficiency guarantee. Note also that a Tchebycheff sweep carries no
+  monotonicity guarantee, so section 55's assertion would not transfer.
+
+  For this *discrete* formulation the better fit is probably the
+  epsilon-constraint method: maximise `log f_out` subject to
+  `log f_in >= epsilon`. It provably reaches every Pareto-efficient design
+  including those in dents, needs one extra linear constraint on an existing
+  expression, has no weak-Pareto pathology, and its parameter states a
+  requirement directly — "at least this much input bracketing" is much closer
+  to how a bracketing requirement is actually specified than a weight is.
+  Bounds on `epsilon` come from the same two single-objective solves.
+
+  The bilevel formulation of the paper's Eqs. 28-31 is likewise not
+  implemented.
+
+- **Bonmin offers no global-optimality guarantee** for nonconvex MINLP. Its
+  record on the instances tried here is perfect — five independent
+  brute-force cross-checks agreeing exactly, including section 55 — but that
+  is empirical evidence about those problems, not a proof.
+- **Cost grows sharply with the number of input factors.** The coater
+  (`phi=3`) solves in seconds; a `phi=6` reactor pool of 246 candidates took
+  minutes per solve, and the shipped scenario is scaled down accordingly.
+  This does not repeal the NP-hardness of cardinality-constrained subset
+  selection.
+- **The anti-clustering mechanism (`_b_opt_min_sep_frac`) is untested in
+  anger.** It generates precomputed linear mutual-exclusion constraints on
+  near-duplicate response candidates, the discrete analogue of the paper's
+  tuned log-barrier. In every case tried it generated zero constraints,
+  because the output term already separated the points. Selecting from a
+  fixed pre-filtered pool is plausibly immune to the pathology it exists to
+  fix rather than merely controlling it, but that is unverified.
+
 ## [0.3.0] - 2026-08-11
 
 ### Fixed

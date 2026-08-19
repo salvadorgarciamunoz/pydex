@@ -199,6 +199,130 @@ values, with r_hat typically landing around 1.01-1.04 — inside PyMC's own
 The draw/tune/chain/core counts are constants at the top of that section
 if tighter diagnostics are needed, at the cost of runtime.
 
+Bracketing-optimal design
+-------------------------
+
+``examples/b_optimal/``
+
+Worked scenarios for :meth:`~pydex.core.designer.Designer.b_opt_criterion`,
+which implements the bracketing-optimal design of Chen, Paulavičius, Adjiman
+and García-Muñoz (2018), *AIChE J.* 64(11):3944–3957,
+`doi:10.1002/aic.16214 <https://doi.org/10.1002/aic.16214>`_.
+
+This criterion answers a different question from every other criterion in
+pydex. Not "which experiments best determine my parameters", but "which
+experiments best bracket my operating space" — the regulator's question in a
+pharmaceutical bracketing study. It is not sensitivity-based and does not
+involve the Fisher information matrix at all. Two objectives are combined by
+weighted sum, selected with ``output_weight``:
+
+* **input-space bracketing** (``output_weight=0``) — D-optimality applied to
+  the scaled input-factor values themselves, giving an orthogonal,
+  corner-seeking design in the process inputs;
+* **output-space coverage** (``output_weight=1``) — maximise the volume
+  spanned by the candidates' predicted responses, so the design maps the
+  output space rather than a sliver of it.
+
+The problem is posed as binary subset selection over a pre-evaluated
+candidate pool, so it needs an MINLP solver (``solver="bonmin"``) and an
+exact design size (``n_exp``)::
+
+    designer.simulate_candidates()          # REQUIRED: b_opt reads responses
+    designer.design_experiment(
+        designer.b_opt_criterion,
+        n_exp         = 5,
+        output_weight = 0.5,
+        solver        = "bonmin",
+    )
+
+Two usage requirements are enforced up front, both raising rather than
+failing quietly:
+
+* :meth:`~pydex.core.designer.Designer.simulate_candidates` must be called
+  first. b_opt is the only criterion that reads
+  :attr:`~pydex.core.designer.Designer.response`, so omitting it raises
+  ``RuntimeError``.
+* ``n_exp >= max(phi, n_resp + 2)``, where ``phi`` is the number of input
+  factors. Both Cholesky lifts floor their diagonal at ``1e-8``, so a
+  rank-deficient matrix cannot be represented and the program becomes
+  strictly infeasible. An MINLP solver does not report infeasibility
+  quickly; it appears to hang. Hence the explicit ``ValueError``.
+
+  The output term is the subtle one. Its covariance is *centered*, so its
+  rank is at most ``n_exp - 1`` and the algebraic bound is
+  ``n_exp >= n_resp + 1``. That proves insufficient in practice: at exactly
+  that value the covariance is full rank with no margin above the Cholesky
+  floor, and the solver reports the problem infeasible whenever the output
+  term carries weight. The implemented bound is therefore ``n_resp + 2``,
+  which is why ``scenario_1``'s design-size sweep starts at four rather than
+  three.
+
+Failure handling is deliberately strict. If the MINLP terminates
+``infeasible``, ``unbounded`` or ``error``,
+:meth:`~pydex.core.designer.Designer.design_experiment` raises
+``RuntimeError`` rather than returning a design, and the returned selection
+is validated against ``n_exp`` independently of the reported status. Solves
+that stop at a time or iteration limit do return their incumbent, but warn
+that it is not a proven optimum and record it in
+``designer._b_opt_termination`` and ``designer._b_opt_proven_optimal``, so a
+caller can distinguish a proven optimum from a best-so-far.
+
+The scenarios:
+
+* ``scenario_1_film_coating.py`` with ``film_coating_model.py`` — the
+  paper's motivating example, a tablet film coater: three inputs (inlet air
+  temperature, coating-solution flow, air flow) to two outputs (exhaust
+  temperature and exhaust %RH). Reproduces the paper's Table 1 and Figures
+  2 to 5, including the Pareto front swept over ``output_weight`` and the
+  Pareto-front family as the design size grows. The coater model is a
+  physically grounded thermodynamic model rather than the paper's own
+  Supporting-Information equations, so the trends and figure structure
+  correspond while the absolute numbers do not.
+* ``scenario_2_cstr.py`` with ``cstr_model.py`` — the paper's second case
+  study, two CSTRs in series: six inputs to three outputs, reproducing
+  Figures 8 and 9. The kinetic and energy model is transcribed from the
+  authors' own GAMS source, so this scenario does carry the paper's actual
+  numbers.
+* ``scenario_3_suzuki.py`` with ``suzuki_model.py`` — a Suzuki-Miyaura
+  coupling, **not** from the paper: five inputs to three critical quality
+  attributes under real process constraints. This is the practitioner-facing
+  walkthrough and the one that verifies the machinery. Part A cross-checks
+  the returned design against **exhaustive enumeration** of all 658,008
+  five-point subsets and prints the gap; Part B covers choosing a design
+  size; Part C exercises the anti-clustering control; Part D exercises the
+  guards. The kinetics are representative of a realistic system rather than
+  fitted to a particular substrate.
+
+Running them
+^^^^^^^^^^^^
+
+Each script may be run from any working directory: the model modules are
+imported relative to the script's own location rather than the cwd, matching
+``examples/ode/case_2_no_ift_no_collocation.py``::
+
+    python examples/b_optimal/scenario_1_film_coating.py
+
+Figures are written to the **working** directory (``OUT_DIR = "."``), so the
+destination is the caller's choice. That is deliberate rather than an
+oversight — pinning output to the script directory would drop generated PNGs
+inside the repository. The figures should not be committed.
+
+``scenario_1`` takes a couple of minutes and ``scenario_2`` about three.
+``scenario_3`` is slower: Part A's exhaustive enumeration alone runs for
+several minutes, and Parts B and C cap each solve with
+``solver_options={"bonmin.time_limit": 90}``. **A capped solve returns
+bonmin's best incumbent rather than a proven optimum**, so individual rows
+in those tables are indicative rather than exact — the pure-input instances
+(``output_weight=0``) are much the hardest and are the ones that reach the
+cap. Part A runs uncapped, which is why it is the single place global
+optimality is claimed, and it is checked by enumeration rather than
+asserted.
+
+Bonmin offers no global-optimality guarantee for nonconvex MINLP. Its record
+on these instances is perfect — four independent brute-force cross-checks
+agreeing exactly — but that is empirical evidence about these problems, not
+a proof.
+
 ASL elimination
 ---------------
 

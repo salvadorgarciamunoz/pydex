@@ -799,6 +799,16 @@ class Designer:
         self._prior_fim_mp       = None   # model_parameters at which _prior_fim was computed
         self._prior_n_exp        = 0      # number of prior experiments (for reporting)
 
+        """ Bracketing-optimal (b_opt_criterion) state -- isolated to this
+            criterion only; read via getattr(..., default) elsewhere so
+            their absence never affects any other criterion. """
+        self._b_opt_output_weight       = 0.5    # last-used output_weight, for _b_opt_criterion()
+        self._b_opt_min_sep_frac        = 0.0    # anti-clustering threshold; 0 = off
+        self._b_opt_selected_idx        = None   # convenience: selected candidate indices
+        self._b_opt_apportion_redundant = False  # set True after a b_opt solve
+        self._b_opt_termination         = None   # last MINLP termination condition (str)
+        self._b_opt_proven_optimal      = None   # True only if that was 'optimal'
+
 
         self.error_cov = None
         self._error_cov_defaulted = False
@@ -2433,7 +2443,41 @@ class Designer:
         is_a   = 'a_opt'  in crit_name and 'pb' not in crit_name
         is_e   = 'e_opt'  in crit_name and 'pb' not in crit_name
         is_v   = 'v_opt'  in crit_name
+        is_b   = 'b_opt'  in crit_name   # Bracketing-optimal (Chen et al. 2018)
         is_pb  = self._pseudo_bayesian   # set by design_experiment() before we get here
+
+        # --- Bracketing-optimal (b_opt) is FULLY ISOLATED from everything
+        # below: it is dispatched to its own dedicated method before the
+        # atomic-FIM computation, the structural-singularity gate, and the
+        # Ds feasibility pre-check ever run. None of those are meaningful
+        # for b_opt (it designs directly on input-factor values and
+        # predicted responses, not on parameter sensitivities), and this
+        # early return guarantees the new code path can never interact with
+        # -- or be broken by future changes to -- the D/A/E/V/Ds machinery,
+        # and vice versa.
+        if is_b:
+            if is_pb:
+                raise ValueError(
+                    "b_opt_criterion (Bracketing-optimal) has no "
+                    "pseudo-Bayesian counterpart: it designs directly on "
+                    "the input-factor space and predicted responses, not "
+                    "on parameter sensitivities, so there is no meaningful "
+                    "way to average it over parameter scenarios. Use a "
+                    "fixed (non-scenario) model_parameters array."
+                )
+            if self._dynamic_system:
+                raise NotImplementedError(
+                    "b_opt_criterion currently supports only static "
+                    "(non-dynamic) systems -- i.e. designer.simulate() with "
+                    "no time dimension, one response per candidate. "
+                    "Combining candidate AND sampling-time subset selection "
+                    "is not yet implemented."
+                )
+            return self._solve_pyomo_b_opt(
+                e0, fix_effort, solver_options,
+                n_exp=kwargs.get('n_exp'),
+                output_weight=kwargs.get('output_weight', 0.5),
+            )
 
         # Pseudo-Bayesian "average information" (type 0) evaluates the criterion
         # at the SCENARIO-AVERAGED information matrix, f(meanₛ FIMₛ(e)). Since
@@ -2939,6 +2983,325 @@ class Designer:
         else:
             self.efforts = e_opt.reshape((self.n_c, self.n_spt))
         self._efforts_transformed = False
+
+        obj_val = float(pyo.value(m.obj))
+        return -obj_val
+
+    def _solve_pyomo_b_opt(self, e0, fix_effort, solver_options,
+                            n_exp=None, output_weight=0.5):
+        """
+        Bracketing-optimal (b_opt) design -- Chen, Paulavicius & Adjiman
+        (2018), AIChE J. 64:3944-3957. Combines two objectives via
+        weighted-sum scalarization (their Eq. 24):
+
+          (1) INPUT-SPACE bracketing: D-optimality applied DIRECTLY to the
+              (scaled) input-factor values themselves -- NOT to parameter
+              sensitivities. Uses self.ti_controls_candidates directly; has
+              nothing to do with self.atomic_fims / eval_fim().
+
+          (2) OUTPUT-SPACE coverage: maximise the volume of the ellipsoid
+              spanned by the selected candidates' PREDICTED RESPONSES
+              (self.response), via a centered-covariance log-det.
+
+        Both log-dets are lifted through their OWN Cholesky factor,
+        mirroring the is_d branch in _solve_pyomo exactly: FIM-like matrix
+        M = L @ L.T, log-det(M) = 2*sum(log(L[j,j])). This ONLY EVER
+        introduces pairwise (bilinear) products L[j,r]*L[k,r] -- deliberately
+        NOT an LDL/division recursion, which for 3+ input factors produces
+        genuine trilinear monomials. That distinction matters: an LDL-based
+        version of this exact model was empirically found to let BARON
+        (via GAMS) report an incorrect zero optimality gap on a design that
+        a verified true-determinant check showed was NOT optimal, at
+        n_exp=4 with only 3 input factors, on the tablet-coater case study
+        from the same paper. Bonmin (also tested) never produced an
+        incorrect certificate across ~10 independent test cases against the
+        same ground truth. Cholesky lifting removes the specific mechanism
+        (trilinear terms) identified as the likely cause, so BARON may well
+        be reliable on THIS formulation, but bonmin is the recommended
+        default until that is independently re-verified.
+
+        This method is FULLY ISOLATED from the rest of _solve_pyomo -- it
+        is called from an early-return dispatch before any FIM/atomic_fims/
+        singularity-gate code runs, is never reached by any other
+        criterion, and touches no state (self.atomic_fims, self.fim, etc.)
+        that any other criterion depends on.
+
+        n_exp is the SAME n_exp already accepted by design_experiment() for
+        every other criterion (used there only for apportion()) -- for
+        b_opt it additionally becomes a hard cardinality constraint driving
+        the solve itself, rather than a separate new argument.
+        """
+        import pyomo.environ as pyo
+
+        if n_exp is None:
+            raise ValueError(
+                "b_opt_criterion requires an exact number of experiments: "
+                "call design_experiment(designer.b_opt_criterion, n_exp=<int>, "
+                "...)."
+            )
+        if not isinstance(n_exp, int) or n_exp < 2:
+            raise ValueError(
+                f"n_exp must be an integer >= 2 for b_opt_criterion "
+                f"(covariance needs at least 2 selected candidates); got "
+                f"{n_exp!r}."
+            )
+        if self.response is None:
+            raise RuntimeError(
+                "b_opt_criterion needs predicted responses at every "
+                "candidate. Call designer.simulate_candidates() before "
+                "design_experiment()."
+            )
+        if not (0.0 <= output_weight <= 1.0):
+            raise ValueError(
+                f"output_weight must be in [0, 1]; got {output_weight!r}."
+            )
+
+        U_raw = np.asarray(self.ti_controls_candidates, dtype=float)
+        n_c, phi = U_raw.shape
+        if n_c != self.n_c:
+            raise RuntimeError(
+                "Internal inconsistency: ti_controls_candidates row count "
+                f"({n_c}) != self.n_c ({self.n_c})."
+            )
+        if n_exp > n_c:
+            raise ValueError(
+                f"n_exp ({n_exp}) cannot exceed the number of candidates "
+                f"({n_c})."
+            )
+
+        lb, ub = U_raw.min(axis=0), U_raw.max(axis=0)
+        span = np.where(ub > lb, ub - lb, 1.0)
+        U = 2.0 * (U_raw - lb) / span - 1.0   # scaled to [-1, 1], per factor
+
+        Y_raw = np.asarray(self.response, dtype=float).reshape(n_c, -1)
+        n_resp = Y_raw.shape[1]
+
+        # ---- rank feasibility of the two Cholesky lifts -------------------
+        # Both lifts below are built UNCONDITIONALLY, whatever output_weight
+        # is, and both floor their Cholesky diagonal at 1e-8. That floor is
+        # what turns an under-sized n_exp into a HARD INFEASIBILITY rather
+        # than a merely ill-conditioned solve:
+        #
+        #   input  M_in  is phi x phi,      rank <= n_exp      -> n_exp >= phi
+        #   output M_out is n_resp x n_resp and CENTERED, so
+        #                                   rank <= n_exp - 1
+        #
+        # For M_out the ALGEBRAIC bound is n_exp >= n_resp + 1, but that is not
+        # sufficient in practice and the difference is measured, not guessed.
+        # At n_exp == n_resp + 1 the centered covariance is rank-EXACTLY-n_resp
+        # with no margin, and the Cholesky floor demands strict positive
+        # definiteness with room to spare; bonmin then reports the problem
+        # INFEASIBLE whenever the output term carries weight. Observed on a
+        # 10-candidate phi=2/n_resp=2 pool: n_exp=3 infeasible at
+        # output_weight >= 0.5, n_exp=4 solving immediately. Hence + 2.
+        #
+        # Do not "correct" this back to + 1 on the strength of the algebra.
+        #
+        # M == L L^T with every L[j,j] >= 1e-8 forces det(M) >= 1e-8**(2*dim),
+        # so a rank-deficient M cannot be represented at all.
+        #
+        # Caught HERE rather than left to the solver, because proving
+        # infeasibility of a nonconvex MINLP is the expensive direction:
+        # measured on a 70-candidate phi=6 pool, n_exp=5 ran for over 17
+        # minutes of bonmin CPU without terminating, while n_exp=6 solved in
+        # seconds. Without this guard a mistyped n_exp costs an unbounded
+        # hang and prints no diagnosis at all.
+        n_exp_min = max(phi, n_resp + 2)
+        if n_exp < n_exp_min:
+            reasons = []
+            if n_exp < phi:
+                reasons.append(
+                    f"the input-space matrix is {phi}x{phi}, so it needs "
+                    f"n_exp >= {phi}"
+                )
+            if n_exp < n_resp + 2:
+                reasons.append(
+                    f"the centered output covariance is {n_resp}x{n_resp}, "
+                    f"and needs a rank margin above the Cholesky floor, so it "
+                    f"needs n_exp >= {n_resp + 2}"
+                )
+            raise ValueError(
+                f"n_exp ({n_exp}) is too small for b_opt_criterion: "
+                + "; ".join(reasons)
+                + f". With {phi} input factor(s) and {n_resp} response(s), "
+                f"use n_exp >= {n_exp_min}. Below that the Cholesky lift "
+                f"(diagonal floored at 1e-8) makes the problem strictly "
+                f"infeasible, and an MINLP solver will not report that "
+                f"quickly -- it will appear to hang."
+            )
+        Y_mean, Y_std = Y_raw.mean(axis=0), Y_raw.std(axis=0)
+        Y_std = np.where(Y_std > 0, Y_std, 1.0)
+        Y = (Y_raw - Y_mean) / Y_std   # z-scored responses
+
+        win, wout = 1.0 - float(output_weight), float(output_weight)
+        self._b_opt_output_weight = float(output_weight)   # for _b_opt_criterion()
+
+        m = pyo.ConcreteModel()
+        m.E = pyo.RangeSet(0, n_c - 1)
+        m.b = pyo.Var(m.E, domain=pyo.Binary)
+        m.e = pyo.Var(m.E, domain=pyo.NonNegativeReals, bounds=(0, 1))
+
+        # exact cardinality + equal weight -- b_opt ONLY; the existing
+        # sparsity (min_effort) constraints in _solve_pyomo are never
+        # touched by this method and this method never touches them.
+        m.cardinality_con = pyo.Constraint(expr=sum(m.b[i] for i in m.E) == n_exp)
+        m.equal_weight_con = pyo.Constraint(
+            m.E, rule=lambda m, i: m.e[i] == m.b[i] / n_exp)
+
+        e0_flat = np.asarray(e0, dtype=float).flatten()
+        if fix_effort is not None:
+            fixed = (fix_effort / fix_effort.sum()).flatten()
+            for i in m.E:
+                m.b[i].fix(1.0 if fixed[i] > 1e-9 else 0.0)
+        for i in m.E:
+            if not m.b[i].fixed:
+                m.b[i].set_value(1.0 if e0_flat[i] > 1e-9 else 0.0)
+
+        # ---- input-space bracketing: M_in[p,q] = sum_i b[i]*U[i,p]*U[i,q] ----
+        m.PHI = pyo.RangeSet(0, phi - 1)
+        M_in = {(p, q): sum(m.b[i] * float(U[i, p] * U[i, q]) for i in m.E)
+                for p in range(phi) for q in range(phi)}
+
+        m.L = pyo.Var(m.PHI, m.PHI, initialize=0.0)
+        for p in range(phi):
+            for q in range(p + 1, phi):
+                m.L[p, q].fix(0.0)
+            m.L[p, p].setlb(1e-8)
+
+        def chol_in_rule(m, p, q):
+            if q > p:
+                return pyo.Constraint.Skip
+            return M_in[p, q] == sum(m.L[p, r] * m.L[q, r] for r in range(q + 1))
+        m.chol_in_con = pyo.Constraint(m.PHI, m.PHI, rule=chol_in_rule)
+
+        # ---- output-space coverage: centered covariance via a collapsed
+        # identity: sum_i b_i*(y_i-yc)(y_i-yc)^T = sum_i b_i*y_i*y_i^T - n*yc*yc^T
+        # -- only n_resp^2 bilinear (yc*yc) terms, not O(n_c^2) ----
+        m.RESP = pyo.RangeSet(0, n_resp - 1)
+        yc_vars = {}
+        for c in range(n_resp):
+            v = pyo.Var(initialize=0.0, bounds=(-10, 10))
+            m.add_component(f"b_opt_yc_{c}", v)
+            con = pyo.Constraint(
+                expr=n_exp * v == sum(m.b[i] * float(Y[i, c]) for i in m.E))
+            m.add_component(f"b_opt_yc_con_{c}", con)
+            yc_vars[c] = v
+
+        P = {(c, d): Y[:, c] * Y[:, d] for c in range(n_resp) for d in range(n_resp)}
+        M_out = {}
+        for c in range(n_resp):
+            for d in range(n_resp):
+                lin = sum(m.b[i] * float(P[c, d][i]) for i in m.E)
+                M_out[c, d] = (lin - n_exp * yc_vars[c] * yc_vars[d]) / max(n_exp - 1, 1)
+
+        m.Lo = pyo.Var(m.RESP, m.RESP, initialize=0.0)
+        for c in range(n_resp):
+            for d in range(c + 1, n_resp):
+                m.Lo[c, d].fix(0.0)
+            m.Lo[c, c].setlb(1e-8)
+
+        def chol_out_rule(m, c, d):
+            if d > c:
+                return pyo.Constraint.Skip
+            return M_out[c, d] == sum(m.Lo[c, r] * m.Lo[d, r] for r in range(d + 1))
+        m.chol_out_con = pyo.Constraint(m.RESP, m.RESP, rule=chol_out_rule)
+
+        # ---- anti-clustering: mutual exclusion on near-duplicate response
+        # candidates. Candidates are FIXED, so pairwise response distances
+        # are precomputable constants -- a discrete-problem simplification
+        # of Chen et al.'s continuous log-barrier penalty (mu). Off by
+        # default; opt in via designer._b_opt_min_sep_frac. ----
+        min_sep_frac = getattr(self, "_b_opt_min_sep_frac", 0.0)
+        if min_sep_frac > 0:
+            diffs = Y[:, None, :] - Y[None, :, :]
+            dist2 = np.sum(diffs ** 2, axis=-1)
+            thresh = min_sep_frac * dist2.max()
+            m.b_opt_excl = pyo.ConstraintList()
+            for i in range(n_c):
+                for j in range(i + 1, n_c):
+                    if dist2[i, j] < thresh:
+                        m.b_opt_excl.add(m.b[i] + m.b[j] <= 1)
+
+        # ---- combined weighted-sum objective (Chen et al. Eq. 24) ----
+        eps = 1e-9
+        fin_log = 2.0 * sum(pyo.log(m.L[p, p] + eps) for p in range(phi))
+        fout_log = 2.0 * sum(pyo.log(m.Lo[c, c] + eps) for c in range(n_resp))
+        m.obj = pyo.Objective(
+            expr=-(win * fin_log + wout * fout_log), sense=pyo.minimize)
+
+        slvr = self._make_pyomo_solver(solver_options)
+        gams_kwargs = self._pyomo_solve_kwargs(solver_options)
+        result = slvr.solve(m, tee=(self._verbose >= 2), **gams_kwargs)
+
+        tc = result.solver.termination_condition
+        self._b_opt_termination = str(tc)
+        ok_conditions = {
+            pyo.TerminationCondition.optimal,
+            pyo.TerminationCondition.locallyOptimal,
+            pyo.TerminationCondition.feasible,
+        }
+        # A FAILED solve must not yield a design. When bonmin reports
+        # `infeasible`, pyo.value(m.b[i]) returns 1.0 for EVERY candidate, so
+        # the old warn-and-continue produced e_opt = 1/n_exp across the whole
+        # pool: a "design" that selects every candidate, breaches the
+        # cardinality constraint outright, and has efforts summing to n_c/n_exp
+        # instead of 1. That is not a suboptimal answer, it is not an answer,
+        # and printing a warning while returning it means anyone not reading
+        # stderr treats it as a result.
+        _hard_failures = {
+            pyo.TerminationCondition.infeasible,
+            pyo.TerminationCondition.infeasibleOrUnbounded,
+            pyo.TerminationCondition.unbounded,
+            pyo.TerminationCondition.error,
+            pyo.TerminationCondition.internalSolverError,
+        }
+        if tc in _hard_failures:
+            raise RuntimeError(
+                f"b_opt_criterion: the MINLP solver returned '{tc}', so there "
+                f"is no design to report. Most often this means n_exp is too "
+                f"close to the rank bound -- with {phi} input factor(s) and "
+                f"{n_resp} response(s), try n_exp >= {max(phi, n_resp + 2)} "
+                f"(currently {n_exp}); the centered output covariance needs a "
+                f"margin above the Cholesky floor, not merely full rank. "
+                f"Other causes: a candidate pool with duplicate or collinear "
+                f"rows, or an over-tight _b_opt_min_sep_frac."
+            )
+        # Limit conditions are different: there IS an incumbent, it is just not
+        # proven optimal. Report it, and record the fact so a caller (or an
+        # example printing a table) can distinguish a proven optimum from a
+        # best-so-far. Silently mixing the two is how a solver artefact gets
+        # read as a non-monotonic Pareto front.
+        self._b_opt_proven_optimal = (tc == pyo.TerminationCondition.optimal)
+        if tc not in ok_conditions:
+            if self._verbose >= 0:
+                print(f"[WARNING] Solver termination: {tc}. The design below "
+                      f"is the solver's best incumbent, NOT a proven optimum.")
+
+        b_opt_val = np.array([pyo.value(m.b[i]) for i in m.E])
+
+        # Validate independently of what the solver reported. This catches the
+        # failure mode above even if a future solver returns a status not in
+        # _hard_failures, and it is cheap: the selection is binary by
+        # construction, so anything else means the values did not come from a
+        # completed solve.
+        _n_sel = int(np.sum(b_opt_val > 0.5))
+        _binary_ok = np.all((b_opt_val < 1e-4) | (b_opt_val > 1.0 - 1e-4))
+        if _n_sel != n_exp or not _binary_ok:
+            raise RuntimeError(
+                f"b_opt_criterion: the solver reported '{tc}' but the returned "
+                f"selection is not a valid design -- {_n_sel} candidate(s) "
+                f"selected where n_exp={n_exp}"
+                + ("" if _binary_ok else ", and the selection variables are not "
+                   "binary")
+                + ". Refusing to report it. Please raise this as an issue "
+                  "with the candidate pool and arguments used."
+            )
+
+        e_opt = b_opt_val / n_exp
+        self.efforts = e_opt.reshape((self.n_c, self.n_spt))
+        self._efforts_transformed = False
+        self._b_opt_selected_idx = np.where(b_opt_val > 0.5)[0]   # convenience
+        self._b_opt_apportion_redundant = True   # design is already exact/equal-weight
 
         obj_val = float(pyo.value(m.obj))
         return -obj_val
@@ -3617,7 +3980,8 @@ class Designer:
                           save_sensitivities=False, trim_fim=False,
                           pseudo_bayesian_type=None, regularize_fim=False, beta=0.90,
                           min_expected_value=None, fix_effort=None, save_atomics=False,
-                          min_effort=None, allow_singular_fim=False, **kwargs):
+                          min_effort=None, allow_singular_fim=False, output_weight=0.5,
+                          **kwargs):
         """Solve for the optimal continuous experimental design.
 
         The central method of the package. Allocates a unit budget of
@@ -3671,6 +4035,12 @@ class Designer:
                 diagnosis naming the responsible parameters, because a criterion
                 value obtained from a rank-deficient FIM rests on the Cholesky
                 floor rather than on information the data contains.
+            output_weight (float): ONLY used by ``b_opt_criterion``
+                (Bracketing-optimal). Weight in [0, 1] on the output-space
+                coverage objective; the input-space bracketing objective gets
+                weight ``1 - output_weight``. See Chen, Paulavicius & Adjiman
+                (2018), AIChE J. 64:3944-3957, Eq. 24. Ignored by every other
+                criterion.
             **kwargs: Forwarded to the solver interface.
 
         Returns:
@@ -3711,6 +4081,8 @@ class Designer:
 
         """ resetting optimal candidates """
         self.optimal_candidates = None
+        self._b_opt_apportion_redundant = False   # reset each call; set True inside
+                                                    # _solve_pyomo_b_opt only on success
 
         """ setting verbal behaviour """
         if self._verbose >= 2:
@@ -3864,13 +4236,17 @@ class Designer:
         start = time()
 
         # single unified Pyomo dispatch
+        # n_exp/output_weight are forwarded via kwargs -- they are read only
+        # by the b_opt_criterion early-dispatch branch inside _solve_pyomo;
+        # every other criterion ignores unknown kwargs exactly as before.
         if self._cvar_problem:
             opt_fun = self._solve_pyomo_cvar(
                 criterion, beta, e0, min_expected_value, solver_options, **kwargs
             )
         else:
             opt_fun = self._solve_pyomo(
-                criterion, e0, fix_effort, solver_options, **kwargs
+                criterion, e0, fix_effort, solver_options,
+                n_exp=n_exp, output_weight=output_weight, **kwargs
             )
 
         finish = time()
@@ -4143,6 +4519,15 @@ class Designer:
             means the continuous optimum rests on a near-singular direction that
             rounding destroys — check :meth:`diagnose_fim_structure` if so.
         """
+        if getattr(self, "_b_opt_apportion_redundant", False):
+            print(
+                "[Warning] The current design was produced by "
+                "b_opt_criterion, which already solves for an EXACT, "
+                "equal-weighted subset of exactly n_exp candidates -- "
+                "there is no continuous design left to round. Proceeding, "
+                "but apportion() is redundant here; the design in "
+                "designer.efforts is already the final discrete design."
+            )
         self.n_exp = n_exp
 
         _original_save_atomics = np.copy(self._save_atomics)
@@ -5749,6 +6134,55 @@ class Designer:
             return self._pb_d_opt_criterion(efforts)
         else:
             return self._d_opt_criterion(efforts)
+
+    def b_opt_criterion(self, efforts):
+        """
+        Bracketing-optimal (b_opt) design -- Chen, Paulavicius & Adjiman
+        (2018), AIChE J. 64:3944-3957, "An Optimization Framework to
+        Combine Operable Space Maximization with Design of Experiments".
+
+        Combines two objectives, matched to the two things a regulator and
+        a process engineer respectively care about in a pharmaceutical
+        bracketing study:
+
+          (1) INPUT-SPACE bracketing -- D-optimality applied directly to
+              the (scaled) input-factor values, i.e. an orthogonal,
+              corner-seeking design in the process INPUTS (the classical
+              "bracketing study"). NOT parameter-sensitivity-based --
+              unrelated to d_opt_criterion / self.atomic_fims.
+
+          (2) OUTPUT-SPACE coverage -- maximises the volume spanned by the
+              candidates' PREDICTED RESPONSES, so the design also explores
+              the process OUTPUT space rather than mapping only a sliver
+              of it (Chen et al.'s motivating example: two similarly
+              input-orthogonal 4-point designs can cover 10% vs 63% of the
+              achievable output space).
+
+        The two are combined via weighted-sum scalarization (Eq. 24 in the
+        paper); see design_experiment(output_weight=...).
+
+        Requirements, all different from every other criterion here:
+          * Must be called with design_experiment(..., n_exp=<int>) --
+            n_exp is a HARD requirement (exact subset selection), not just
+            an apportion() target.
+          * designer.simulate_candidates() must be called first, to
+            populate self.response (the criterion needs predicted outputs,
+            not sensitivities).
+          * No pseudo-Bayesian counterpart -- raises if
+            self.model_parameters is a scenario array.
+          * Static (non-dynamic) systems only, for now.
+          * apportion() is redundant afterward: the design produced is
+            already exact and equal-weighted.
+
+        Recommended solver: "bonmin". See the docstring of
+        _solve_pyomo_b_opt for why BARON is not the current default.
+        """
+        if self._pseudo_bayesian:
+            raise ValueError(
+                "b_opt_criterion has no pseudo-Bayesian counterpart. See "
+                "the method docstring."
+            )
+        return self._b_opt_criterion(efforts)
 
     def ds_opt_criterion(self, efforts):
         """
@@ -8632,6 +9066,52 @@ class Designer:
             fim_inv = np.linalg.inv(self.fim)
             jac = -np.array([np.sum(fim_inv.T * m) for m in self.atomic_fims])
             return (-d_opt, jac) if sign == 1 else (np.inf, jac)
+
+    def _b_opt_criterion(self, efforts):
+        """
+        Numpy evaluator for a GIVEN discrete design -- post-hoc reporting
+        only (e.g. compute_criterion_value() on an already-solved design).
+        The actual OPTIMIZATION happens in _solve_pyomo_b_opt via the
+        Pyomo/solver path; this never calls self.eval_fim() and never
+        touches self.atomic_fims / self.fim, by design -- b_opt is not a
+        parameter-sensitivity criterion.
+
+        Returns the value to MINIMISE, matching every other criterion's
+        sign convention (b_opt maximises the combined log-det, so this
+        returns its negative).
+        """
+        efforts = np.asarray(efforts, dtype=float).flatten()
+        selected = np.where(efforts > 1e-6)[0]
+        if selected.size < 2:
+            return np.inf
+
+        U_raw = np.asarray(self.ti_controls_candidates, dtype=float)
+        lb, ub = U_raw.min(axis=0), U_raw.max(axis=0)
+        span = np.where(ub > lb, ub - lb, 1.0)
+        U = 2.0 * (U_raw - lb) / span - 1.0
+        M_in = U[selected].T @ U[selected]
+        sign_in, logdet_in = np.linalg.slogdet(M_in)
+        if sign_in <= 0:
+            return np.inf
+
+        if self.response is None:
+            raise RuntimeError(
+                "b_opt_criterion needs predicted responses. Call "
+                "designer.simulate_candidates() first."
+            )
+        Y_raw = np.asarray(self.response, dtype=float).reshape(U_raw.shape[0], -1)
+        Y_mean, Y_std = Y_raw.mean(axis=0), Y_raw.std(axis=0)
+        Y_std = np.where(Y_std > 0, Y_std, 1.0)
+        Y_sel = (Y_raw[selected] - Y_mean) / Y_std
+        yc = Y_sel.mean(axis=0)
+        M_out = (Y_sel - yc).T @ (Y_sel - yc) / max(selected.size - 1, 1)
+        sign_out, logdet_out = np.linalg.slogdet(M_out)
+        if sign_out <= 0:
+            return np.inf
+
+        wout = float(getattr(self, "_b_opt_output_weight", 0.5))
+        win = 1.0 - wout
+        return -(win * logdet_in + wout * logdet_out)
 
     def _resolve_ds_idx(self):
         """
