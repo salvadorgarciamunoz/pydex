@@ -1136,6 +1136,10 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_sensitivity_is_normalized</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_opt_sampling_times</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_var_n_sampling_time</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="c1"># One effort per EXPERIMENT rather than per (candidate, sampling-time)</span>
+        <span class="c1"># cell: every listed sampling time is measured on every run. Default</span>
+        <span class="c1"># False preserves the historical behaviour exactly.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_fixed_sampling_grid</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="c1"># numerical options</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_regularize_fim</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_num_steps</span> <span class="o">=</span> <span class="mi">5</span>
@@ -1325,10 +1329,14 @@
 <span class="sd">        measured. Rows may be padded with ``numpy.nan`` when candidates have</span>
 <span class="sd">        different numbers of usable times.</span>
 
-<span class="sd">        With ``optimize_sampling_times=False`` every listed time is measured.</span>
-<span class="sd">        With it True the optimiser also chooses WHICH of them to use, and</span>
-<span class="sd">        ``n_spt=k`` restricts each experiment to k samples — the same candidate</span>
-<span class="sd">        may then appear under several sampling schedules.</span>
+<span class="sd">        Per-sampling-time effort is a free decision variable by default, so</span>
+<span class="sd">        the optimiser allocates effort across these times and routinely drives</span>
+<span class="sd">        most of them to zero. ``optimize_sampling_times`` does NOT change that</span>
+<span class="sd">        (it affects reporting only). To require that every listed time is</span>
+<span class="sd">        measured on every run, pass ``fixed_sampling_grid=True`` to</span>
+<span class="sd">        :meth:`design_experiment`. ``n_spt=k`` instead has the optimiser choose</span>
+<span class="sd">        WHICH k of the listed times to use, and the same candidate may then</span>
+<span class="sd">        appear under several sampling schedules.</span>
 
 <span class="sd">        Assigning marks the candidate set changed.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
@@ -2782,6 +2790,36 @@
 
         <span class="n">m</span><span class="o">.</span><span class="n">sum_con</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Constraint</span><span class="p">(</span><span class="n">expr</span><span class="o">=</span><span class="nb">sum</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">e</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">)</span> <span class="o">==</span> <span class="mf">1.0</span><span class="p">)</span>
 
+        <span class="c1"># --- fixed_sampling_grid: one effort per EXPERIMENT, not per</span>
+        <span class="c1"># (candidate, sampling-time) cell.</span>
+        <span class="c1">#</span>
+        <span class="c1"># The effort vector is flattened row-major over (n_c, n_spt), so</span>
+        <span class="c1"># candidate c owns indices [c*n_spt, (c+1)*n_spt). Tying those cells</span>
+        <span class="c1"># together makes a candidate&#39;s whole listed grid a single indivisible</span>
+        <span class="c1"># experiment: you cannot buy time t1 of candidate c without buying t2.</span>
+        <span class="c1"># n_spt-1 equalities per candidate, all LINEAR, so the program stays</span>
+        <span class="c1"># the same class it already was.</span>
+        <span class="c1">#</span>
+        <span class="c1"># Effect on the FIM: e[c,k] = w_c/n_spt gives</span>
+        <span class="c1"># FIM = (1/n_spt) * sum_c w_c * (sum_k A[c,k]), i.e. exactly 1/n_spt</span>
+        <span class="c1"># times the per-experiment FIM. Verified numerically to 2.8e-14 and</span>
+        <span class="c1"># bit-identical to a static multi-response reformulation of the same</span>
+        <span class="c1"># experiment. Since n_spt is a constant here (ragged grids are</span>
+        <span class="c1"># refused in design_experiment), this is a CONSTANT rescaling: the</span>
+        <span class="c1"># argmax is unaffected and log-det criteria shift by exactly</span>
+        <span class="c1"># n_mp*ln(n_spt) -- the same structure as error_cov scaling. The</span>
+        <span class="c1"># criterion VALUE is therefore not comparable across values of this</span>
+        <span class="c1"># flag; the design is.</span>
+        <span class="k">if</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;_fixed_sampling_grid&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">):</span>
+            <span class="n">_n_spt</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span>
+            <span class="k">if</span> <span class="n">_n_spt</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+                <span class="k">def</span><span class="w"> </span><span class="nf">_tie</span><span class="p">(</span><span class="n">m</span><span class="p">,</span> <span class="n">c</span><span class="p">,</span> <span class="n">k</span><span class="p">):</span>
+                    <span class="n">base</span> <span class="o">=</span> <span class="n">c</span> <span class="o">*</span> <span class="n">_n_spt</span>
+                    <span class="k">return</span> <span class="n">m</span><span class="o">.</span><span class="n">e</span><span class="p">[</span><span class="n">base</span> <span class="o">+</span> <span class="n">k</span><span class="p">]</span> <span class="o">==</span> <span class="n">m</span><span class="o">.</span><span class="n">e</span><span class="p">[</span><span class="n">base</span><span class="p">]</span>
+                <span class="n">m</span><span class="o">.</span><span class="n">C_fsg</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">RangeSet</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_c</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+                <span class="n">m</span><span class="o">.</span><span class="n">K_fsg</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">RangeSet</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">_n_spt</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+                <span class="n">m</span><span class="o">.</span><span class="n">fixed_grid_con</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Constraint</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">C_fsg</span><span class="p">,</span> <span class="n">m</span><span class="o">.</span><span class="n">K_fsg</span><span class="p">,</span> <span class="n">rule</span><span class="o">=</span><span class="n">_tie</span><span class="p">)</span>
+
         <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">E</span><span class="p">:</span>
             <span class="n">m</span><span class="o">.</span><span class="n">e</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">e0_flat</span><span class="p">[</span><span class="n">i</span><span class="p">]))</span>
 
@@ -3429,6 +3467,23 @@
             <span class="n">bounds</span> <span class="o">=</span> <span class="p">[(</span><span class="nb">float</span><span class="p">(</span><span class="n">f</span><span class="p">),</span> <span class="nb">float</span><span class="p">(</span><span class="n">f</span><span class="p">))</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">fixed</span><span class="p">]</span>
 
         <span class="n">constraints</span> <span class="o">=</span> <span class="p">[{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;eq&quot;</span><span class="p">,</span> <span class="s2">&quot;fun&quot;</span><span class="p">:</span> <span class="k">lambda</span> <span class="n">e</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">e</span><span class="p">)</span> <span class="o">-</span> <span class="mf">1.0</span><span class="p">}]</span>
+
+        <span class="c1"># fixed_sampling_grid: tie each candidate&#39;s sampling-time cells</span>
+        <span class="c1"># together, so one effort is chosen per EXPERIMENT. Must be applied</span>
+        <span class="c1"># here as well as in _solve_pyomo -- this path serves every</span>
+        <span class="c1"># non-native criterion (pseudo-Bayesian type 1, vdi, the six</span>
+        <span class="c1"># prediction-variance criteria, CVaR), and omitting it would let the</span>
+        <span class="c1"># flag be silently ignored for exactly those. See _solve_pyomo for</span>
+        <span class="c1"># the derivation and the constant-rescaling note.</span>
+        <span class="k">if</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;_fixed_sampling_grid&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="n">_n_spt</span><span class="p">,</span> <span class="n">_n_c</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_c</span>
+
+            <span class="k">def</span><span class="w"> </span><span class="nf">_fsg_residuals</span><span class="p">(</span><span class="n">e</span><span class="p">,</span> <span class="n">_n_spt</span><span class="o">=</span><span class="n">_n_spt</span><span class="p">,</span> <span class="n">_n_c</span><span class="o">=</span><span class="n">_n_c</span><span class="p">):</span>
+                <span class="n">E</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">e</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">_n_c</span><span class="p">,</span> <span class="n">_n_spt</span><span class="p">)</span>
+                <span class="c1"># each candidate&#39;s cells minus that candidate&#39;s first cell</span>
+                <span class="k">return</span> <span class="p">(</span><span class="n">E</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">:]</span> <span class="o">-</span> <span class="n">E</span><span class="p">[:,</span> <span class="p">[</span><span class="mi">0</span><span class="p">]])</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
+
+            <span class="n">constraints</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;eq&quot;</span><span class="p">,</span> <span class="s2">&quot;fun&quot;</span><span class="p">:</span> <span class="n">_fsg_residuals</span><span class="p">})</span>
 
         <span class="n">opts</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;ftol&quot;</span><span class="p">:</span> <span class="mf">1e-9</span><span class="p">,</span> <span class="s2">&quot;maxiter&quot;</span><span class="p">:</span> <span class="mi">5000</span><span class="p">,</span> <span class="s2">&quot;disp&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">2</span><span class="p">}</span>
         <span class="k">if</span> <span class="n">solver_options</span><span class="p">:</span>
@@ -4095,6 +4150,7 @@
                           <span class="n">pseudo_bayesian_type</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">regularize_fim</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">beta</span><span class="o">=</span><span class="mf">0.90</span><span class="p">,</span>
                           <span class="n">min_expected_value</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">fix_effort</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">save_atomics</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
                           <span class="n">min_effort</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">allow_singular_fim</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">output_weight</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span>
+                          <span class="n">fixed_sampling_grid</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
                           <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Solve for the optimal continuous experimental design.</span>
 
@@ -4121,8 +4177,31 @@
 <span class="sd">                :attr:`atomic_fims` first if changing it between runs.</span>
 <span class="sd">            n_exp (int, optional): Solve for a discrete design of this many</span>
 <span class="sd">                experiments instead of a continuous one.</span>
-<span class="sd">            optimize_sampling_times (bool): Also choose WHEN to sample, rather</span>
-<span class="sd">                than measuring every listed time.</span>
+<span class="sd">            optimize_sampling_times (bool): Controls how the design is</span>
+<span class="sd">                REPORTED and extracted, not how it is formulated. Note per</span>
+<span class="sd">                sampling-time effort is a free decision variable EITHER WAY:</span>
+<span class="sd">                the flag appears nowhere in the optimisation, and passing</span>
+<span class="sd">                False vs True yields bit-identical efforts. The formulation</span>
+<span class="sd">                is changed by ``n_spt`` (which selects WHICH times to sample,</span>
+<span class="sd">                and force-overrides this flag to True) or by</span>
+<span class="sd">                ``fixed_sampling_grid`` (which ties a candidate&#39;s times</span>
+<span class="sd">                together). Do not read False as &quot;every listed time is</span>
+<span class="sd">                measured&quot; -- the optimiser routinely drives most grid times</span>
+<span class="sd">                to zero effort regardless.</span>
+<span class="sd">            fixed_sampling_grid (bool): Allocate one effort per EXPERIMENT</span>
+<span class="sd">                instead of per (candidate, sampling-time) cell, so every</span>
+<span class="sd">                listed sampling time is measured on every run and the only</span>
+<span class="sd">                decision is WHICH experimental conditions to run. For a fixed</span>
+<span class="sd">                analytical schedule you do not control. Implemented as</span>
+<span class="sd">                ``n_spt - 1`` linear equalities per candidate; the resulting</span>
+<span class="sd">                FIM is ``1/n_spt`` times the per-experiment FIM, a CONSTANT</span>
+<span class="sd">                rescaling, so the design is unaffected but log-det criteria</span>
+<span class="sd">                shift by exactly ``n_mp * ln(n_spt)``. Criterion values are</span>
+<span class="sd">                therefore NOT comparable across this flag; designs are.</span>
+<span class="sd">                Requires a dynamic model, a common grid for every candidate</span>
+<span class="sd">                (ragged/NaN-padded grids raise), and is mutually exclusive</span>
+<span class="sd">                with ``n_spt``. Default False, which reproduces all previous</span>
+<span class="sd">                behaviour exactly.</span>
 <span class="sd">            solver (str): NLP solver for the native Pyomo path — any</span>
 <span class="sd">                AMPL-compatible solver. Ignored on the SLSQP path.</span>
 <span class="sd">            solver_options (dict, optional): Passed to the solver. On the SLSQP</span>
@@ -4185,6 +4264,46 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_trim_fim</span>           <span class="o">=</span> <span class="n">trim_fim</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_save_atomics</span>       <span class="o">=</span> <span class="n">save_atomics</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_min_effort</span>         <span class="o">=</span> <span class="n">min_effort</span>  <span class="c1"># sparsity threshold (MINLP when set)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_fixed_sampling_grid</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">fixed_sampling_grid</span><span class="p">)</span>
+
+<span class="w">        </span><span class="sd">&quot;&quot;&quot; fixed_sampling_grid: validate before anything is built &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fixed_sampling_grid</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dynamic_system</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
+                    <span class="s2">&quot;fixed_sampling_grid=True is meaningless for a static &quot;</span>
+                    <span class="s2">&quot;model: there is no sampling-time axis to hold fixed, and &quot;</span>
+                    <span class="s2">&quot;effort is already allocated per experiment.&quot;</span>
+                <span class="p">)</span>
+            <span class="k">if</span> <span class="n">n_spt</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
+                    <span class="s2">&quot;fixed_sampling_grid=True and n_spt are mutually &quot;</span>
+                    <span class="s2">&quot;exclusive. n_spt asks the optimiser to CHOOSE which &quot;</span>
+                    <span class="s2">&quot;n_spt of the listed times to sample (selection over &quot;</span>
+                    <span class="s2">&quot;sampling-time combinations); fixed_sampling_grid says &quot;</span>
+                    <span class="s2">&quot;every listed time is measured on every run. Pick one.&quot;</span>
+                <span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_var_n_sampling_time</span><span class="p">:</span>
+                <span class="c1"># Deliberate refusal, not an oversight. With a ragged</span>
+                <span class="c1"># (NaN-padded) grid the uniform-effort constraint below</span>
+                <span class="c1"># rescales candidate c&#39;s information by 1/n_spt_c, which</span>
+                <span class="c1"># differs BETWEEN candidates -- so it is no longer a constant</span>
+                <span class="c1"># offset and it silently reweights candidates against each</span>
+                <span class="c1"># other, changing which design is optimal. Getting that right</span>
+                <span class="c1"># needs a modelling decision (is one run of a 4-point</span>
+                <span class="c1"># candidate worth the same as one run of a 1-point</span>
+                <span class="c1"># candidate?), not just a code change. Note that ragged grids</span>
+                <span class="c1"># do not currently survive eval_sensitivities at all -- see</span>
+                <span class="c1"># the variable-length sampling-time Open Item -- so this</span>
+                <span class="c1"># guard refuses a case that is unreachable today anyway.</span>
+                <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span>
+                    <span class="s2">&quot;fixed_sampling_grid=True is not supported for candidates &quot;</span>
+                    <span class="s2">&quot;with DIFFERENT numbers of sampling times &quot;</span>
+                    <span class="s2">&quot;(sampling_times_candidates is NaN-padded, so &quot;</span>
+                    <span class="s2">&quot;_var_n_sampling_time is True). The uniform-effort &quot;</span>
+                    <span class="s2">&quot;constraint would rescale each candidate by 1/n_spt_c and &quot;</span>
+                    <span class="s2">&quot;change the resulting design. Use a common grid for every &quot;</span>
+                    <span class="s2">&quot;candidate.&quot;</span>
+                <span class="p">)</span>
 
 <span class="w">        </span><span class="sd">&quot;&quot;&quot; checking if CVaR problem &quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="s2">&quot;cvar&quot;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_criterion</span><span class="p">:</span>
@@ -4398,6 +4517,7 @@
             <span class="s2">&quot;pseudo_bayesian&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_bayesian</span><span class="p">,</span>
             <span class="s2">&quot;pseudo_bayesian_type&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_bayesian_type</span><span class="p">,</span>
             <span class="s2">&quot;optimize_sampling_times&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_opt_sampling_times</span><span class="p">,</span>
+            <span class="s2">&quot;fixed_sampling_grid&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fixed_sampling_grid</span><span class="p">,</span>
             <span class="s2">&quot;regularized&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_regularize_fim</span><span class="p">,</span>
             <span class="s2">&quot;n_spt_spec&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_n_spt_spec</span><span class="p">,</span>
             <span class="s2">&quot;prior_fim&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_prior_fim</span><span class="p">,</span>
@@ -6372,6 +6492,10 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_bayesian</span> <span class="o">=</span> <span class="n">oed_result</span><span class="p">[</span><span class="s2">&quot;pseudo_bayesian&quot;</span><span class="p">]</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_bayesian_type</span> <span class="o">=</span> <span class="n">oed_result</span><span class="p">[</span><span class="s2">&quot;pseudo_bayesian_type&quot;</span><span class="p">]</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_opt_sampling_times</span> <span class="o">=</span> <span class="n">oed_result</span><span class="p">[</span><span class="s2">&quot;optimize_sampling_times&quot;</span><span class="p">]</span>
+        <span class="c1"># .get(), not [...]: results written before fixed_sampling_grid existed</span>
+        <span class="c1"># have no such key, and False is exactly the behaviour they were</span>
+        <span class="c1"># produced under.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_fixed_sampling_grid</span> <span class="o">=</span> <span class="n">oed_result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;fixed_sampling_grid&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_regularize_fim</span> <span class="o">=</span> <span class="n">oed_result</span><span class="p">[</span><span class="s2">&quot;regularized&quot;</span><span class="p">]</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_n_spt_spec</span> <span class="o">=</span> <span class="n">oed_result</span><span class="p">[</span><span class="s2">&quot;n_spt_spec&quot;</span><span class="p">]</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_prior_fim</span>    <span class="o">=</span> <span class="n">oed_result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;prior_fim&quot;</span><span class="p">,</span>    <span class="kc">None</span><span class="p">)</span>
@@ -9979,7 +10103,16 @@
             <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fd_jac</span> <span class="k">else</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">inf</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">n_grad</span><span class="p">))</span>
 
         <span class="n">eigvals</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">eigvalsh</span><span class="p">(</span><span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="n">fim</span> <span class="o">+</span> <span class="n">fim</span><span class="o">.</span><span class="n">T</span><span class="p">))</span>
-        <span class="k">if</span> <span class="ow">not</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">eigvals</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">):</span>
+        <span class="c1"># Relative cutoff (rtol=1e-12 against the largest eigenvalue), not a</span>
+        <span class="c1"># strict eigvals &gt; 0 test: for a FIM singular in theory, the residual</span>
+        <span class="c1"># eigenvalue after floating-point roundoff can land on either side of</span>
+        <span class="c1"># zero depending on the order operations were performed in (e.g.</span>
+        <span class="c1"># accumulate-by-candidate vs a single S.T @ diag(efforts) @ S matmul</span>
+        <span class="c1"># give different signs on the same mathematical matrix), so a strict</span>
+        <span class="c1"># positivity test makes infeasibility depend on arithmetic path</span>
+        <span class="c1"># rather than on the model or design. See _safe_fim_inverse.</span>
+        <span class="n">_eigmax</span> <span class="o">=</span> <span class="n">eigvals</span><span class="o">.</span><span class="n">max</span><span class="p">()</span> <span class="k">if</span> <span class="n">eigvals</span><span class="o">.</span><span class="n">size</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="k">if</span> <span class="n">_eigmax</span> <span class="o">&lt;=</span> <span class="mf">0.0</span> <span class="ow">or</span> <span class="n">eigvals</span><span class="o">.</span><span class="n">min</span><span class="p">()</span> <span class="o">&lt;=</span> <span class="mf">1e-12</span> <span class="o">*</span> <span class="n">_eigmax</span><span class="p">:</span>
             <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fd_jac</span> <span class="k">else</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">inf</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">n_grad</span><span class="p">))</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fd_jac</span><span class="p">:</span>
@@ -10019,6 +10152,17 @@
 <span class="sd">        Positive-definiteness is tested by eigenvalue rather than relying on</span>
 <span class="sd">        np.linalg.inv raising: an indefinite matrix inverts cleanly and yields</span>
 <span class="sd">        a plausible-looking but meaningless PVAR.</span>
+
+<span class="sd">        The eigenvalue test uses a RELATIVE cutoff (rtol=1e-12 against the</span>
+<span class="sd">        largest eigenvalue), matching diagnose_fim_structure&#39;s default. A</span>
+<span class="sd">        strict `eig &gt; 0` test is not usable here: for a FIM that is exactly</span>
+<span class="sd">        singular in theory, the residual eigenvalue after floating-point</span>
+<span class="sd">        roundoff can land on either side of zero depending on the order</span>
+<span class="sd">        operations were performed in (e.g. accumulate-by-candidate vs a</span>
+<span class="sd">        single S.T @ diag(efforts) @ S matmul give different signs on the</span>
+<span class="sd">        same mathematical matrix) -- so a strict positivity test makes this</span>
+<span class="sd">        guard&#39;s outcome depend on arithmetic path rather than on the model</span>
+<span class="sd">        or design.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">fim</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;fim&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">fim</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
@@ -10029,7 +10173,8 @@
         <span class="k">if</span> <span class="ow">not</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">fim</span><span class="p">)):</span>
             <span class="k">return</span> <span class="kc">None</span>
         <span class="n">eig</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">eigvalsh</span><span class="p">(</span><span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="n">fim</span> <span class="o">+</span> <span class="n">fim</span><span class="o">.</span><span class="n">T</span><span class="p">))</span>
-        <span class="k">if</span> <span class="ow">not</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">eig</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">):</span>
+        <span class="n">eig_max</span> <span class="o">=</span> <span class="n">eig</span><span class="o">.</span><span class="n">max</span><span class="p">()</span> <span class="k">if</span> <span class="n">eig</span><span class="o">.</span><span class="n">size</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="k">if</span> <span class="n">eig_max</span> <span class="o">&lt;=</span> <span class="mf">0.0</span> <span class="ow">or</span> <span class="n">eig</span><span class="o">.</span><span class="n">min</span><span class="p">()</span> <span class="o">&lt;=</span> <span class="mf">1e-12</span> <span class="o">*</span> <span class="n">eig_max</span><span class="p">:</span>
             <span class="k">return</span> <span class="kc">None</span>
         <span class="k">try</span><span class="p">:</span>
             <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="n">fim</span><span class="p">)</span>
@@ -10516,7 +10661,10 @@
             <span class="k">if</span> <span class="n">fim</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span>
             <span class="n">eigvals</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">eigvalsh</span><span class="p">(</span><span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="n">fim</span> <span class="o">+</span> <span class="n">fim</span><span class="o">.</span><span class="n">T</span><span class="p">))</span>
-            <span class="k">if</span> <span class="ow">not</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">eigvals</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">):</span>
+            <span class="c1"># Relative cutoff, not strict positivity -- see _a_opt_criterion</span>
+            <span class="c1"># and _safe_fim_inverse for why.</span>
+            <span class="n">_eigmax</span> <span class="o">=</span> <span class="n">eigvals</span><span class="o">.</span><span class="n">max</span><span class="p">()</span> <span class="k">if</span> <span class="n">eigvals</span><span class="o">.</span><span class="n">size</span> <span class="k">else</span> <span class="mf">0.0</span>
+            <span class="k">if</span> <span class="n">_eigmax</span> <span class="o">&lt;=</span> <span class="mf">0.0</span> <span class="ow">or</span> <span class="n">eigvals</span><span class="o">.</span><span class="n">min</span><span class="p">()</span> <span class="o">&lt;=</span> <span class="mf">1e-12</span> <span class="o">*</span> <span class="n">_eigmax</span><span class="p">:</span>
                 <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span>
             <span class="c1"># Deliberately keep the original inv().trace() arithmetic rather</span>
             <span class="c1"># than the algebraically equivalent sum(1/eigvals), so that values</span>
@@ -11804,16 +11952,20 @@
             <span class="bp">self</span><span class="o">.</span><span class="n">n_c_tvc</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_tvc</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_c_tic</span><span class="p">,</span> <span class="mi">1</span>
             <span class="c1"># A static model has no time axis. This placeholder exists only so</span>
             <span class="c1"># that downstream shape arithmetic has something to index; every</span>
-            <span class="c1"># read of it is behind an `if self._dynamic_system:` guard. Use</span>
-            <span class="c1"># zeros, not np.empty_like: empty_like returns whatever was in</span>
-            <span class="c1"># memory, which get_optimal_candidates then copies into</span>
-            <span class="c1"># opt_cand[3], so a static design carried nondeterministic garbage</span>
-            <span class="c1"># in a field that looks like data. (The SHAPE is also wrong -- it</span>
-            <span class="c1"># follows ti_controls_candidates while n_spt is 1 -- but changing</span>
-            <span class="c1"># that reaches save/load and the padding helpers, so it is left</span>
-            <span class="c1"># alone here deliberately.)</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">sampling_times_candidates</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">ti_controls_candidates</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span>
+            <span class="c1"># read of it is behind an `if self._dynamic_system:` guard. Shape</span>
+            <span class="c1"># is (n_c, 1) -- n_spt is always 1 for a static model -- not</span>
+            <span class="c1"># (n_c, n_tic). It used to follow ti_controls_candidates&#39;s shape,</span>
+            <span class="c1"># which was harmless only because every consumer already ignores</span>
+            <span class="c1"># its content behind the guard above; correcting the shape here</span>
+            <span class="c1"># removes a latent trap for any future guard that assumes width 1</span>
+            <span class="c1"># (e.g. indexing [:, 0] or comparing against n_spt). See Open</span>
+            <span class="c1"># Item 17 in PROJECT_NOTES.md. Zero-filled, not np.empty --</span>
+            <span class="c1"># empty_like previously returned whatever was in memory, which</span>
+            <span class="c1"># get_optimal_candidates then copied into opt_cand[3], so a</span>
+            <span class="c1"># static design carried nondeterministic garbage in a field that</span>
+            <span class="c1"># looks like data (fixed in 0.4.1, defect 5).</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">sampling_times_candidates</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span>
+                <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c_tic</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span>
             <span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">n_c_spt</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_c_tic</span><span class="p">,</span> <span class="mi">1</span>
         <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_simulate_signature</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>

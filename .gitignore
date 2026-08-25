@@ -237,3 +237,6 @@ tmp*.pyomo.*
 
 # macOS Finder metadata
 .DS_Store
+
+# flat designer.py copy for the solver-free test recipe (see README)
+_flat/

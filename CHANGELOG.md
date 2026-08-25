@@ -5,6 +5,110 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-25
+
+### Added
+
+- **`fixed_sampling_grid` argument to `design_experiment()`** — allocates one
+  effort per EXPERIMENT rather than per (candidate, sampling-time) cell, so
+  every listed sampling time is measured on every run and the only decision
+  is WHICH experimental conditions to run. This is the common industrial case
+  of a fixed analytical schedule you do not control; it previously could not
+  be posed directly on a dynamic model, because per-sampling-time effort was
+  always a free variable.
+
+  Implemented as `n_spt - 1` linear equalities per candidate, applied on BOTH
+  the native Pyomo path and the SLSQP fallback — omitting the latter would
+  have let the flag be silently ignored for every non-native criterion
+  (pseudo-Bayesian type 1, `vdi`, the six prediction-variance criteria, CVaR).
+
+  The resulting FIM is `1/n_spt` times the per-experiment FIM. Because
+  `n_spt` is constant this is a CONSTANT rescaling: the design is unaffected
+  and log-det criteria shift by exactly `n_mp * ln(n_spt)`, the same
+  structure as `error_cov` scaling. **Criterion values are therefore not
+  comparable across this flag; designs are.**
+
+  Requires a dynamic model, a grid common to every candidate, and is mutually
+  exclusive with `n_spt` (which asks the optimiser to CHOOSE which times to
+  sample). Ragged/NaN-padded grids raise `NotImplementedError` deliberately:
+  there the rescaling is `1/n_spt_c`, different per candidate, so it would
+  silently reweight candidates and change which design is optimal.
+
+  Default `False`, reproducing all previous behaviour exactly. Verified
+  against an INDEPENDENT reference — the same experiment posed as a static
+  multi-response model, which reaches the FIM through entirely different
+  machinery — agreeing on the design to `2.1e-08` with the criterion offset
+  matching `n_mp * ln(n_spt)` to 8 significant figures. Guarded by capability
+  suite section 56 and `tests/test_fixed_sampling_grid.py`.
+
+### Fixed
+
+- **A-optimality treated a numerically singular FIM as invertible, depending
+  on arithmetic path.** `_a_opt_criterion`, `_pb_a_opt_criterion` and
+  `_safe_fim_inverse` each tested positive-definiteness with a strict
+  `eig > 0` and no tolerance. For a FIM that is exactly singular in theory,
+  the residual eigenvalue in the null direction is floating-point roundoff
+  whose SIGN depends on the order operations were performed in: measured on
+  the same mathematical matrix, accumulate-by-candidate gave `+1.2e-19`, a
+  single `S.T @ diag(e) @ S` matmul gave `-9.3e-20`, and longdouble gave
+  `-2.4e-20`. On the positive side the FIM "inverted" and A-optimality
+  returned a huge finite value (~`8.2e+18`) instead of `+inf`.
+
+  All three now use a RELATIVE cutoff (`rtol=1e-12` against the largest
+  eigenvalue), matching `diagnose_fim_structure`'s existing convention for
+  the same question. **This is a user-visible behaviour change**: a design
+  whose FIM is singular-but-tiny-positive now reports infeasible where it
+  previously returned a finite criterion. That is the intended semantics —
+  a huge finite value is a near-best score for a minimised criterion, so the
+  old behaviour attracted the optimiser toward rank-deficient supports, the
+  very bug `smoke_test_designer.py` CHECK 2 exists to catch. Guarded by
+  `tests/test_a_opt_singular_fim_guard.py` (12 tests).
+
+- **A static model's `sampling_times_candidates` had the wrong SHAPE.**
+  `_get_component_sizes` allocated it following `ti_controls_candidates`,
+  i.e. `(n_c, n_tic)`, while `n_spt` is always 1 for a static model, so it
+  should be `(n_c, 1)`. 0.4.1 made the contents deterministic but left the
+  shape. Latent (every read is behind an `if self._dynamic_system:` guard),
+  so this is a correctness cleanup rather than a live bug fix; the array is
+  pickled by `save_state`, so the save/load round-trip is now covered too
+  (capability suite section 58).
+
+### Changed
+
+- **`optimize_sampling_times` documentation corrected — it does not control
+  the formulation.** The flag appears nowhere in either solver path: per
+  sampling-time effort is a free decision variable either way, and passing
+  `False` vs `True` yields BIT-IDENTICAL efforts (verified: `max |diff| =
+  0.0`, criterion identical to all digits, which is why suite sections 03
+  and 06 have always reported the same value). What actually changes the
+  formulation is `n_spt` — and because `n_spt` force-overrides this flag to
+  `True`, the flag looked causal while being only a necessary companion.
+  It controls reporting and candidate extraction only.
+
+  In particular the `sampling_times_candidates` docstring claimed that with
+  `optimize_sampling_times=False` "every listed time is measured". That was
+  false — the optimiser routinely drives most grid times to zero effort
+  regardless — and `fixed_sampling_grid` is now the way to require it.
+
+- `.gitignore` now covers `_flat/`, the scratch directory the README's own
+  solver-free test recipe tells you to create inside the repo.
+
+### Testing
+
+- Capability suite: **297 assertions across 60 sections** (was 287 / 57).
+  New sections 56 (`fixed_sampling_grid` vs an independent reformulation),
+  57 (`apportion()` on a NON-D-optimal design — nothing previously
+  apportioned anything but D-optimal, which is exactly why 0.4.1's
+  `UnboundLocalError` in the efficiency block survived), and 58 (static
+  placeholder shape and save/load round-trip). Absorbed Pyomo noise
+  unchanged at 865 + 1.
+- Solver-free `tests/`: **129 passed** (was 62). Four new files.
+- Every new assertion was confirmed to FAIL against the pre-fix code, and two
+  first-draft tests were discarded for being vacuous — one whose fixture
+  planted a `1e-19` eigenvalue that a `Q @ diag @ Q.T` reconstruction's own
+  rounding swamped, and two that asserted on a locally built dict rather than
+  on `designer.py`.
+
 ## [0.4.1] - 2026-08-25
 
 ### Added

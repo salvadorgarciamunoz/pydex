@@ -4901,6 +4901,271 @@ def test_55_b_opt_vs_exhaustive_enumeration():
 
 
 # =============================================================================
+#  56 — fixed_sampling_grid vs an INDEPENDENT reformulation
+# =============================================================================
+#  fixed_sampling_grid=True ties each candidate's sampling-time efforts
+#  together, so one effort is chosen per EXPERIMENT and every listed time is
+#  measured on every run. This section is the only BEHAVIOURAL guard on that
+#  flag (tests/test_fixed_sampling_grid.py covers its argument guards, which
+#  is a different thing).
+#
+#  The reference is deliberately NOT another pydex path doing the same thing.
+#  It is the same experiment posed as a STATIC MULTI-RESPONSE model, with the
+#  fixed grid folded into the response vector: n_spt=1, no sampling-time axis,
+#  no per-time atomic FIMs. Agreement between them is therefore evidence, not
+#  two code paths sharing a bug -- the same construction as §54 (closed form)
+#  and §55 (exhaustive enumeration).
+#
+#  THE FIXTURE MATTERS. Three parameters but only TWO sampling times per
+#  candidate, so no single candidate can identify the model (rank <= 2 < 3)
+#  and the optimal design MUST spread over several candidates. An earlier
+#  draft used 2 parameters and 4 times; its design collapsed onto ONE
+#  candidate, where "agreement" means only that both paths picked the same
+#  single point -- which would pass even if the constraint did nothing.
+# =============================================================================
+_S56_TIMES = np.array([1.0, 3.0])
+_S56_TIC = np.array([[0.5], [1.0], [2.0], [4.0], [8.0]])
+_S56_THETA = np.array([2.0, 0.5, 1.5])
+_S56_SOPT = {"tol": 1e-10, "max_iter": 5000}
+
+
+def _s56_sim_dynamic(ti_controls, sampling_times, model_parameters):
+    u = ti_controls[0]
+    a, b, c = model_parameters
+    t = np.asarray(sampling_times, dtype=float)
+    return a * u + b * t + c * u * t
+
+
+def _s56_sim_static(ti_controls, model_parameters):
+    """The SAME experiment with the fixed grid folded into the responses."""
+    u = ti_controls[0]
+    a, b, c = model_parameters
+    return a * u + b * _S56_TIMES + c * u * _S56_TIMES
+
+
+def test_56_fixed_sampling_grid_vs_static_reformulation():
+    section("56 — fixed_sampling_grid vs static multi-response reformulation")
+
+    if not _PYOMO_AVAILABLE:
+        ok("SKIPPED — Pyomo not available")
+        return
+    if not pyo.SolverFactory("ipopt").available(exception_flag=False):
+        ok("SKIPPED — ipopt not available")
+        return
+
+    def dynamic(fixed):
+        d = Designer()
+        d.simulate = _s56_sim_dynamic
+        d.model_parameters = _S56_THETA.copy()
+        d.ti_controls_candidates = _S56_TIC.copy()
+        d.sampling_times_candidates = np.tile(_S56_TIMES, (len(_S56_TIC), 1))
+        d.error_cov = np.array([[0.01]])
+        d.initialize(verbose=0)
+        d.design_experiment(criterion=d.d_opt_criterion, solver="ipopt",
+                            solver_options=_S56_SOPT,
+                            fixed_sampling_grid=fixed)
+        return d
+
+    d_fix = dynamic(True)
+    d_free = dynamic(False)
+
+    d_ref = Designer()
+    d_ref.simulate = _s56_sim_static
+    d_ref.model_parameters = _S56_THETA.copy()
+    d_ref.ti_controls_candidates = _S56_TIC.copy()
+    d_ref.error_cov = np.eye(len(_S56_TIMES)) * 0.01
+    d_ref.initialize(verbose=0)
+    d_ref.design_experiment(criterion=d_ref.d_opt_criterion, solver="ipopt",
+                            solver_options=_S56_SOPT)
+
+    e_fix = np.asarray(d_fix.efforts, dtype=float)
+    e_free = np.asarray(d_free.efforts, dtype=float)
+    w_fix = e_fix.sum(axis=1)
+    w_ref = np.asarray(d_ref.efforts, dtype=float).ravel()
+    n_spt, n_mp = d_fix.n_spt, d_fix.n_mp
+
+    # (a) the fixture must actually produce a spread design, or the agreement
+    #     assertion below is vacuous.
+    support = int(np.sum(w_fix > 1e-6))
+    assert support >= 2, (
+        f"fixture degenerate: design supported on {support} candidate(s), so "
+        f"agreement with the reference would prove nothing")
+    ok(f"design spread over {support} of {len(_S56_TIC)} candidates "
+       f"(weights {np.round(w_fix[w_fix > 1e-6], 6).tolist()})")
+
+    # (b) effort really is uniform within each candidate
+    spread = float(np.max(np.max(e_fix, axis=1) - np.min(e_fix, axis=1)))
+    assert spread < 1e-8, f"efforts not uniform across sampling times: {spread:.3e}"
+    ok(f"within-candidate effort spread {spread:.3e} (uniform)")
+
+    # (c) CONTROL: the constraint must actually bind. Without this, (b) would
+    #     pass on any problem whose unconstrained optimum happens to be flat.
+    spread_free = float(np.max(np.max(e_free, axis=1) - np.min(e_free, axis=1)))
+    assert spread_free > 1e-4, (
+        f"unconstrained design is already uniform (spread {spread_free:.3e}), "
+        f"so this fixture cannot demonstrate the constraint binding")
+    assert not np.allclose(e_fix, e_free, atol=1e-5), (
+        "constrained and unconstrained designs are identical -- the "
+        "fixed_sampling_grid constraint is not binding")
+    ok(f"control: unconstrained spread {spread_free:.3e}, designs differ")
+
+    # (d) the design agrees with the independent reformulation
+    dev = float(np.max(np.abs(w_fix - w_ref)))
+    assert dev < 1e-5, (
+        f"per-candidate weights disagree with the static reformulation by "
+        f"{dev:.3e}\n  fixed_sampling_grid: {np.round(w_fix, 8)}"
+        f"\n  static reference   : {np.round(w_ref, 8)}")
+    ok(f"design agrees with static reformulation to {dev:.3e}")
+
+    # (e) the criterion is offset by exactly n_mp*ln(n_spt) -- a CONSTANT
+    #     rescaling, because e[c,k]=w_c/n_spt makes the FIM 1/n_spt times the
+    #     per-experiment FIM. Pinning this documents that criterion VALUES are
+    #     not comparable across the flag while DESIGNS are.
+    offset = float(d_ref._criterion_value - d_fix._criterion_value)
+    expected = float(n_mp * np.log(n_spt))
+    assert abs(offset - expected) < 1e-5, (
+        f"criterion offset {offset:.9f} != n_mp*ln(n_spt) = {expected:.9f}")
+    ok(f"criterion offset {offset:.9f} == n_mp*ln(n_spt) = {expected:.9f}")
+
+
+# =============================================================================
+#  57 — apportion() on a NON-D-optimal design
+# =============================================================================
+#  Nothing else in this suite apportions anything but a D-optimal design,
+#  which is exactly why 0.4.1 defect 3 survived: the efficiency block assigned
+#  `efficiency` inside a four-way if/elif (d_opt, ds_opt, a_opt, e_opt) with no
+#  else, then called np.squeeze(efficiency) unconditionally, raising
+#  UnboundLocalError for the other 11 of 15 public criteria. Sections 10 and 32
+#  apportion d_opt -- the one case it did not break.
+#
+#  NOTE the entire reporting block sits inside `if self._verbose >= 1:`. At
+#  verbose=0 apportion() prints nothing AND never evaluates the rounded
+#  criterion, so this section would pass while testing nothing. Verbose is
+#  forced to 1 below and the printed text is asserted on, not just the absence
+#  of an exception.
+# =============================================================================
+def test_57_apportion_non_d_optimal(d_small):
+    section("57 — apportion() on a NON-D-optimal design (efficiency reporting)")
+
+    if not _PYOMO_AVAILABLE:
+        ok("SKIPPED — Pyomo not available")
+        return
+    if not pyo.SolverFactory("ipopt").available(exception_flag=False):
+        ok("SKIPPED — ipopt not available")
+        return
+
+    import io
+    import contextlib
+
+    # ai_opt (no relative-efficiency definition) and a_opt (has one), so both
+    # branches of the fixed if/elif/else are exercised in one section.
+    for crit_name, expect_ratio in (("ai_opt_criterion", False),
+                                    ("a_opt_criterion", True)):
+        d = make_designer(small=True)
+        d.design_experiment(
+            criterion=getattr(d, crit_name), solver="ipopt",
+            solver_options={"linear_solver": LINEAR_SOLVER,
+                            "tol": 1e-8, "max_iter": 2000},
+        )
+        d._verbose = 1          # REQUIRED: the report is gated on this
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            app = d.apportion(n_exp=10)
+        out = buf.getvalue()
+
+        assert int(np.nansum(app)) == 10, (
+            f"{crit_name}: apportionment sums to {np.nansum(app)}, expected 10")
+        # The Kiefer bound is well defined for EVERY criterion and must be
+        # reported regardless. Pre-fix it was printed and then the crash
+        # followed, so a caller never got to use it.
+        assert "guaranteed to be at least" in out, (
+            f"{crit_name}: rounding bound not reported")
+
+        said_unavailable = "relative-efficiency definition" in out
+        said_ratio = "as informative as the continuous design" in out
+        if expect_ratio:
+            assert said_ratio and not said_unavailable, (
+                f"{crit_name} HAS a relative-efficiency definition but the "
+                f"report did not give one")
+            ok(f"{crit_name}: apportioned 10 runs, efficiency ratio reported")
+        else:
+            assert said_unavailable and not said_ratio, (
+                f"{crit_name} has NO relative-efficiency definition; the "
+                f"report must say so explicitly rather than omitting the line "
+                f"or inventing a ratio")
+            ok(f"{crit_name}: apportioned 10 runs, absence of a ratio "
+               f"explained explicitly")
+
+
+# =============================================================================
+#  58 — static model: sampling_times_candidates shape and save/load round-trip
+# =============================================================================
+#  A static model (simulate signature 1) has no time axis, so pydex fabricates
+#  a placeholder sampling_times_candidates. Its shape must be (n_c, 1) -- n_spt
+#  is 1 -- not (n_c, n_tic), which is what it used to follow. The shape was
+#  left uncorrected in 0.4.1 specifically because it is PICKLED by save_state,
+#  so this section fixes the shape claim AND the round-trip in one place. The
+#  fixture uses TWO ti_controls on purpose: with one, the wrong shape and the
+#  right shape coincide.
+# =============================================================================
+def _s58_simulate(ti_controls, model_parameters):
+    x, z = ti_controls
+    a, b = model_parameters
+    return np.array([a + b * x + 0.05 * z])
+
+
+def test_58_static_sampling_times_shape_and_state_roundtrip():
+    section("58 — static sampling_times_candidates shape + save/load round-trip")
+
+    d = Designer()
+    d.simulate = _s58_simulate
+    d.model_parameters = np.array([1.0, 2.0])
+    d.ti_controls_candidates = np.array([
+        [x, z] for x, z in zip(np.linspace(0, 10, 6), np.linspace(-5, 5, 6))
+    ])
+    d.error_cov = np.array([[0.01]])
+    d.initialize(verbose=0)
+
+    assert d.n_tic == 2, "fixture must have >1 ti_control to expose the bug"
+    assert not d._dynamic_system, "fixture must be a static model"
+    assert d.n_spt == 1, f"static model must have n_spt == 1, got {d.n_spt}"
+    assert d.sampling_times_candidates.shape == (d.n_c, 1), (
+        f"static placeholder must be (n_c, 1) = ({d.n_c}, 1), got "
+        f"{d.sampling_times_candidates.shape} -- the old allocation followed "
+        f"ti_controls_candidates, i.e. (n_c, n_tic)")
+    ok(f"shape is ({d.n_c}, 1), not ({d.n_c}, {d.n_tic})")
+
+    # deterministic content: 0.4.1 fixed this from np.empty_like (uninitialised
+    # memory, copied straight into opt_cand[3]) to zeros.
+    assert np.all(d.sampling_times_candidates == 0.0), (
+        "static placeholder must be zero-filled, not uninitialised memory")
+    ok("placeholder is zero-filled (deterministic)")
+
+    # round-trip: the array is pickled, so the corrected shape must survive
+    d.save_state()
+    import os
+    state = [f for f in os.listdir(d.result_dir)
+             if f.endswith(".pkl") and "state" in f][-1]
+    abs_path = os.path.join(d.result_dir, state)
+    cwd = os.getcwd()
+    rel_path = abs_path[len(cwd):] if abs_path.startswith(cwd) else abs_path
+
+    d2 = Designer()
+    d2.simulate = _s58_simulate
+    d2.load_state(rel_path)
+    assert d2.sampling_times_candidates.shape == (d.n_c, 1), (
+        f"shape not preserved through save/load: "
+        f"{d2.sampling_times_candidates.shape}")
+    assert np.array_equal(d.sampling_times_candidates,
+                          d2.sampling_times_candidates), \
+        "values not preserved through save/load"
+    assert d2.n_spt == d.n_spt and d2.n_c == d.n_c, \
+        "n_spt / n_c not preserved through save/load"
+    ok(f"save/load round-trip preserves shape, values, n_spt and n_c "
+       f"(rel path: {rel_path})")
+
+
+# =============================================================================
 #  R U N N E R
 # =============================================================================
 #  Sections are run through `run()`, which records a failure and CONTINUES
@@ -5036,6 +5301,11 @@ if __name__ == "__main__":
 
     # ── bracketing-optimal design (new criterion, verified by enumeration)
     run(test_55_b_opt_vs_exhaustive_enumeration)
+
+    # ── fixed sampling grid, apportion reporting, static placeholder shape
+    run(test_56_fixed_sampling_grid_vs_static_reformulation)
+    run(test_57_apportion_non_d_optimal, d_small)
+    run(test_58_static_sampling_times_shape_and_state_roundtrip)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print_pyomo_noise_summary()

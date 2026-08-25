@@ -1059,6 +1059,10 @@ class Designer:
         self._sensitivity_is_normalized = None
         self._opt_sampling_times = False
         self._var_n_sampling_time = None
+        # One effort per EXPERIMENT rather than per (candidate, sampling-time)
+        # cell: every listed sampling time is measured on every run. Default
+        # False preserves the historical behaviour exactly.
+        self._fixed_sampling_grid = False
         # numerical options
         self._regularize_fim = None
         self._num_steps = 5
@@ -1247,10 +1251,14 @@ class Designer:
         measured. Rows may be padded with ``numpy.nan`` when candidates have
         different numbers of usable times.
 
-        With ``optimize_sampling_times=False`` every listed time is measured.
-        With it True the optimiser also chooses WHICH of them to use, and
-        ``n_spt=k`` restricts each experiment to k samples — the same candidate
-        may then appear under several sampling schedules.
+        Per-sampling-time effort is a free decision variable by default, so
+        the optimiser allocates effort across these times and routinely drives
+        most of them to zero. ``optimize_sampling_times`` does NOT change that
+        (it affects reporting only). To require that every listed time is
+        measured on every run, pass ``fixed_sampling_grid=True`` to
+        :meth:`design_experiment`. ``n_spt=k`` instead has the optimiser choose
+        WHICH k of the listed times to use, and the same candidate may then
+        appear under several sampling schedules.
 
         Assigning marks the candidate set changed.
         """
@@ -2677,6 +2685,36 @@ class Designer:
 
         m.sum_con = pyo.Constraint(expr=sum(m.e[i] for i in m.E) == 1.0)
 
+        # --- fixed_sampling_grid: one effort per EXPERIMENT, not per
+        # (candidate, sampling-time) cell.
+        #
+        # The effort vector is flattened row-major over (n_c, n_spt), so
+        # candidate c owns indices [c*n_spt, (c+1)*n_spt). Tying those cells
+        # together makes a candidate's whole listed grid a single indivisible
+        # experiment: you cannot buy time t1 of candidate c without buying t2.
+        # n_spt-1 equalities per candidate, all LINEAR, so the program stays
+        # the same class it already was.
+        #
+        # Effect on the FIM: e[c,k] = w_c/n_spt gives
+        # FIM = (1/n_spt) * sum_c w_c * (sum_k A[c,k]), i.e. exactly 1/n_spt
+        # times the per-experiment FIM. Verified numerically to 2.8e-14 and
+        # bit-identical to a static multi-response reformulation of the same
+        # experiment. Since n_spt is a constant here (ragged grids are
+        # refused in design_experiment), this is a CONSTANT rescaling: the
+        # argmax is unaffected and log-det criteria shift by exactly
+        # n_mp*ln(n_spt) -- the same structure as error_cov scaling. The
+        # criterion VALUE is therefore not comparable across values of this
+        # flag; the design is.
+        if getattr(self, "_fixed_sampling_grid", False):
+            _n_spt = self.n_spt
+            if _n_spt > 1:
+                def _tie(m, c, k):
+                    base = c * _n_spt
+                    return m.e[base + k] == m.e[base]
+                m.C_fsg = pyo.RangeSet(0, self.n_c - 1)
+                m.K_fsg = pyo.RangeSet(1, _n_spt - 1)
+                m.fixed_grid_con = pyo.Constraint(m.C_fsg, m.K_fsg, rule=_tie)
+
         for i in m.E:
             m.e[i].set_value(float(e0_flat[i]))
 
@@ -3324,6 +3362,23 @@ class Designer:
             bounds = [(float(f), float(f)) for f in fixed]
 
         constraints = [{"type": "eq", "fun": lambda e: np.sum(e) - 1.0}]
+
+        # fixed_sampling_grid: tie each candidate's sampling-time cells
+        # together, so one effort is chosen per EXPERIMENT. Must be applied
+        # here as well as in _solve_pyomo -- this path serves every
+        # non-native criterion (pseudo-Bayesian type 1, vdi, the six
+        # prediction-variance criteria, CVaR), and omitting it would let the
+        # flag be silently ignored for exactly those. See _solve_pyomo for
+        # the derivation and the constant-rescaling note.
+        if getattr(self, "_fixed_sampling_grid", False) and self.n_spt > 1:
+            _n_spt, _n_c = self.n_spt, self.n_c
+
+            def _fsg_residuals(e, _n_spt=_n_spt, _n_c=_n_c):
+                E = np.asarray(e, dtype=float).reshape(_n_c, _n_spt)
+                # each candidate's cells minus that candidate's first cell
+                return (E[:, 1:] - E[:, [0]]).ravel()
+
+            constraints.append({"type": "eq", "fun": _fsg_residuals})
 
         opts = {"ftol": 1e-9, "maxiter": 5000, "disp": self._verbose >= 2}
         if solver_options:
@@ -3982,6 +4037,7 @@ class Designer:
                           pseudo_bayesian_type=None, regularize_fim=False, beta=0.90,
                           min_expected_value=None, fix_effort=None, save_atomics=False,
                           min_effort=None, allow_singular_fim=False, output_weight=0.5,
+                          fixed_sampling_grid=False,
                           **kwargs):
         """Solve for the optimal continuous experimental design.
 
@@ -4008,8 +4064,31 @@ class Designer:
                 :attr:`atomic_fims` first if changing it between runs.
             n_exp (int, optional): Solve for a discrete design of this many
                 experiments instead of a continuous one.
-            optimize_sampling_times (bool): Also choose WHEN to sample, rather
-                than measuring every listed time.
+            optimize_sampling_times (bool): Controls how the design is
+                REPORTED and extracted, not how it is formulated. Note per
+                sampling-time effort is a free decision variable EITHER WAY:
+                the flag appears nowhere in the optimisation, and passing
+                False vs True yields bit-identical efforts. The formulation
+                is changed by ``n_spt`` (which selects WHICH times to sample,
+                and force-overrides this flag to True) or by
+                ``fixed_sampling_grid`` (which ties a candidate's times
+                together). Do not read False as "every listed time is
+                measured" -- the optimiser routinely drives most grid times
+                to zero effort regardless.
+            fixed_sampling_grid (bool): Allocate one effort per EXPERIMENT
+                instead of per (candidate, sampling-time) cell, so every
+                listed sampling time is measured on every run and the only
+                decision is WHICH experimental conditions to run. For a fixed
+                analytical schedule you do not control. Implemented as
+                ``n_spt - 1`` linear equalities per candidate; the resulting
+                FIM is ``1/n_spt`` times the per-experiment FIM, a CONSTANT
+                rescaling, so the design is unaffected but log-det criteria
+                shift by exactly ``n_mp * ln(n_spt)``. Criterion values are
+                therefore NOT comparable across this flag; designs are.
+                Requires a dynamic model, a common grid for every candidate
+                (ragged/NaN-padded grids raise), and is mutually exclusive
+                with ``n_spt``. Default False, which reproduces all previous
+                behaviour exactly.
             solver (str): NLP solver for the native Pyomo path — any
                 AMPL-compatible solver. Ignored on the SLSQP path.
             solver_options (dict, optional): Passed to the solver. On the SLSQP
@@ -4072,6 +4151,46 @@ class Designer:
         self._trim_fim           = trim_fim
         self._save_atomics       = save_atomics
         self._min_effort         = min_effort  # sparsity threshold (MINLP when set)
+        self._fixed_sampling_grid = bool(fixed_sampling_grid)
+
+        """ fixed_sampling_grid: validate before anything is built """
+        if self._fixed_sampling_grid:
+            if not self._dynamic_system:
+                raise SyntaxError(
+                    "fixed_sampling_grid=True is meaningless for a static "
+                    "model: there is no sampling-time axis to hold fixed, and "
+                    "effort is already allocated per experiment."
+                )
+            if n_spt is not None:
+                raise SyntaxError(
+                    "fixed_sampling_grid=True and n_spt are mutually "
+                    "exclusive. n_spt asks the optimiser to CHOOSE which "
+                    "n_spt of the listed times to sample (selection over "
+                    "sampling-time combinations); fixed_sampling_grid says "
+                    "every listed time is measured on every run. Pick one."
+                )
+            if self._var_n_sampling_time:
+                # Deliberate refusal, not an oversight. With a ragged
+                # (NaN-padded) grid the uniform-effort constraint below
+                # rescales candidate c's information by 1/n_spt_c, which
+                # differs BETWEEN candidates -- so it is no longer a constant
+                # offset and it silently reweights candidates against each
+                # other, changing which design is optimal. Getting that right
+                # needs a modelling decision (is one run of a 4-point
+                # candidate worth the same as one run of a 1-point
+                # candidate?), not just a code change. Note that ragged grids
+                # do not currently survive eval_sensitivities at all -- see
+                # the variable-length sampling-time Open Item -- so this
+                # guard refuses a case that is unreachable today anyway.
+                raise NotImplementedError(
+                    "fixed_sampling_grid=True is not supported for candidates "
+                    "with DIFFERENT numbers of sampling times "
+                    "(sampling_times_candidates is NaN-padded, so "
+                    "_var_n_sampling_time is True). The uniform-effort "
+                    "constraint would rescale each candidate by 1/n_spt_c and "
+                    "change the resulting design. Use a common grid for every "
+                    "candidate."
+                )
 
         """ checking if CVaR problem """
         if "cvar" in self._current_criterion:
@@ -4285,6 +4404,7 @@ class Designer:
             "pseudo_bayesian": self._pseudo_bayesian,
             "pseudo_bayesian_type": self._pseudo_bayesian_type,
             "optimize_sampling_times": self._opt_sampling_times,
+            "fixed_sampling_grid": self._fixed_sampling_grid,
             "regularized": self._regularize_fim,
             "n_spt_spec": self._n_spt_spec,
             "prior_fim": self._prior_fim,
@@ -6196,6 +6316,10 @@ class Designer:
         self._pseudo_bayesian = oed_result["pseudo_bayesian"]
         self._pseudo_bayesian_type = oed_result["pseudo_bayesian_type"]
         self._opt_sampling_times = oed_result["optimize_sampling_times"]
+        # .get(), not [...]: results written before fixed_sampling_grid existed
+        # have no such key, and False is exactly the behaviour they were
+        # produced under.
+        self._fixed_sampling_grid = oed_result.get("fixed_sampling_grid", False)
         self._regularize_fim = oed_result["regularized"]
         self._n_spt_spec = oed_result["n_spt_spec"]
         self._prior_fim    = oed_result.get("prior_fim",    None)
@@ -9706,7 +9830,16 @@ class Designer:
             return np.inf if self._fd_jac else (np.inf, np.zeros(n_grad))
 
         eigvals = np.linalg.eigvalsh(0.5 * (fim + fim.T))
-        if not np.all(eigvals > 0):
+        # Relative cutoff (rtol=1e-12 against the largest eigenvalue), not a
+        # strict eigvals > 0 test: for a FIM singular in theory, the residual
+        # eigenvalue after floating-point roundoff can land on either side of
+        # zero depending on the order operations were performed in (e.g.
+        # accumulate-by-candidate vs a single S.T @ diag(efforts) @ S matmul
+        # give different signs on the same mathematical matrix), so a strict
+        # positivity test makes infeasibility depend on arithmetic path
+        # rather than on the model or design. See _safe_fim_inverse.
+        _eigmax = eigvals.max() if eigvals.size else 0.0
+        if _eigmax <= 0.0 or eigvals.min() <= 1e-12 * _eigmax:
             return np.inf if self._fd_jac else (np.inf, np.zeros(n_grad))
 
         if self._fd_jac:
@@ -9746,6 +9879,17 @@ class Designer:
         Positive-definiteness is tested by eigenvalue rather than relying on
         np.linalg.inv raising: an indefinite matrix inverts cleanly and yields
         a plausible-looking but meaningless PVAR.
+
+        The eigenvalue test uses a RELATIVE cutoff (rtol=1e-12 against the
+        largest eigenvalue), matching diagnose_fim_structure's default. A
+        strict `eig > 0` test is not usable here: for a FIM that is exactly
+        singular in theory, the residual eigenvalue after floating-point
+        roundoff can land on either side of zero depending on the order
+        operations were performed in (e.g. accumulate-by-candidate vs a
+        single S.T @ diag(efforts) @ S matmul give different signs on the
+        same mathematical matrix) -- so a strict positivity test makes this
+        guard's outcome depend on arithmetic path rather than on the model
+        or design.
         """
         fim = getattr(self, "fim", None)
         if fim is None:
@@ -9756,7 +9900,8 @@ class Designer:
         if not np.all(np.isfinite(fim)):
             return None
         eig = np.linalg.eigvalsh(0.5 * (fim + fim.T))
-        if not np.all(eig > 0):
+        eig_max = eig.max() if eig.size else 0.0
+        if eig_max <= 0.0 or eig.min() <= 1e-12 * eig_max:
             return None
         try:
             return np.linalg.inv(fim)
@@ -10240,7 +10385,10 @@ class Designer:
             if fim is None:
                 return np.inf
             eigvals = np.linalg.eigvalsh(0.5 * (fim + fim.T))
-            if not np.all(eigvals > 0):
+            # Relative cutoff, not strict positivity -- see _a_opt_criterion
+            # and _safe_fim_inverse for why.
+            _eigmax = eigvals.max() if eigvals.size else 0.0
+            if _eigmax <= 0.0 or eigvals.min() <= 1e-12 * _eigmax:
                 return np.inf
             # Deliberately keep the original inv().trace() arithmetic rather
             # than the algebraically equivalent sum(1/eigvals), so that values
@@ -11528,16 +11676,20 @@ class Designer:
             self.n_c_tvc, self.n_tvc = self.n_c_tic, 1
             # A static model has no time axis. This placeholder exists only so
             # that downstream shape arithmetic has something to index; every
-            # read of it is behind an `if self._dynamic_system:` guard. Use
-            # zeros, not np.empty_like: empty_like returns whatever was in
-            # memory, which get_optimal_candidates then copies into
-            # opt_cand[3], so a static design carried nondeterministic garbage
-            # in a field that looks like data. (The SHAPE is also wrong -- it
-            # follows ti_controls_candidates while n_spt is 1 -- but changing
-            # that reaches save/load and the padding helpers, so it is left
-            # alone here deliberately.)
-            self.sampling_times_candidates = np.zeros_like(
-                self.ti_controls_candidates, dtype=float
+            # read of it is behind an `if self._dynamic_system:` guard. Shape
+            # is (n_c, 1) -- n_spt is always 1 for a static model -- not
+            # (n_c, n_tic). It used to follow ti_controls_candidates's shape,
+            # which was harmless only because every consumer already ignores
+            # its content behind the guard above; correcting the shape here
+            # removes a latent trap for any future guard that assumes width 1
+            # (e.g. indexing [:, 0] or comparing against n_spt). See Open
+            # Item 17 in PROJECT_NOTES.md. Zero-filled, not np.empty --
+            # empty_like previously returned whatever was in memory, which
+            # get_optimal_candidates then copied into opt_cand[3], so a
+            # static design carried nondeterministic garbage in a field that
+            # looks like data (fixed in 0.4.1, defect 5).
+            self.sampling_times_candidates = np.zeros(
+                (self.n_c_tic, 1), dtype=float
             )
             self.n_c_spt, self.n_spt = self.n_c_tic, 1
         elif self._simulate_signature == 2:

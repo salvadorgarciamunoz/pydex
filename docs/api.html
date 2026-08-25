@@ -6,14 +6,14 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>API Reference &mdash; pydex 0.2.1 documentation</title>
+  <title>API Reference &mdash; pydex 0.5.0 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
 
   
       <script src="_static/jquery.js?v=5d32c60e"></script>
       <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="_static/documentation_options.js?v=37f418d5"></script>
+      <script src="_static/documentation_options.js?v=1dd76d02"></script>
       <script src="_static/doctools.js?v=9bcbadda"></script>
       <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="_static/js/theme.js"></script>
@@ -843,10 +843,14 @@ set changed.</p>
 <p>One row per candidate giving the times at which that experiment may be
 measured. Rows may be padded with <code class="docutils literal notranslate"><span class="pre">numpy.nan</span></code> when candidates have
 different numbers of usable times.</p>
-<p>With <code class="docutils literal notranslate"><span class="pre">optimize_sampling_times=False</span></code> every listed time is measured.
-With it True the optimiser also chooses WHICH of them to use, and
-<code class="docutils literal notranslate"><span class="pre">n_spt=k</span></code> restricts each experiment to k samples — the same candidate
-may then appear under several sampling schedules.</p>
+<p>Per-sampling-time effort is a free decision variable by default, so
+the optimiser allocates effort across these times and routinely drives
+most of them to zero. <code class="docutils literal notranslate"><span class="pre">optimize_sampling_times</span></code> does NOT change that
+(it affects reporting only). To require that every listed time is
+measured on every run, pass <code class="docutils literal notranslate"><span class="pre">fixed_sampling_grid=True</span></code> to
+<a class="reference internal" href="#pydex.core.designer.Designer.design_experiment" title="pydex.core.designer.Designer.design_experiment"><code class="xref py py-meth docutils literal notranslate"><span class="pre">design_experiment()</span></code></a>. <code class="docutils literal notranslate"><span class="pre">n_spt=k</span></code> instead has the optimiser choose
+WHICH k of the listed times to use, and the same candidate may then
+appear under several sampling schedules.</p>
 <p>Assigning marks the candidate set changed.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Type<span class="colon">:</span></dt>
@@ -1214,7 +1218,7 @@ using Pyomo (maximize mean subject to CVaR constraint).</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="pydex.core.designer.Designer.design_experiment">
-<span class="sig-name descname"><span class="pre">design_experiment</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">criterion</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_spt</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_exp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">optimize_sampling_times</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'ipopt'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver_options</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">e0</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">write</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_sensitivities</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trim_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pseudo_bayesian_type</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">regularize_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">beta</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.9</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_expected_value</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fix_effort</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_atomics</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_effort</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">allow_singular_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_weight</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.5</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.design_experiment"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.design_experiment" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">design_experiment</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">criterion</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_spt</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_exp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">optimize_sampling_times</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'ipopt'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver_options</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">e0</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">write</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_sensitivities</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trim_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pseudo_bayesian_type</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">regularize_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">beta</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.9</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_expected_value</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fix_effort</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_atomics</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_effort</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">allow_singular_fim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_weight</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fixed_sampling_grid</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.design_experiment"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.design_experiment" title="Link to this definition"></a></dt>
 <dd><p>Solve for the optimal continuous experimental design.</p>
 <p>The central method of the package. Allocates a unit budget of
 experimental effort across the candidate grid so as to optimise
@@ -1239,8 +1243,31 @@ samples. Requires <code class="docutils literal notranslate"><span class="pre">o
 <code class="xref py py-attr docutils literal notranslate"><span class="pre">atomic_fims</span></code> first if changing it between runs.</p></li>
 <li><p><strong>n_exp</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em>, </em><em>optional</em>) – Solve for a discrete design of this many
 experiments instead of a continuous one.</p></li>
-<li><p><strong>optimize_sampling_times</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Also choose WHEN to sample, rather
-than measuring every listed time.</p></li>
+<li><p><strong>optimize_sampling_times</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Controls how the design is
+REPORTED and extracted, not how it is formulated. Note per
+sampling-time effort is a free decision variable EITHER WAY:
+the flag appears nowhere in the optimisation, and passing
+False vs True yields bit-identical efforts. The formulation
+is changed by <code class="docutils literal notranslate"><span class="pre">n_spt</span></code> (which selects WHICH times to sample,
+and force-overrides this flag to True) or by
+<code class="docutils literal notranslate"><span class="pre">fixed_sampling_grid</span></code> (which ties a candidate’s times
+together). Do not read False as “every listed time is
+measured” – the optimiser routinely drives most grid times
+to zero effort regardless.</p></li>
+<li><p><strong>fixed_sampling_grid</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Allocate one effort per EXPERIMENT
+instead of per (candidate, sampling-time) cell, so every
+listed sampling time is measured on every run and the only
+decision is WHICH experimental conditions to run. For a fixed
+analytical schedule you do not control. Implemented as
+<code class="docutils literal notranslate"><span class="pre">n_spt</span> <span class="pre">-</span> <span class="pre">1</span></code> linear equalities per candidate; the resulting
+FIM is <code class="docutils literal notranslate"><span class="pre">1/n_spt</span></code> times the per-experiment FIM, a CONSTANT
+rescaling, so the design is unaffected but log-det criteria
+shift by exactly <code class="docutils literal notranslate"><span class="pre">n_mp</span> <span class="pre">*</span> <span class="pre">ln(n_spt)</span></code>. Criterion values are
+therefore NOT comparable across this flag; designs are.
+Requires a dynamic model, a common grid for every candidate
+(ragged/NaN-padded grids raise), and is mutually exclusive
+with <code class="docutils literal notranslate"><span class="pre">n_spt</span></code>. Default False, which reproduces all previous
+behaviour exactly.</p></li>
 <li><p><strong>solver</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – NLP solver for the native Pyomo path — any
 AMPL-compatible solver. Ignored on the SLSQP path.</p></li>
 <li><p><strong>solver_options</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>, </em><em>optional</em>) – Passed to the solver. On the SLSQP
