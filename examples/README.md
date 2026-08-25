@@ -242,8 +242,8 @@ python examples/b_optimal/scenario_1_film_coating.py
 **Figures are written to the working directory** (`OUT_DIR = "."`), so you
 choose where they land by choosing where you run from. Deliberately not
 pinned to the script directory, which would drop generated PNGs inside the
-repository — `publications/` already carries 59 MB of those, and that is not
-worth repeating. Don't commit the output.
+repository — the removed `publications/` folder carried 59 MB of exactly that,
+and it is not worth repeating. Don't commit the output.
 
 `scenario_1` runs in a couple of minutes and `scenario_2` in about three.
 `scenario_3` is the slow one: its Part A exhaustive enumeration alone is
@@ -273,8 +273,10 @@ for these problems, not a proof.
 - `pydex_quickstart.ipynb` — narrated walkthrough of a first design.
 - `pydex_ode_model.ipynb` — the same for a dynamic model.
 
-## Publication code — `publications/`
+## Publication code
 
-Scripts reproducing figures and results from the papers behind pydex. These
-are archival: they are kept as published rather than updated with the API,
-so treat them as a record rather than as current usage examples.
+The scripts reproducing figures from the two 2022 papers behind pydex
+(*Comput. Chem. Eng.* 159:107680 and *React. Chem. Eng.* 7(11):2359–2374) are
+**not** kept in this fork. They target the pre-0.2.0 cvxpy/MOSEK API, which no
+longer exists here, so they cannot run against current pydex. The code archive
+cited by those papers is <https://github.com/omega-icl/pydex>.

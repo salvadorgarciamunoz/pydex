@@ -235,9 +235,5 @@ figures/
 *.col
 tmp*.pyomo.*
 
-# Tracked publication data files are unaffected by the *.pkl rule above
-# (gitignore does not untrack), but list the exception explicitly for clarity.
-!publications/**/*.pkl
-
 # macOS Finder metadata
 .DS_Store

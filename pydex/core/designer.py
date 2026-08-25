@@ -7,6 +7,7 @@
 #      instead of 6/6) and producing grossly inflated A-optimal J_V values.
 #      Fix: add _dynamic_system=True to the SimpleNamespace in _worker().
 from datetime import datetime
+import pandas as pd
 from inspect import signature
 from os import getcwd, path, makedirs
 from pickle import dump, load
@@ -4708,8 +4709,36 @@ class Designer:
                                 print(f"[{f'{sp_time:.2f}':>10}]: "
                                       f"Run {f'{app_eff[j]:.0f}/{np.nansum(app_eff):.0f}':>6} experiments, sampling at given time")
                     else:
+                        # opt_cand[3] is this candidate's OWN grid (set from
+                        # opt_cand[0]); the enumerate counter i is the position
+                        # in optimal_candidates, NOT the candidate index, so
+                        # indexing the pool with it prints another candidate's
+                        # grid.
+                        #
+                        # NOTE app_eff is a SCALAR here -- when sampling times
+                        # are not optimised, opt_eff collapses to one run count
+                        # per candidate, so every run samples the same set of
+                        # times. Report which times those are: the ones
+                        # carrying effort in the design. A grid time at zero
+                        # effort is not part of the design (the FIM depends on
+                        # the per-time effort split even when
+                        # optimize_sampling_times is False).
                         print("Sampling Times:")
-                        print(self.sampling_times_candidates[i])
+                        spt_arr = np.asarray(opt_cand[3])
+                        eff_arr = np.asarray(opt_cand[4], dtype=float).ravel()
+                        used, n_unused = [], 0
+                        for j, sp_time in enumerate(spt_arr):
+                            eff_j = eff_arr[j] if j < eff_arr.size else 0.0
+                            if np.isfinite(eff_j) and eff_j > 1e-4:
+                                used.append(float(sp_time))
+                            else:
+                                n_unused += 1
+                        print("[" + "".join(f"{f'{t:.2f}':>10}" for t in used)
+                              + f"]: each of the {np.nansum(app_eff):.0f} run(s) "
+                                f"samples at these time(s)")
+                        if n_unused:
+                            print(f"  ({n_unused} of {len(spt_arr)} candidate grid "
+                                  f"time(s) carry no effort and are omitted)")
 
             """ Computing and Reporting Rounding Efficiency """
             self.epsilon = self._eval_efficiency_bound(
@@ -4744,6 +4773,15 @@ class Designer:
                     rounded_criterion_value = getattr(self, self._current_criterion)(non_trimmed_rounded_efforts).value
                 except AttributeError:
                     rounded_criterion_value = getattr(self, self._current_criterion)(non_trimmed_rounded_efforts)
+                # An efficiency RATIO is only meaningful where the criterion has
+                # a standard relative-efficiency definition. Only these four do.
+                # Everything else (v_opt, vdi, cvar_d, b_opt, u_opt and the six
+                # prediction-variance criteria) has no such definition, so
+                # efficiency stays None and is reported as unavailable rather
+                # than left unassigned -- previously the if/elif chain had no
+                # else and `np.squeeze(efficiency)` below raised
+                # UnboundLocalError for 11 of the 15 public criteria.
+                efficiency = None
                 if self._current_criterion == "d_opt_criterion":
                     efficiency = np.exp(1 / self.n_mp * (-rounded_criterion_value - self._criterion_value))
                 elif self._current_criterion == "ds_opt_criterion":
@@ -4768,11 +4806,19 @@ class Designer:
                 f"{self.epsilon * 100:.2f}% as good as the continuous design."
             )
             if compute_actual_efficiency:
-                efficiency = np.squeeze(efficiency)
-                print(
-                    f"The actual criterion value of the rounded design is "
-                    f"{efficiency * 100:.2f}% as informative as the continuous design."
-                )
+                if efficiency is None:
+                    print(
+                        f"The actual efficiency of the rounded design is not "
+                        f"reported: {self._current_criterion} has no standard "
+                        f"relative-efficiency definition. The bound above still "
+                        f"holds; compare criterion values directly if needed."
+                    )
+                else:
+                    efficiency = np.squeeze(efficiency)
+                    print(
+                        f"The actual criterion value of the rounded design is "
+                        f"{efficiency * 100:.2f}% as informative as the continuous design."
+                    )
             print(f"{'':#^100}")
         self._save_atomics = _original_save_atomics
 
@@ -5770,8 +5816,157 @@ class Designer:
                             print(f"[{f'{sp_time:.2f}':>10}]: "
                                   f"dedicate {f'{opt_cand[4][j]:.2%}':>6} of experiments")
                 else:
+                    # opt_cand[3] is this candidate's OWN grid, set by
+                    # get_optimal_candidates from opt_cand[0]. Do NOT index
+                    # sampling_times_candidates with the enumerate counter i --
+                    # i is the position in optimal_candidates, not the
+                    # candidate index, so that prints another candidate's grid
+                    # whenever the supported candidates are not the first N of
+                    # the pool.
+                    #
+                    # Report only the times that actually carry effort. The FIM
+                    # depends on how effort is distributed across sampling
+                    # times even when optimize_sampling_times is False, so a
+                    # time at zero effort is genuinely not part of the design;
+                    # printing the whole grid implied otherwise.
                     print("Sampling Times:")
-                    print(self.sampling_times_candidates[i])
+                    spt_arr = np.asarray(opt_cand[3])
+                    eff_arr = np.asarray(opt_cand[4])
+                    n_unused = 0
+                    for j, sp_time in enumerate(spt_arr):
+                        if eff_arr[j] > tol:
+                            print(f"[{f'{sp_time:.2f}':>10}]: "
+                                  f"dedicate {f'{eff_arr[j]:.2%}':>6} of experiments")
+                        else:
+                            n_unused += 1
+                    if n_unused:
+                        print(f"  ({n_unused} of {len(spt_arr)} candidate grid "
+                              f"time(s) carry no effort and are omitted)")
+        print(f"{'':#^100}")
+        # tabular version of the same design, appended below the output above
+        self.print_optimal_candidates_table(tol)
+
+    def get_optimal_candidates_table(self, tol=1e-4):
+        """Return the optimal design as a tidy DataFrame, one row per suggested
+        experiment.
+
+        Columns:
+
+        * ``Experiment`` -- sequential 1..N, one row per experiment to
+          actually run. The number to use when communicating the protocol;
+          it does not correspond to anything in the original candidate pool.
+        * ``Candidate`` -- 1-indexed position in the original candidate
+          pool. Kept purely for cross-reference with plot legends, solver
+          progress logs, and ``candidate_names`` in exported results -- not
+          needed to run the protocol itself.
+        * one column per entry of ``ti_controls_names``, if any are defined.
+        * ``Schedule`` -- present ONLY when sampling times were optimised
+          with a fixed ``n_spt``. Two schedules on the same candidate are
+          two SEPARATE, MANDATORY experiments (a required split of effort),
+          not alternative/optional ways of running the same one.
+        * ``Sampling Time`` -- a single float (unspecified-count case), or a
+          list of floats: one schedule (fixed-``n_spt`` case), or the
+          candidate-grid times actually carrying nonzero effort (fixed-grid
+          case). Omitted entirely for a static system.
+        * ``Effort`` -- fraction (0-1) of total experiments dedicated to
+          this row.
+
+        Args:
+            tol (float): effort threshold below which a candidate/time is
+                dropped (same semantics as :meth:`get_optimal_candidates`).
+
+        Returns:
+            pandas.DataFrame. Also stored as :attr:`optimal_candidates_table`.
+        """
+        if self.optimal_candidates is None:
+            self.get_optimal_candidates(tol)
+        if self.n_opt_c == 0:
+            print(
+                "[Warning]: empty optimal candidates, skipping "
+                "get_optimal_candidates_table."
+            )
+            self.optimal_candidates_table = pd.DataFrame()
+            return self.optimal_candidates_table
+
+        rows = []
+        for opt_cand in self.optimal_candidates:
+            cand_idx = opt_cand[0]
+            base = {"Candidate": cand_idx + 1}
+            if self._invariant_controls:
+                for name, val in zip(self.ti_controls_names, opt_cand[1]):
+                    base[name] = float(val)
+
+            if self._dynamic_system:
+                if self._opt_sampling_times:
+                    if self._specified_n_spt:
+                        for sched_i, spt_comb in enumerate(opt_cand[3]):
+                            row = dict(base)
+                            row["Schedule"] = sched_i + 1
+                            row["Sampling Time"] = [float(t) for t in spt_comb]
+                            row["Effort"] = float(np.sum(opt_cand[4][sched_i]))
+                            rows.append(row)
+                    else:
+                        for spt, eff in zip(opt_cand[3], opt_cand[4]):
+                            row = dict(base)
+                            row["Sampling Time"] = float(spt)
+                            row["Effort"] = float(eff)
+                            rows.append(row)
+                else:
+                    # fixed grid: only report times carrying nonzero effort --
+                    # the candidate's full predefined grid may include times
+                    # the optimum ends up not using at all.
+                    spt_arr = np.asarray(opt_cand[3])
+                    eff_arr = np.asarray(opt_cand[4])
+                    used = eff_arr > tol
+                    row = dict(base)
+                    row["Sampling Time"] = [float(t) for t in spt_arr[used]]
+                    row["Effort"] = float(np.sum(eff_arr[used]))
+                    rows.append(row)
+            else:
+                row = dict(base)
+                row["Effort"] = float(np.sum(opt_cand[4]))
+                rows.append(row)
+
+        df = pd.DataFrame(rows)
+        df.insert(0, "Experiment", np.arange(1, len(df) + 1))
+
+        cols = ["Experiment", "Candidate"]
+        if self._invariant_controls:
+            cols += list(self.ti_controls_names)
+        if "Schedule" in df.columns:
+            cols.append("Schedule")
+        if "Sampling Time" in df.columns:
+            cols.append("Sampling Time")
+        cols.append("Effort")
+        df = df[cols]
+
+        self.optimal_candidates_table = df
+        return df
+
+    def print_optimal_candidates_table(self, tol=1e-4):
+        """Print the optimal design as a formatted table, one row per
+        suggested experiment.
+
+        See :meth:`get_optimal_candidates_table` for the underlying
+        DataFrame (numeric, unrounded, exportable to CSV etc.) and column
+        semantics. This method only affects display: percentages and
+        sampling times are formatted for readability, nothing is dropped.
+        """
+        df = self.get_optimal_candidates_table(tol)
+        if df.empty:
+            return
+
+        disp = df.copy()
+        if "Sampling Time" in disp.columns:
+            disp["Sampling Time"] = disp["Sampling Time"].map(
+                lambda v: ", ".join(f"{t:.2f}" for t in v)
+                if isinstance(v, list) else f"{v:.2f}"
+            )
+        disp["Effort"] = disp["Effort"].map(lambda x: f"{x:.2%}")
+
+        print("")
+        print(f"{' Optimal Experimental Protocol ':#^100}")
+        print(disp.to_string(index=False))
         print(f"{'':#^100}")
 
     def start_logging(self):
@@ -9822,6 +10017,18 @@ class Designer:
     def _ag_opt_criterion(self, efforts):
 
         self.eval_pim(efforts)
+        # eval_pim sets pvars to None when the FIM is not safely invertible;
+        # its own comment states this is so "the consuming criteria report an
+        # infeasible design (+inf) instead". dg_opt/di_opt/vdi honour that
+        # contract; these four did not, and iterated None instead, raising
+        #     TypeError: 'NoneType' object is not iterable
+        # mid-solve and killing the whole design run rather than steering the
+        # optimiser away from an infeasible point. +inf is the worst attainable
+        # value for a minimised criterion, so it is correct here regardless of
+        # the internal sign convention.
+        if self.pvars is None:
+            return np.inf
+
         # ag_opt: max trace of the pvar matrix over candidates and sampling times
         ag_opts = np.empty((self.n_c, self.n_spt))
         for c, PVAR in enumerate(self.pvars):
@@ -9838,6 +10045,18 @@ class Designer:
     def _ai_opt_criterion(self, efforts):
 
         self.eval_pim(efforts)
+        # eval_pim sets pvars to None when the FIM is not safely invertible;
+        # its own comment states this is so "the consuming criteria report an
+        # infeasible design (+inf) instead". dg_opt/di_opt/vdi honour that
+        # contract; these four did not, and iterated None instead, raising
+        #     TypeError: 'NoneType' object is not iterable
+        # mid-solve and killing the whole design run rather than steering the
+        # optimiser away from an infeasible point. +inf is the worst attainable
+        # value for a minimised criterion, so it is correct here regardless of
+        # the internal sign convention.
+        if self.pvars is None:
+            return np.inf
+
         # ai_opt: average trace of the pvar matrix over candidates and sampling times
         ai_opts = np.empty((self.n_c, self.n_spt))
         for c, PVAR in enumerate(self.pvars):
@@ -9854,6 +10073,18 @@ class Designer:
     def _eg_opt_criterion(self, efforts):
 
         self.eval_pim(efforts)
+        # eval_pim sets pvars to None when the FIM is not safely invertible;
+        # its own comment states this is so "the consuming criteria report an
+        # infeasible design (+inf) instead". dg_opt/di_opt/vdi honour that
+        # contract; these four did not, and iterated None instead, raising
+        #     TypeError: 'NoneType' object is not iterable
+        # mid-solve and killing the whole design run rather than steering the
+        # optimiser away from an infeasible point. +inf is the worst attainable
+        # value for a minimised criterion, so it is correct here regardless of
+        # the internal sign convention.
+        if self.pvars is None:
+            return np.inf
+
         # eg_opt: max of the max_eigenval of the pvar matrix over candidates and sampling times
         eg_opts = np.empty((self.n_c, self.n_spt))
         for c, PVAR in enumerate(self.pvars):
@@ -9876,6 +10107,18 @@ class Designer:
     def _ei_opt_criterion(self, efforts):
 
         self.eval_pim(efforts)
+        # eval_pim sets pvars to None when the FIM is not safely invertible;
+        # its own comment states this is so "the consuming criteria report an
+        # infeasible design (+inf) instead". dg_opt/di_opt/vdi honour that
+        # contract; these four did not, and iterated None instead, raising
+        #     TypeError: 'NoneType' object is not iterable
+        # mid-solve and killing the whole design run rather than steering the
+        # optimiser away from an infeasible point. +inf is the worst attainable
+        # value for a minimised criterion, so it is correct here regardless of
+        # the internal sign convention.
+        if self.pvars is None:
+            return np.inf
+
         # ei_opts: average of the max_eigenval of the pvar matrix over candidates and sampling times
         ei_opts = np.empty((self.n_c, self.n_spt))
         for c, PVAR in enumerate(self.pvars):
@@ -11283,7 +11526,19 @@ class Designer:
             self.n_c_tic, self.n_tic = self.ti_controls_candidates.shape
             self.tv_controls_candidates = np.empty((self.n_c_tic, 1))
             self.n_c_tvc, self.n_tvc = self.n_c_tic, 1
-            self.sampling_times_candidates = np.empty_like(self.ti_controls_candidates)
+            # A static model has no time axis. This placeholder exists only so
+            # that downstream shape arithmetic has something to index; every
+            # read of it is behind an `if self._dynamic_system:` guard. Use
+            # zeros, not np.empty_like: empty_like returns whatever was in
+            # memory, which get_optimal_candidates then copies into
+            # opt_cand[3], so a static design carried nondeterministic garbage
+            # in a field that looks like data. (The SHAPE is also wrong -- it
+            # follows ti_controls_candidates while n_spt is 1 -- but changing
+            # that reaches save/load and the padding helpers, so it is left
+            # alone here deliberately.)
+            self.sampling_times_candidates = np.zeros_like(
+                self.ti_controls_candidates, dtype=float
+            )
             self.n_c_spt, self.n_spt = self.n_c_tic, 1
         elif self._simulate_signature == 2:
             self.n_c_tic, self.n_tic = self.ti_controls_candidates.shape

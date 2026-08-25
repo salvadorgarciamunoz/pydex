@@ -90,6 +90,8 @@
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.plot_optimal_sensitivities"><code class="docutils literal notranslate"><span class="pre">Designer.plot_optimal_sensitivities()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.plot_pareto_frontier"><code class="docutils literal notranslate"><span class="pre">Designer.plot_pareto_frontier()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.print_optimal_candidates"><code class="docutils literal notranslate"><span class="pre">Designer.print_optimal_candidates()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.get_optimal_candidates_table"><code class="docutils literal notranslate"><span class="pre">Designer.get_optimal_candidates_table()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.print_optimal_candidates_table"><code class="docutils literal notranslate"><span class="pre">Designer.print_optimal_candidates_table()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.start_logging"><code class="docutils literal notranslate"><span class="pre">Designer.start_logging()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.stop_logging"><code class="docutils literal notranslate"><span class="pre">Designer.stop_logging()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.plot_prediction_variance"><code class="docutils literal notranslate"><span class="pre">Designer.plot_prediction_variance()</span></code></a></li>
@@ -1573,6 +1575,54 @@ than once, sampling at different times each time.</p>
 <dd class="field-odd"><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Effort below which a candidate is omitted.</p>
 </dd>
 </dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="pydex.core.designer.Designer.get_optimal_candidates_table">
+<span class="sig-name descname"><span class="pre">get_optimal_candidates_table</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tol</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.0001</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.get_optimal_candidates_table"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.get_optimal_candidates_table" title="Link to this definition"></a></dt>
+<dd><p>Return the optimal design as a tidy DataFrame, one row per suggested
+experiment.</p>
+<p>Columns:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">Experiment</span></code> – sequential 1..N, one row per experiment to
+actually run. The number to use when communicating the protocol;
+it does not correspond to anything in the original candidate pool.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Candidate</span></code> – 1-indexed position in the original candidate
+pool. Kept purely for cross-reference with plot legends, solver
+progress logs, and <code class="docutils literal notranslate"><span class="pre">candidate_names</span></code> in exported results – not
+needed to run the protocol itself.</p></li>
+<li><p>one column per entry of <code class="docutils literal notranslate"><span class="pre">ti_controls_names</span></code>, if any are defined.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Schedule</span></code> – present ONLY when sampling times were optimised
+with a fixed <code class="docutils literal notranslate"><span class="pre">n_spt</span></code>. Two schedules on the same candidate are
+two SEPARATE, MANDATORY experiments (a required split of effort),
+not alternative/optional ways of running the same one.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Sampling</span> <span class="pre">Time</span></code> – a single float (unspecified-count case), or a
+list of floats: one schedule (fixed-<code class="docutils literal notranslate"><span class="pre">n_spt</span></code> case), or the
+candidate-grid times actually carrying nonzero effort (fixed-grid
+case). Omitted entirely for a static system.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Effort</span></code> – fraction (0-1) of total experiments dedicated to
+this row.</p></li>
+</ul>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – effort threshold below which a candidate/time is
+dropped (same semantics as <a class="reference internal" href="#pydex.core.designer.Designer.get_optimal_candidates" title="pydex.core.designer.Designer.get_optimal_candidates"><code class="xref py py-meth docutils literal notranslate"><span class="pre">get_optimal_candidates()</span></code></a>).</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>pandas.DataFrame. Also stored as <code class="xref py py-attr docutils literal notranslate"><span class="pre">optimal_candidates_table</span></code>.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="pydex.core.designer.Designer.print_optimal_candidates_table">
+<span class="sig-name descname"><span class="pre">print_optimal_candidates_table</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tol</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.0001</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.print_optimal_candidates_table"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.print_optimal_candidates_table" title="Link to this definition"></a></dt>
+<dd><p>Print the optimal design as a formatted table, one row per
+suggested experiment.</p>
+<p>See <a class="reference internal" href="#pydex.core.designer.Designer.get_optimal_candidates_table" title="pydex.core.designer.Designer.get_optimal_candidates_table"><code class="xref py py-meth docutils literal notranslate"><span class="pre">get_optimal_candidates_table()</span></code></a> for the underlying
+DataFrame (numeric, unrounded, exportable to CSV etc.) and column
+semantics. This method only affects display: percentages and
+sampling times are formatted for readability, nothing is dropped.</p>
 </dd></dl>
 
 <dl class="py method">

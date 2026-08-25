@@ -80,6 +80,7 @@
 <span class="c1">#      instead of 6/6) and producing grossly inflated A-optimal J_V values.</span>
 <span class="c1">#      Fix: add _dynamic_system=True to the SimpleNamespace in _worker().</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">datetime</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">inspect</span><span class="w"> </span><span class="kn">import</span> <span class="n">signature</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">os</span><span class="w"> </span><span class="kn">import</span> <span class="n">getcwd</span><span class="p">,</span> <span class="n">path</span><span class="p">,</span> <span class="n">makedirs</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">pickle</span><span class="w"> </span><span class="kn">import</span> <span class="n">dump</span><span class="p">,</span> <span class="n">load</span>
@@ -4833,8 +4834,36 @@
                                 <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[</span><span class="si">{</span><span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">sp_time</span><span class="si">:</span><span class="s1">.2f</span><span class="si">}</span><span class="s1">&#39;</span><span class="si">:</span><span class="s2">&gt;10</span><span class="si">}</span><span class="s2">]: &quot;</span>
                                       <span class="sa">f</span><span class="s2">&quot;Run </span><span class="si">{</span><span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">app_eff</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="si">:</span><span class="s1">.0f</span><span class="si">}</span><span class="s1">/</span><span class="si">{</span><span class="n">np</span><span class="o">.</span><span class="n">nansum</span><span class="p">(</span><span class="n">app_eff</span><span class="p">)</span><span class="si">:</span><span class="s1">.0f</span><span class="si">}</span><span class="s1">&#39;</span><span class="si">:</span><span class="s2">&gt;6</span><span class="si">}</span><span class="s2"> experiments, sampling at given time&quot;</span><span class="p">)</span>
                     <span class="k">else</span><span class="p">:</span>
+                        <span class="c1"># opt_cand[3] is this candidate&#39;s OWN grid (set from</span>
+                        <span class="c1"># opt_cand[0]); the enumerate counter i is the position</span>
+                        <span class="c1"># in optimal_candidates, NOT the candidate index, so</span>
+                        <span class="c1"># indexing the pool with it prints another candidate&#39;s</span>
+                        <span class="c1"># grid.</span>
+                        <span class="c1">#</span>
+                        <span class="c1"># NOTE app_eff is a SCALAR here -- when sampling times</span>
+                        <span class="c1"># are not optimised, opt_eff collapses to one run count</span>
+                        <span class="c1"># per candidate, so every run samples the same set of</span>
+                        <span class="c1"># times. Report which times those are: the ones</span>
+                        <span class="c1"># carrying effort in the design. A grid time at zero</span>
+                        <span class="c1"># effort is not part of the design (the FIM depends on</span>
+                        <span class="c1"># the per-time effort split even when</span>
+                        <span class="c1"># optimize_sampling_times is False).</span>
                         <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Sampling Times:&quot;</span><span class="p">)</span>
-                        <span class="nb">print</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sampling_times_candidates</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+                        <span class="n">spt_arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">opt_cand</span><span class="p">[</span><span class="mi">3</span><span class="p">])</span>
+                        <span class="n">eff_arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">opt_cand</span><span class="p">[</span><span class="mi">4</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
+                        <span class="n">used</span><span class="p">,</span> <span class="n">n_unused</span> <span class="o">=</span> <span class="p">[],</span> <span class="mi">0</span>
+                        <span class="k">for</span> <span class="n">j</span><span class="p">,</span> <span class="n">sp_time</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">spt_arr</span><span class="p">):</span>
+                            <span class="n">eff_j</span> <span class="o">=</span> <span class="n">eff_arr</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="k">if</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">eff_arr</span><span class="o">.</span><span class="n">size</span> <span class="k">else</span> <span class="mf">0.0</span>
+                            <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">eff_j</span><span class="p">)</span> <span class="ow">and</span> <span class="n">eff_j</span> <span class="o">&gt;</span> <span class="mf">1e-4</span><span class="p">:</span>
+                                <span class="n">used</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">sp_time</span><span class="p">))</span>
+                            <span class="k">else</span><span class="p">:</span>
+                                <span class="n">n_unused</span> <span class="o">+=</span> <span class="mi">1</span>
+                        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;[&quot;</span> <span class="o">+</span> <span class="s2">&quot;&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">t</span><span class="si">:</span><span class="s1">.2f</span><span class="si">}</span><span class="s1">&#39;</span><span class="si">:</span><span class="s2">&gt;10</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">used</span><span class="p">)</span>
+                              <span class="o">+</span> <span class="sa">f</span><span class="s2">&quot;]: each of the </span><span class="si">{</span><span class="n">np</span><span class="o">.</span><span class="n">nansum</span><span class="p">(</span><span class="n">app_eff</span><span class="p">)</span><span class="si">:</span><span class="s2">.0f</span><span class="si">}</span><span class="s2"> run(s) &quot;</span>
+                                <span class="sa">f</span><span class="s2">&quot;samples at these time(s)&quot;</span><span class="p">)</span>
+                        <span class="k">if</span> <span class="n">n_unused</span><span class="p">:</span>
+                            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  (</span><span class="si">{</span><span class="n">n_unused</span><span class="si">}</span><span class="s2"> of </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">spt_arr</span><span class="p">)</span><span class="si">}</span><span class="s2"> candidate grid &quot;</span>
+                                  <span class="sa">f</span><span class="s2">&quot;time(s) carry no effort and are omitted)&quot;</span><span class="p">)</span>
 
 <span class="w">            </span><span class="sd">&quot;&quot;&quot; Computing and Reporting Rounding Efficiency &quot;&quot;&quot;</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">epsilon</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_eval_efficiency_bound</span><span class="p">(</span>
@@ -4869,6 +4898,15 @@
                     <span class="n">rounded_criterion_value</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_criterion</span><span class="p">)(</span><span class="n">non_trimmed_rounded_efforts</span><span class="p">)</span><span class="o">.</span><span class="n">value</span>
                 <span class="k">except</span> <span class="ne">AttributeError</span><span class="p">:</span>
                     <span class="n">rounded_criterion_value</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_criterion</span><span class="p">)(</span><span class="n">non_trimmed_rounded_efforts</span><span class="p">)</span>
+                <span class="c1"># An efficiency RATIO is only meaningful where the criterion has</span>
+                <span class="c1"># a standard relative-efficiency definition. Only these four do.</span>
+                <span class="c1"># Everything else (v_opt, vdi, cvar_d, b_opt, u_opt and the six</span>
+                <span class="c1"># prediction-variance criteria) has no such definition, so</span>
+                <span class="c1"># efficiency stays None and is reported as unavailable rather</span>
+                <span class="c1"># than left unassigned -- previously the if/elif chain had no</span>
+                <span class="c1"># else and `np.squeeze(efficiency)` below raised</span>
+                <span class="c1"># UnboundLocalError for 11 of the 15 public criteria.</span>
+                <span class="n">efficiency</span> <span class="o">=</span> <span class="kc">None</span>
                 <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_criterion</span> <span class="o">==</span> <span class="s2">&quot;d_opt_criterion&quot;</span><span class="p">:</span>
                     <span class="n">efficiency</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="mi">1</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_mp</span> <span class="o">*</span> <span class="p">(</span><span class="o">-</span><span class="n">rounded_criterion_value</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">_criterion_value</span><span class="p">))</span>
                 <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_criterion</span> <span class="o">==</span> <span class="s2">&quot;ds_opt_criterion&quot;</span><span class="p">:</span>
@@ -4893,11 +4931,19 @@
                 <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">epsilon</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">100</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">% as good as the continuous design.&quot;</span>
             <span class="p">)</span>
             <span class="k">if</span> <span class="n">compute_actual_efficiency</span><span class="p">:</span>
-                <span class="n">efficiency</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">squeeze</span><span class="p">(</span><span class="n">efficiency</span><span class="p">)</span>
-                <span class="nb">print</span><span class="p">(</span>
-                    <span class="sa">f</span><span class="s2">&quot;The actual criterion value of the rounded design is &quot;</span>
-                    <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">efficiency</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">100</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">% as informative as the continuous design.&quot;</span>
-                <span class="p">)</span>
+                <span class="k">if</span> <span class="n">efficiency</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="nb">print</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">&quot;The actual efficiency of the rounded design is not &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;reported: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_current_criterion</span><span class="si">}</span><span class="s2"> has no standard &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;relative-efficiency definition. The bound above still &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;holds; compare criterion values directly if needed.&quot;</span>
+                    <span class="p">)</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">efficiency</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">squeeze</span><span class="p">(</span><span class="n">efficiency</span><span class="p">)</span>
+                    <span class="nb">print</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">&quot;The actual criterion value of the rounded design is &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">efficiency</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">100</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">% as informative as the continuous design.&quot;</span>
+                    <span class="p">)</span>
             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;&#39;</span><span class="si">:</span><span class="s2">#^100</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_save_atomics</span> <span class="o">=</span> <span class="n">_original_save_atomics</span>
 
@@ -5925,8 +5971,163 @@
                             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[</span><span class="si">{</span><span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">sp_time</span><span class="si">:</span><span class="s1">.2f</span><span class="si">}</span><span class="s1">&#39;</span><span class="si">:</span><span class="s2">&gt;10</span><span class="si">}</span><span class="s2">]: &quot;</span>
                                   <span class="sa">f</span><span class="s2">&quot;dedicate </span><span class="si">{</span><span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">opt_cand</span><span class="p">[</span><span class="mi">4</span><span class="p">][</span><span class="n">j</span><span class="p">]</span><span class="si">:</span><span class="s1">.2%</span><span class="si">}</span><span class="s1">&#39;</span><span class="si">:</span><span class="s2">&gt;6</span><span class="si">}</span><span class="s2"> of experiments&quot;</span><span class="p">)</span>
                 <span class="k">else</span><span class="p">:</span>
+                    <span class="c1"># opt_cand[3] is this candidate&#39;s OWN grid, set by</span>
+                    <span class="c1"># get_optimal_candidates from opt_cand[0]. Do NOT index</span>
+                    <span class="c1"># sampling_times_candidates with the enumerate counter i --</span>
+                    <span class="c1"># i is the position in optimal_candidates, not the</span>
+                    <span class="c1"># candidate index, so that prints another candidate&#39;s grid</span>
+                    <span class="c1"># whenever the supported candidates are not the first N of</span>
+                    <span class="c1"># the pool.</span>
+                    <span class="c1">#</span>
+                    <span class="c1"># Report only the times that actually carry effort. The FIM</span>
+                    <span class="c1"># depends on how effort is distributed across sampling</span>
+                    <span class="c1"># times even when optimize_sampling_times is False, so a</span>
+                    <span class="c1"># time at zero effort is genuinely not part of the design;</span>
+                    <span class="c1"># printing the whole grid implied otherwise.</span>
                     <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Sampling Times:&quot;</span><span class="p">)</span>
-                    <span class="nb">print</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sampling_times_candidates</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+                    <span class="n">spt_arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">opt_cand</span><span class="p">[</span><span class="mi">3</span><span class="p">])</span>
+                    <span class="n">eff_arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">opt_cand</span><span class="p">[</span><span class="mi">4</span><span class="p">])</span>
+                    <span class="n">n_unused</span> <span class="o">=</span> <span class="mi">0</span>
+                    <span class="k">for</span> <span class="n">j</span><span class="p">,</span> <span class="n">sp_time</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">spt_arr</span><span class="p">):</span>
+                        <span class="k">if</span> <span class="n">eff_arr</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">&gt;</span> <span class="n">tol</span><span class="p">:</span>
+                            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[</span><span class="si">{</span><span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">sp_time</span><span class="si">:</span><span class="s1">.2f</span><span class="si">}</span><span class="s1">&#39;</span><span class="si">:</span><span class="s2">&gt;10</span><span class="si">}</span><span class="s2">]: &quot;</span>
+                                  <span class="sa">f</span><span class="s2">&quot;dedicate </span><span class="si">{</span><span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">eff_arr</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="si">:</span><span class="s1">.2%</span><span class="si">}</span><span class="s1">&#39;</span><span class="si">:</span><span class="s2">&gt;6</span><span class="si">}</span><span class="s2"> of experiments&quot;</span><span class="p">)</span>
+                        <span class="k">else</span><span class="p">:</span>
+                            <span class="n">n_unused</span> <span class="o">+=</span> <span class="mi">1</span>
+                    <span class="k">if</span> <span class="n">n_unused</span><span class="p">:</span>
+                        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  (</span><span class="si">{</span><span class="n">n_unused</span><span class="si">}</span><span class="s2"> of </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">spt_arr</span><span class="p">)</span><span class="si">}</span><span class="s2"> candidate grid &quot;</span>
+                              <span class="sa">f</span><span class="s2">&quot;time(s) carry no effort and are omitted)&quot;</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;&#39;</span><span class="si">:</span><span class="s2">#^100</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="c1"># tabular version of the same design, appended below the output above</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">print_optimal_candidates_table</span><span class="p">(</span><span class="n">tol</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Designer.get_optimal_candidates_table">
+<a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.get_optimal_candidates_table">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_optimal_candidates_table</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tol</span><span class="o">=</span><span class="mf">1e-4</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the optimal design as a tidy DataFrame, one row per suggested</span>
+<span class="sd">        experiment.</span>
+
+<span class="sd">        Columns:</span>
+
+<span class="sd">        * ``Experiment`` -- sequential 1..N, one row per experiment to</span>
+<span class="sd">          actually run. The number to use when communicating the protocol;</span>
+<span class="sd">          it does not correspond to anything in the original candidate pool.</span>
+<span class="sd">        * ``Candidate`` -- 1-indexed position in the original candidate</span>
+<span class="sd">          pool. Kept purely for cross-reference with plot legends, solver</span>
+<span class="sd">          progress logs, and ``candidate_names`` in exported results -- not</span>
+<span class="sd">          needed to run the protocol itself.</span>
+<span class="sd">        * one column per entry of ``ti_controls_names``, if any are defined.</span>
+<span class="sd">        * ``Schedule`` -- present ONLY when sampling times were optimised</span>
+<span class="sd">          with a fixed ``n_spt``. Two schedules on the same candidate are</span>
+<span class="sd">          two SEPARATE, MANDATORY experiments (a required split of effort),</span>
+<span class="sd">          not alternative/optional ways of running the same one.</span>
+<span class="sd">        * ``Sampling Time`` -- a single float (unspecified-count case), or a</span>
+<span class="sd">          list of floats: one schedule (fixed-``n_spt`` case), or the</span>
+<span class="sd">          candidate-grid times actually carrying nonzero effort (fixed-grid</span>
+<span class="sd">          case). Omitted entirely for a static system.</span>
+<span class="sd">        * ``Effort`` -- fraction (0-1) of total experiments dedicated to</span>
+<span class="sd">          this row.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            tol (float): effort threshold below which a candidate/time is</span>
+<span class="sd">                dropped (same semantics as :meth:`get_optimal_candidates`).</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            pandas.DataFrame. Also stored as :attr:`optimal_candidates_table`.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">optimal_candidates</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">get_optimal_candidates</span><span class="p">(</span><span class="n">tol</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_opt_c</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span>
+                <span class="s2">&quot;[Warning]: empty optimal candidates, skipping &quot;</span>
+                <span class="s2">&quot;get_optimal_candidates_table.&quot;</span>
+            <span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">optimal_candidates_table</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">()</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">optimal_candidates_table</span>
+
+        <span class="n">rows</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">opt_cand</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">optimal_candidates</span><span class="p">:</span>
+            <span class="n">cand_idx</span> <span class="o">=</span> <span class="n">opt_cand</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="n">base</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;Candidate&quot;</span><span class="p">:</span> <span class="n">cand_idx</span> <span class="o">+</span> <span class="mi">1</span><span class="p">}</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_invariant_controls</span><span class="p">:</span>
+                <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">val</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ti_controls_names</span><span class="p">,</span> <span class="n">opt_cand</span><span class="p">[</span><span class="mi">1</span><span class="p">]):</span>
+                    <span class="n">base</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">val</span><span class="p">)</span>
+
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dynamic_system</span><span class="p">:</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_opt_sampling_times</span><span class="p">:</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_specified_n_spt</span><span class="p">:</span>
+                        <span class="k">for</span> <span class="n">sched_i</span><span class="p">,</span> <span class="n">spt_comb</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">opt_cand</span><span class="p">[</span><span class="mi">3</span><span class="p">]):</span>
+                            <span class="n">row</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">base</span><span class="p">)</span>
+                            <span class="n">row</span><span class="p">[</span><span class="s2">&quot;Schedule&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">sched_i</span> <span class="o">+</span> <span class="mi">1</span>
+                            <span class="n">row</span><span class="p">[</span><span class="s2">&quot;Sampling Time&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="nb">float</span><span class="p">(</span><span class="n">t</span><span class="p">)</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">spt_comb</span><span class="p">]</span>
+                            <span class="n">row</span><span class="p">[</span><span class="s2">&quot;Effort&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">opt_cand</span><span class="p">[</span><span class="mi">4</span><span class="p">][</span><span class="n">sched_i</span><span class="p">]))</span>
+                            <span class="n">rows</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">row</span><span class="p">)</span>
+                    <span class="k">else</span><span class="p">:</span>
+                        <span class="k">for</span> <span class="n">spt</span><span class="p">,</span> <span class="n">eff</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">opt_cand</span><span class="p">[</span><span class="mi">3</span><span class="p">],</span> <span class="n">opt_cand</span><span class="p">[</span><span class="mi">4</span><span class="p">]):</span>
+                            <span class="n">row</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">base</span><span class="p">)</span>
+                            <span class="n">row</span><span class="p">[</span><span class="s2">&quot;Sampling Time&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">spt</span><span class="p">)</span>
+                            <span class="n">row</span><span class="p">[</span><span class="s2">&quot;Effort&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">eff</span><span class="p">)</span>
+                            <span class="n">rows</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">row</span><span class="p">)</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="c1"># fixed grid: only report times carrying nonzero effort --</span>
+                    <span class="c1"># the candidate&#39;s full predefined grid may include times</span>
+                    <span class="c1"># the optimum ends up not using at all.</span>
+                    <span class="n">spt_arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">opt_cand</span><span class="p">[</span><span class="mi">3</span><span class="p">])</span>
+                    <span class="n">eff_arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">opt_cand</span><span class="p">[</span><span class="mi">4</span><span class="p">])</span>
+                    <span class="n">used</span> <span class="o">=</span> <span class="n">eff_arr</span> <span class="o">&gt;</span> <span class="n">tol</span>
+                    <span class="n">row</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">base</span><span class="p">)</span>
+                    <span class="n">row</span><span class="p">[</span><span class="s2">&quot;Sampling Time&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="nb">float</span><span class="p">(</span><span class="n">t</span><span class="p">)</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">spt_arr</span><span class="p">[</span><span class="n">used</span><span class="p">]]</span>
+                    <span class="n">row</span><span class="p">[</span><span class="s2">&quot;Effort&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">eff_arr</span><span class="p">[</span><span class="n">used</span><span class="p">]))</span>
+                    <span class="n">rows</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">row</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">row</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">base</span><span class="p">)</span>
+                <span class="n">row</span><span class="p">[</span><span class="s2">&quot;Effort&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">opt_cand</span><span class="p">[</span><span class="mi">4</span><span class="p">]))</span>
+                <span class="n">rows</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">row</span><span class="p">)</span>
+
+        <span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span><span class="n">rows</span><span class="p">)</span>
+        <span class="n">df</span><span class="o">.</span><span class="n">insert</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="s2">&quot;Experiment&quot;</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">df</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+
+        <span class="n">cols</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;Experiment&quot;</span><span class="p">,</span> <span class="s2">&quot;Candidate&quot;</span><span class="p">]</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_invariant_controls</span><span class="p">:</span>
+            <span class="n">cols</span> <span class="o">+=</span> <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ti_controls_names</span><span class="p">)</span>
+        <span class="k">if</span> <span class="s2">&quot;Schedule&quot;</span> <span class="ow">in</span> <span class="n">df</span><span class="o">.</span><span class="n">columns</span><span class="p">:</span>
+            <span class="n">cols</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;Schedule&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="s2">&quot;Sampling Time&quot;</span> <span class="ow">in</span> <span class="n">df</span><span class="o">.</span><span class="n">columns</span><span class="p">:</span>
+            <span class="n">cols</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;Sampling Time&quot;</span><span class="p">)</span>
+        <span class="n">cols</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;Effort&quot;</span><span class="p">)</span>
+        <span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="n">cols</span><span class="p">]</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">optimal_candidates_table</span> <span class="o">=</span> <span class="n">df</span>
+        <span class="k">return</span> <span class="n">df</span></div>
+
+
+<div class="viewcode-block" id="Designer.print_optimal_candidates_table">
+<a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.print_optimal_candidates_table">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">print_optimal_candidates_table</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tol</span><span class="o">=</span><span class="mf">1e-4</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Print the optimal design as a formatted table, one row per</span>
+<span class="sd">        suggested experiment.</span>
+
+<span class="sd">        See :meth:`get_optimal_candidates_table` for the underlying</span>
+<span class="sd">        DataFrame (numeric, unrounded, exportable to CSV etc.) and column</span>
+<span class="sd">        semantics. This method only affects display: percentages and</span>
+<span class="sd">        sampling times are formatted for readability, nothing is dropped.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">df</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_optimal_candidates_table</span><span class="p">(</span><span class="n">tol</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">df</span><span class="o">.</span><span class="n">empty</span><span class="p">:</span>
+            <span class="k">return</span>
+
+        <span class="n">disp</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+        <span class="k">if</span> <span class="s2">&quot;Sampling Time&quot;</span> <span class="ow">in</span> <span class="n">disp</span><span class="o">.</span><span class="n">columns</span><span class="p">:</span>
+            <span class="n">disp</span><span class="p">[</span><span class="s2">&quot;Sampling Time&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">disp</span><span class="p">[</span><span class="s2">&quot;Sampling Time&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">map</span><span class="p">(</span>
+                <span class="k">lambda</span> <span class="n">v</span><span class="p">:</span> <span class="s2">&quot;, &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">t</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">v</span><span class="p">)</span>
+                <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">v</span><span class="p">,</span> <span class="nb">list</span><span class="p">)</span> <span class="k">else</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">v</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">&quot;</span>
+            <span class="p">)</span>
+        <span class="n">disp</span><span class="p">[</span><span class="s2">&quot;Effort&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">disp</span><span class="p">[</span><span class="s2">&quot;Effort&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">x</span><span class="si">:</span><span class="s2">.2%</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39; Optimal Experimental Protocol &#39;</span><span class="si">:</span><span class="s2">#^100</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="n">disp</span><span class="o">.</span><span class="n">to_string</span><span class="p">(</span><span class="n">index</span><span class="o">=</span><span class="kc">False</span><span class="p">))</span>
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;&#39;</span><span class="si">:</span><span class="s2">#^100</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span></div>
 
 
@@ -11553,7 +11754,19 @@
             <span class="bp">self</span><span class="o">.</span><span class="n">n_c_tic</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_tic</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">ti_controls_candidates</span><span class="o">.</span><span class="n">shape</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">tv_controls_candidates</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">empty</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c_tic</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">n_c_tvc</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_tvc</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_c_tic</span><span class="p">,</span> <span class="mi">1</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">sampling_times_candidates</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">empty_like</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ti_controls_candidates</span><span class="p">)</span>
+            <span class="c1"># A static model has no time axis. This placeholder exists only so</span>
+            <span class="c1"># that downstream shape arithmetic has something to index; every</span>
+            <span class="c1"># read of it is behind an `if self._dynamic_system:` guard. Use</span>
+            <span class="c1"># zeros, not np.empty_like: empty_like returns whatever was in</span>
+            <span class="c1"># memory, which get_optimal_candidates then copies into</span>
+            <span class="c1"># opt_cand[3], so a static design carried nondeterministic garbage</span>
+            <span class="c1"># in a field that looks like data. (The SHAPE is also wrong -- it</span>
+            <span class="c1"># follows ti_controls_candidates while n_spt is 1 -- but changing</span>
+            <span class="c1"># that reaches save/load and the padding helpers, so it is left</span>
+            <span class="c1"># alone here deliberately.)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">sampling_times_candidates</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">ti_controls_candidates</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span>
+            <span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">n_c_spt</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_c_tic</span><span class="p">,</span> <span class="mi">1</span>
         <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_simulate_signature</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">n_c_tic</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_tic</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">ti_controls_candidates</span><span class="o">.</span><span class="n">shape</span>

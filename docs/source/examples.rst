@@ -379,7 +379,8 @@ it does reuse the three-reaction batch model introduced in
 Publication code
 ----------------
 
-``publications/`` holds scripts reproducing figures and results from the papers
-behind pydex. These are archival: they are kept as published rather than
-updated alongside the API, so treat them as a record rather than as current
-usage examples.
+The scripts reproducing figures from the two 2022 papers behind pydex
+(*Comput. Chem. Eng.* 159:107680 and *React. Chem. Eng.* 7(11):2359–2374) are
+**not** kept in this fork. They target the pre-0.2.0 cvxpy/MOSEK API, which no
+longer exists here, so they cannot run against current pydex. The code archive
+cited by those papers is `omega-icl/pydex <https://github.com/omega-icl/pydex>`_.

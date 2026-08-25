@@ -5,6 +5,192 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-08-25
+
+### Added
+
+- **`print_optimal_candidates_table()` and `get_optimal_candidates_table()`**
+  on `Designer` — a tabular, one-row-per-suggested-experiment view of the
+  optimal design. Previously the only output was `print_optimal_candidates()`,
+  which shows time-invariant controls as raw, unlabelled vectors — readable
+  only by decoding against `ti_controls_names` by hand.
+  `get_optimal_candidates_table()` returns a `pandas.DataFrame` (numeric,
+  unrounded, directly exportable to CSV); `print_optimal_candidates_table()`
+  prints a formatted version and is now also called automatically at the end
+  of `print_optimal_candidates()`, appended below its existing output, not
+  replacing it.
+
+  Columns: `Experiment` (sequential 1..N — the number to use when
+  communicating the protocol; does not correspond to anything in the
+  original candidate pool), `Candidate` (1-indexed position in the original
+  candidate pool, kept for cross-reference with plot legends, solver
+  progress logs, and `candidate_names` in exported results), one column per
+  `ti_controls_names`, `Schedule` (present only when sampling times were
+  optimised with a fixed `n_spt` — two schedules on one candidate are two
+  *separate, mandatory* experiments, a required split of effort, not
+  alternative/optional ways of running the same one), `Sampling Time`, and
+  `Effort`.
+
+  One behavioural fix that fell out of building this: the fixed-grid
+  (sampling times not optimised) case now reports only the times carrying
+  nonzero effort, rather than the whole predefined grid regardless of use —
+  a grid point can end up at zero effort at the optimum, and the previous
+  unfiltered dump implied it was part of the recommended protocol when it
+  wasn't.
+
+  Found, not fixed, while verifying this against real solves: for a
+  **static** system, `get_optimal_candidates()`'s internal sampling-times
+  field (`opt_cand[3]`) reads back as uninitialised memory (indexing into a
+  `sampling_times_candidates` that is never meaningfully allocated when
+  there is no time dependency). The new table never touches that field for
+  static systems, so it's unaffected, but anything else reading it directly
+  is not safe. Not fixed here — separate issue, separate fix.
+
+  Verified before commit: capability suite 287/287 (absorbed-noise count
+  unchanged, 865+1), `smoke_test_designer.py` 4/4, sections 54/55 (via
+  direct function import — see Sandbox setup note),
+  `PYTHONPATH=_flat pytest -q tests/` 51/51, `compileall` and
+  `ast.parse(..., feature_version=(3,9))` both clean.
+
+### Fixed
+
+- **`print_optimal_candidates()` and `apportion()` printed the WRONG
+  candidate's sampling grid.** Both reports' fixed-grid branches
+  (`optimize_sampling_times=False`) did
+  `print(self.sampling_times_candidates[i])` where `i` is the `enumerate`
+  counter over `optimal_candidates` -- the position in the SUPPORTED list, not
+  the candidate index. Whenever the supported candidates were not the first N
+  of the pool, the report showed some other candidate's times under the right
+  candidate's heading. Reproduced on pristine v0.4.0: a design supported on
+  candidates 3 and 4 printed candidate 2's grid (`[0.44 0.55 0.66]`) beneath
+  `[Candidate 4]`, whose real grid is `[1.11 1.22 1.33]`. Both branches now
+  read `opt_cand[3]`, which `get_optimal_candidates()` populates from
+  `opt_cand[0]`. Visible in capability-suite section 30, which has a distinct
+  grid per candidate.
+
+- **Both reports listed sampling times carrying no effort as though they were
+  part of the design.** The fixed-grid branch printed the candidate's entire
+  grid regardless of effort. Times at zero effort are genuinely NOT in the
+  design: verified by construction that the FIM depends on how effort is
+  distributed across sampling times even when `optimize_sampling_times` is
+  `False` -- holding a candidate's total fixed and moving its effort onto a
+  zero-effort time changed `log det(FIM)` from `3.509` to `-34.666`. Both
+  reports now list only the effort-carrying times and state how many grid
+  times were omitted.
+
+  Note `apportion()`'s run count is per CANDIDATE, not per sampling time
+  (`opt_eff` collapses to one value per candidate on this path), so its report
+  states that each run samples at the listed times rather than splitting runs
+  across them.
+
+  Both defects were found by diffing the existing report against the new table
+  on a real solve -- no assertion covered either, so the capability suite
+  passed 287/287 while the output was wrong. `tests/test_optimal_candidates_report.py`
+  now guards both, and both assertions were confirmed to FAIL against the
+  pre-fix `designer.py`. The first version of that guard was VACUOUS and
+  passed against the broken code: numpy renders `np.array([0.10, 0.20])` as
+  `[0.1 0.2]`, so asserting on `"0.10"` could never fire. The fixture now uses
+  values (`0.11`, `0.77`, ...) that render identically whether printed by
+  numpy or by the formatted report.
+
+- **`apportion()` crashed with `UnboundLocalError: efficiency` for 11 of the
+  15 public criteria.** The efficiency block assigned `efficiency` inside a
+  four-way `if`/`elif` chain (`d_opt`, `ds_opt`, `a_opt`, `e_opt`) with no
+  `else`, then unconditionally called `np.squeeze(efficiency)`. Every other
+  criterion -- `v_opt`, `vdi`, `cvar_d`, `b_opt`, `u_opt` and all six
+  prediction-variance criteria (`dg`, `di`, `ag`, `ai`, `eg`, `ei`) -- fell
+  through and raised, making apportionment unusable for most of the library.
+  Confirmed present on pristine v0.4.0. A relative-efficiency RATIO genuinely
+  is undefined for those criteria, so the fix does not invent one: the four
+  supported criteria report exactly as before, and the rest now say the
+  efficiency is not reported and why, while still printing the Kiefer bound
+  (which does hold). Verified across all ten solver-reachable criteria.
+
+  This is a *reporting* fix only -- the apportionment itself was always
+  correct, which is why the capability suite never caught it: sections 10 and
+  32 apportion a D-optimal design, the one case that worked.
+
+- **A static system's `sampling_times_candidates` was uninitialised memory.**
+  `_get_component_sizes` allocated it with `np.empty_like(ti_controls_candidates)`
+  for signature-1 (static) models, and `get_optimal_candidates()` copies that
+  straight into `opt_cand[3]` -- so a static design carried nondeterministic
+  garbage (values like `4.4e-315`) in a field that looks like data. Now
+  zero-filled. Latent rather than live: every read is behind an
+  `if self._dynamic_system:` guard, so nothing displayed or computed from it,
+  and the new table deliberately never reads it for static systems. The array's
+  SHAPE is also wrong -- it follows `ti_controls_candidates` while `n_spt` is 1
+  -- but correcting that reaches save/load and the sampling-time padding
+  helpers, so it is left alone and documented in place.
+
+  Neither of those two fixes is covered by `tests/` (both need a solved
+  design); both were verified by execution across the criterion set.
+
+- **`ag`, `ai`, `eg` and `ei` crashed mid-solve on an un-invertible FIM.**
+  `eval_pim` sets `self.pvars = None` when `_safe_fim_inverse` cannot invert
+  the FIM, and its own comment states the intent: this is so "the consuming
+  criteria report an infeasible design (+inf) instead, which is what an
+  optimiser can actually act on". `dg_opt`, `di_opt` and `vdi` honour that
+  contract; `ag`, `ai`, `eg` and `ei` did not -- they iterated `None` and
+  raised
+
+      TypeError: 'NoneType' object is not iterable
+
+  from inside the SLSQP objective, aborting the entire `design_experiment()`
+  run instead of steering the optimiser away from an infeasible point. Found
+  when a real `design_experiment(eg_opt_criterion)` died this way. The four
+  unguarded criteria are exactly the four with no docstring, which is
+  plausibly why they were missed when `dg`/`di` were hardened. All six now
+  return `+inf`, the worst attainable value for a minimised criterion and
+  therefore correct regardless of each one's internal sign convention.
+
+  Guarded by six parametrised tests in
+  `tests/test_optimal_candidates_report.py`; the four affected cases were
+  confirmed to FAIL against the pre-guard `designer.py` while `dg`/`di` pass,
+  so the test discriminates rather than merely passing.
+
+  Note the capability suite exercises all six criteria (sections 29 and 40)
+  and never hit this: those runs stay on a well-conditioned FIM, so `pvars`
+  is never `None` there.
+
+### Removed
+
+- **`publications/`** (61 MB, 41 scripts, two paper subfolders). The folder
+  claimed to hold "the original Python codes written to compute results that
+  were previously published", for:
+
+  - Kusumo, Kuriyan, Vaidyaraman, García-Muñoz, Shah & Chachuat, *Risk
+    mitigation in model-based experiment design: a continuous-effort approach
+    to optimal campaigns*, **Comput. Chem. Eng.** 159 (2022) 107680,
+    doi:10.1016/j.compchemeng.2022.107680
+  - Kusumo, Kuriyan, Vaidyaraman, García-Muñoz, Shah & Chachuat,
+    *Probabilistic framework for optimal experimental campaigns in the
+    presence of operational constraints*, **React. Chem. Eng.** 7(11) (2022)
+    2359–2374, doi:10.1039/D1RE00465D
+
+  That claim no longer holds for this fork. `risk_mitigation/` calls
+  `design_experiment(package="cvxpy", ...)` against MOSEK — the pre-0.2.0 API
+  removed in 0.2.0 — so the scripts are not merely numerically stale, they
+  cannot execute at all: cvxpy is neither a dependency nor importable here,
+  and there is no `package=` argument anywhere in `designer.py`. Retaining
+  them under a README asserting they reproduce published figures
+  misrepresents this fork.
+
+  **This is not the papers' cited code archive.** The React. Chem. Eng.
+  paper's ESI names `https://github.com/omega-icl/pydex` as the source for
+  both the package and the case-study files; the same author group and
+  lineage covers the Comput. Chem. Eng. paper. Reproducibility for both
+  therefore rests with `omega-icl/pydex`, not with this fork, and removing
+  the folder here breaks no code-availability citation.
+
+  Removed from HEAD only — no history rewrite. Every file remains recoverable
+  from this repository's history and from the `v0.2.0`–`v0.4.0` tags; a
+  rewrite would have invalidated those tags and would not shrink existing
+  clones anyway. Use `--depth 1` or a sparse checkout for a small clone.
+
+  Stale references removed alongside it: the "Publication code" sections of
+  `docs/source/examples.rst` and `examples/README.md`, and the
+  `!publications/**/*.pkl` exception in `.gitignore`.
+
 ## [0.4.0] - 2026-08-19
 
 ### Added
