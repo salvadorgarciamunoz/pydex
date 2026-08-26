@@ -1046,6 +1046,10 @@ class Designer:
         self.non_trimmed_apportionments = None
         self.n_exp = None
         self.epsilon = None
+        # Actual (criterion-based) rounding efficiency from the last
+        # apportion() call, or None when the active criterion has no standard
+        # relative-efficiency definition / it was not computed.
+        self.rounding_efficiency = None
 
         # exclusive to prediction-oriented criteria
         self.pvars = None
@@ -2144,6 +2148,17 @@ class Designer:
             print("[clear_prior] Prior FIM cleared.")
 
     def _get_apportioned_candidates(self):
+        """
+        Expand the apportionment into one entry per experimental RUN.
+
+        Unreferenced anywhere in the repository (PROJECT_NOTES Open Item 21)
+        and kept only because it imports cleanly. Updated here rather than left
+        alone because it reads self.apportionments, whose per-candidate entries
+        are now vectors over that candidate's own support times when sampling
+        times are optimised: the previous `int(app)` raised TypeError on
+        anything but a scalar, so it was silently broken for every dynamic
+        design already and would have broken differently now.
+        """
         app_tic_candidates = []
         app_tvc_candidates = []
         app_spt_candidates = []
@@ -2151,7 +2166,10 @@ class Designer:
             tic = self.optimal_candidates[i][1]
             tvc = self.optimal_candidates[i][2]
             spt = self.optimal_candidates[i][3]
-            for _ in range(int(app)):
+            # total runs on this candidate, whether app is a scalar (sampling
+            # times not optimised) or a per-support-time vector
+            n_runs = int(np.nansum(np.asarray(app, dtype=float)))
+            for _ in range(n_runs):
                 app_tic_candidates.append(tic)
                 app_tvc_candidates.append(tvc)
                 app_spt_candidates.append(spt)
@@ -4632,7 +4650,8 @@ class Designer:
             print(f"{criterion.__name__}: {crit_val:.{decimal_places}E}")
         return crit_val
 
-    def apportion(self, n_exp, method="adams", trimmed=True, compute_actual_efficiency=True):
+    def apportion(self, n_exp, method="adams", trimmed=True,
+                  compute_actual_efficiency=None):
         """Round a continuous design into a whole number of experimental runs.
 
         A continuous design gives fractional effort per candidate, which cannot
@@ -4756,40 +4775,99 @@ class Designer:
                               f"collecting {self._n_spt_spec} samples at given times")
                 print(f"".center(100, "-"))
             self._save_atomics = _original_save_atomics
-            return
+            # Return the counts, not None. This branch used to `return` bare,
+            # so `app = d.apportion(n_exp)` handed back None for every
+            # n_spt design (case_2, case_3, case_3_ift, suite section 47) while
+            # the other branches returned an array -- one function, two return
+            # contracts, depending on a flag the caller may not be tracking.
+            return self._apportionments_as_int()
         self.get_optimal_candidates()
 
-        """ Initialize opt_eff shape """
-        if self._opt_sampling_times:
-            self.opt_eff = np.empty((len(self.optimal_candidates), self.max_n_opt_spt))
-        else:
-            self.opt_eff = np.empty((len(self.optimal_candidates)))
-        self.opt_eff[:] = np.nan
-
-        """ Get the optimal efforts from optimal_candidates """
-        for i, opt_cand in enumerate(self.optimal_candidates):
-            if self._opt_sampling_times:
-                for j, spt in enumerate(opt_cand[4]):
-                    if self._specified_n_spt:
-                        self.opt_eff[i, j] = np.nansum(spt)
-                    else:
-                        self.opt_eff[i, j] = spt
-            else:
-                self.opt_eff[i] = np.nansum(opt_cand[4])
-
-        """ do the apportionment """
-        if method == "adams":
-            if n_exp < self.n_factor_sups:
-                self.apportionments = self._greatest_effort_apportionment(self.opt_eff, n_exp)
-            else:
-                self.apportionments = self._adams_apportionment(self.opt_eff, n_exp)
-        else:
+        if method != "adams":
             raise NotImplementedError(
                 "At the moment, the only method implemented is 'adams', please use it. "
                 "More apportionment methods will be implemented, but there is proof "
                 "that Adam's method is the most efficient amongst other popular "
                 "methods used in electoral college apportionments."
             )
+
+        # ------------------------------------------------------------------
+        # Flatten the supports, apportion on the FLAT vector, scatter back.
+        #
+        # opt_eff used to be a RECTANGULAR (n_opt_c, max_n_opt_spt) array
+        # NaN-padded to a common width, because supported candidates can carry
+        # effort at different NUMBERS of sampling times. Its row/column
+        # indices addressed "position in the supported list" x "position in
+        # that candidate's own support list" -- a coordinate system that does
+        # not exist in the model -- and the padding then leaked two ways:
+        #
+        #   * _adams_apportionment composes ceil(effort * mu), and ceil(NaN)
+        #     is NaN, so padding cells survived into the result and the final
+        #     astype(int) turned them into INT64_MIN (-9223372036854775808)
+        #     with nothing but a RuntimeWarning. Ragged support is the NORMAL
+        #     outcome of optimising sampling times, not an edge case.
+        #   * _greatest_effort_apportionment does np.where(work == nanmax)[0],
+        #     which on a 2-D array yields ROW indices, so it assigned an
+        #     entire candidate's row at once. With max_n_opt_spt >= 2 it
+        #     allocated a multiple of the requested budget (n_exp=2 -> 6 runs)
+        #     and blanked whole candidates via work[chosen] = -inf, SILENTLY --
+        #     no warning at all, and the printed report showed "Run 3/2".
+        #
+        # Both helpers are correct on a 1-D vector of real supports, which is
+        # exactly what the _specified_n_spt branch above already builds. Using
+        # one representation for both branches removes the padding rather than
+        # defending against it, and fixes both defects at once.
+        # ------------------------------------------------------------------
+        flat_efforts, flat_index = [], []
+        for i, opt_cand in enumerate(self.optimal_candidates):
+            if self._opt_sampling_times:
+                for j, spt in enumerate(opt_cand[4]):
+                    flat_efforts.append(float(np.nansum(spt)))
+                    flat_index.append((i, j))
+            else:
+                # sampling times not optimised: one effort per EXPERIMENT, so
+                # the candidate is the support and there is no time axis to
+                # pad. j is None to mark "this candidate holds a scalar".
+                flat_efforts.append(float(np.nansum(opt_cand[4])))
+                flat_index.append((i, None))
+        flat_efforts = np.asarray(flat_efforts, dtype=float)
+
+        # Kept for backwards compatibility and for the efficiency bound below.
+        # Now the FLAT vector of real supports: no NaN, and .size is the true
+        # support count, so Pukelsheim's mu (n_exp - efforts.size / 2) is no
+        # longer computed from a padded width.
+        self.opt_eff = flat_efforts
+
+        if flat_efforts.size == 0:
+            self.apportionments = np.zeros(0)
+            app_flat = np.zeros(0)
+        elif n_exp < self.n_factor_sups:
+            app_flat = np.asarray(
+                self._greatest_effort_apportionment(flat_efforts, n_exp), dtype=float
+            ).ravel()
+        else:
+            app_flat = np.asarray(
+                self._adams_apportionment(flat_efforts, n_exp), dtype=float
+            ).ravel()
+
+        # Scatter back, preserving each candidate's own support length. Ragged
+        # candidates stay ragged instead of being padded to a common width.
+        if self._opt_sampling_times:
+            per_cand = [
+                np.zeros(len(opt_cand[4])) for opt_cand in self.optimal_candidates
+            ]
+            for pos, (i, j) in enumerate(flat_index):
+                per_cand[i][j] = app_flat[pos]
+            if len({a.size for a in per_cand}) == 1 and per_cand:
+                # uniform support widths: a plain 2-D array is still exact and
+                # keeps the common case arithmetic-friendly
+                self.apportionments = np.asarray(per_cand, dtype=float)
+            else:
+                self.apportionments = np.empty(len(per_cand), dtype=object)
+                for i, a in enumerate(per_cand):
+                    self.apportionments[i] = a
+        else:
+            self.apportionments = app_flat.copy()
 
         """ Report the obtained apportionment """
         if self._verbose >= 1:
@@ -4875,66 +4953,135 @@ class Designer:
                             print(f"  ({n_unused} of {len(spt_arr)} candidate grid "
                                   f"time(s) carry no effort and are omitted)")
 
-            """ Computing and Reporting Rounding Efficiency """
-            self.epsilon = self._eval_efficiency_bound(
-                self.apportionments / n_exp,
-                self.opt_eff,
-            )
+        # ------------------------------------------------------------------
+        # Rounding efficiency. COMPUTED UNCONDITIONALLY -- this whole block
+        # used to sit inside `if self._verbose >= 1:`, which made three
+        # documented parameters silent no-ops at the default verbose=0:
+        # `trimmed` was never applied, `compute_actual_efficiency` never ran,
+        # and self.epsilon / self.non_trimmed_apportionments stayed None.
+        # Only the PRINTING is gated now.
+        # ------------------------------------------------------------------
+        self.epsilon = self._eval_efficiency_bound(app_flat / n_exp, flat_efforts)
 
-            """ 
-            =============================================================================
-            Computing actual efficiency 
-            =============================================================================
-            the rounding efficiency above is computed using efforts that excludes
-            experimental candidates with non-zero efforts i.e., only supports
-            to compute actual efficiency, non_trimmed_apportionment is required
-            i.e., need candidates with zero efforts too.
-            """
-            # initialize the non_trimmed_apportionments
-            self.non_trimmed_apportionments = np.zeros_like(self.efforts)
-            for opt_c, app_c in zip(self.optimal_candidates, self.apportionments):
-                opt_idx = opt_c[0]
-                opt_spt = opt_c[5]
-                if isinstance(app_c, float):
-                    self.non_trimmed_apportionments[opt_idx, opt_spt] = app_c
-                else:
-                    for spt, app in zip(opt_spt, app_c):
-                        self.non_trimmed_apportionments[opt_idx, spt] = app
-            # normalized to non_trimmed_rounded_efforts
-            non_trimmed_rounded_efforts = self.non_trimmed_apportionments / np.sum(self.non_trimmed_apportionments)
-            if compute_actual_efficiency:
-                _original_efforts = np.copy(self.efforts)
+        # non_trimmed_apportionments is the canonical, padding-free view: one
+        # cell per REAL (candidate, sampling time) pair of the pool, zero where
+        # no runs are allocated. Every index is a genuine model index, so a
+        # zero here means "no runs", which is true, rather than "this cell does
+        # not exist", which is what the removed NaN padding meant.
+        self.non_trimmed_apportionments = np.zeros_like(self.efforts)
+        for opt_c, app_c in zip(self.optimal_candidates, self.apportionments):
+            opt_idx = opt_c[0]
+            opt_spt = opt_c[5]
+            if np.ndim(app_c) == 0:
+                self.non_trimmed_apportionments[opt_idx, opt_spt] = float(app_c)
+            else:
+                for spt, app in zip(opt_spt, np.asarray(app_c).ravel()):
+                    self.non_trimmed_apportionments[opt_idx, spt] = app
+
+        # Tri-state, so the flag is honest without paying for a number nobody
+        # reads. None (default) = "compute it if it will be reported", which
+        # preserves the previous cost profile exactly: at verbose=0 the two
+        # criterion evaluations are skipped as before. Passing True forces the
+        # computation even when silent, and the result is stored on
+        # self.rounding_efficiency so it is reachable programmatically rather
+        # than only ever appearing in a print.
+        #
+        # `trimmed`, `epsilon` and non_trimmed_apportionments above are NOT
+        # gated: the first changes the returned value and the other two are
+        # pure array arithmetic with no criterion call.
+        if compute_actual_efficiency is None:
+            compute_actual_efficiency = self._verbose >= 1
+
+        efficiency = None
+        if compute_actual_efficiency:
+            _total = np.sum(self.non_trimmed_apportionments)
+            non_trimmed_rounded_efforts = (
+                self.non_trimmed_apportionments / _total if _total > 0
+                else self.non_trimmed_apportionments
+            )
+            _original_efforts = np.copy(self.efforts)
+
+            def _score(eff_vector):
+                """Evaluate the ACTIVE criterion at one effort vector."""
+                val = getattr(self, self._current_criterion)(eff_vector)
+                if isinstance(val, tuple):
+                    val = val[0]
+                val = getattr(val, "value", val)
+                return float(np.squeeze(val))
+
+            # Both endpoints go through the SAME evaluator.
+            #
+            # This block used to combine self._criterion_value -- the Pyomo
+            # OPTIMISER's objective -- with criterion(rounded) from the numpy
+            # evaluator, which is only a valid ratio if those two subsystems
+            # agree up to sign. Nothing asserted that, and they did not: for a
+            # 1x1 FIM the numpy d_opt evaluator returned -FIM while the solver
+            # returned log det, so a design that was EXACTLY 100% efficient
+            # (rounded efforts bit-identical to continuous) was reported as
+            # 871%, and a_opt reported ~0% for the same reason. Even where the
+            # scales do agree the two numbers describe slightly DIFFERENT
+            # designs, because get_optimal_candidates() ->
+            # _remove_zero_effort_candidates() trims and renormalises
+            # self.efforts in place before we get here.
+            #
+            # Comparing like with like makes the ratio correct by construction
+            # instead of correct-if-two-subsystems-happen-to-match. The
+            # criteria were ALSO fixed so their scales agree (see
+            # _d_opt_criterion / _a_opt_criterion); this does not depend on it.
+            #
+            # Criteria whose signature takes a FIM rather than an effort vector
+            # (cvar_*) cannot be scored this way at all -- calling them with
+            # efforts silently returned inf -- and they have no relative
+            # efficiency definition anyway, so they are skipped outright.
+            _takes_fim = "cvar" in (self._current_criterion or "")
+            if not _takes_fim:
                 try:
-                    rounded_criterion_value = getattr(self, self._current_criterion)(non_trimmed_rounded_efforts).value
-                except AttributeError:
-                    rounded_criterion_value = getattr(self, self._current_criterion)(non_trimmed_rounded_efforts)
+                    rounded_criterion_value = _score(non_trimmed_rounded_efforts)
+                    continuous_criterion_value = _score(_original_efforts)
+                finally:
+                    self.efforts = _original_efforts
+
                 # An efficiency RATIO is only meaningful where the criterion has
-                # a standard relative-efficiency definition. Only these four do.
-                # Everything else (v_opt, vdi, cvar_d, b_opt, u_opt and the six
-                # prediction-variance criteria) has no such definition, so
-                # efficiency stays None and is reported as unavailable rather
-                # than left unassigned -- previously the if/elif chain had no
-                # else and `np.squeeze(efficiency)` below raised
-                # UnboundLocalError for 11 of the 15 public criteria.
-                efficiency = None
+                # a standard relative-efficiency definition. Only these four do;
+                # everything else reports that it is unavailable rather than
+                # leaving `efficiency` unassigned (which used to raise
+                # UnboundLocalError for 11 of the 15 public criteria).
                 if self._current_criterion == "d_opt_criterion":
-                    efficiency = np.exp(1 / self.n_mp * (-rounded_criterion_value - self._criterion_value))
+                    efficiency = np.exp(
+                        (continuous_criterion_value - rounded_criterion_value)
+                        / self.n_mp
+                    )
                 elif self._current_criterion == "ds_opt_criterion":
                     # same D-efficiency formula, but referenced to the number
                     # of INTEREST parameters (n_s), since Ds-optimality is
                     # D-optimality on the Schur-complement subspace of size n_s
                     idx_s, _ = self._resolve_ds_idx()
                     n_s = len(idx_s)
-                    efficiency = np.exp(1 / n_s * (-rounded_criterion_value - self._criterion_value))
+                    efficiency = np.exp(
+                        (continuous_criterion_value - rounded_criterion_value) / n_s
+                    )
                 elif self._current_criterion == "a_opt_criterion":
-                    efficiency = -self._criterion_value / rounded_criterion_value
+                    # a_opt is minimised trace(FIM^-1) > 0
+                    efficiency = (
+                        continuous_criterion_value / rounded_criterion_value
+                        if rounded_criterion_value not in (0, np.inf) else None
+                    )
                 elif self._current_criterion == "e_opt_criterion":
-                    efficiency = -rounded_criterion_value / self._criterion_value
-                self.efforts = _original_efforts
+                    # e_opt is minimised -min(eig)
+                    efficiency = (
+                        rounded_criterion_value / continuous_criterion_value
+                        if continuous_criterion_value != 0 else None
+                    )
+            self.efforts = _original_efforts
 
-            if not trimmed:
-                self.apportionments = self.non_trimmed_apportionments
+        self.rounding_efficiency = (
+            None if efficiency is None else float(np.squeeze(efficiency))
+        )
 
+        if not trimmed:
+            self.apportionments = self.non_trimmed_apportionments
+
+        if self._verbose >= 1:
             print(f"".center(100, "-"))
             print(
                 f"The rounded design for {n_exp} runs is guaranteed to be at least "
@@ -4957,7 +5104,47 @@ class Designer:
             print(f"{'':#^100}")
         self._save_atomics = _original_save_atomics
 
-        return self.apportionments.astype(int)
+        return self._apportionments_as_int()
+
+    def _apportionments_as_int(self):
+        """
+        Integer view of self.apportionments, ragged-safe.
+
+        The old implementation was a bare ``self.apportionments.astype(int)``
+        on an array that could still hold NaN padding, and astype(int) on NaN
+        does not raise -- it yields INT64_MIN (-9223372036854775808) behind a
+        single RuntimeWarning. The padding is gone now, so there is nothing to
+        misconvert; this helper exists so the cast also works on the ragged
+        object arrays the optimised-sampling-times path produces (a plain
+        astype(int) on those raises "setting an array element with a
+        sequence"), and so every branch of apportion() can return the same
+        thing.
+
+        Any non-finite value reaching this point is a bug rather than a
+        representable answer, so it raises instead of casting silently.
+        """
+        app = self.apportionments
+        if app is None:
+            return None
+
+        def _cast(a):
+            arr = np.asarray(a, dtype=float)
+            if not np.all(np.isfinite(arr)):
+                raise RuntimeError(
+                    "apportion() produced a non-finite run count "
+                    f"({arr}). This should be unreachable: the apportionment "
+                    "now runs on a flat vector of real supports with no NaN "
+                    "padding. Please report this with the design that "
+                    "triggered it rather than casting it away."
+                )
+            return arr.astype(int)
+
+        if isinstance(app, np.ndarray) and app.dtype == object:
+            out = np.empty(app.shape, dtype=object)
+            for i, a in enumerate(app):
+                out[i] = _cast(a)
+            return out
+        return _cast(app)
 
     def _adams_apportionment(self, efforts, n_exp):
 
@@ -5000,6 +5187,21 @@ class Designer:
         that used it afterwards.
         """
         work = np.array(efforts, dtype=float).copy()
+        if work.ndim != 1:
+            # This routine indexes with np.where(...)[0], which on a 2-D array
+            # returns ROW indices, so `self.apportionments[chosen] = 1` set an
+            # entire candidate's row of sampling times at once: with two or
+            # more support times per candidate it allocated a MULTIPLE of the
+            # requested budget (n_exp=2 -> 6 runs) and blanked whole candidates
+            # via work[chosen] = -inf, entirely silently. Callers must flatten
+            # to a 1-D vector of real supports and scatter the result back; see
+            # apportion(). Refusing the shape is what stops that from being
+            # re-introduced by a future caller.
+            raise ValueError(
+                f"_greatest_effort_apportionment requires a 1-D vector of "
+                f"supports, got shape {work.shape}. Flatten the (candidate, "
+                f"sampling time) supports first and scatter the result back."
+            )
         self.apportionments = np.zeros_like(work)
         n_avail = int(np.sum(np.isfinite(work)))
         if n_exp > n_avail:
@@ -6720,8 +6922,17 @@ class Designer:
         # build FIM from experimental candidates (standard path)
         self.eval_fim(efforts)
 
-        if self.fim.size == 1:
-            return float(self.fim)
+        # No special case for a 1x1 FIM. This one was not merely mis-scaled but
+        # DIRECTION-REVERSED: J_V = trace(W FIM^-1 W^T) DECREASES as
+        # information grows, while the removed branch returned +FIM, which
+        # INCREASES. Since J_V is minimised, a single-parameter V-optimal
+        # design scored through the numpy evaluator preferred the LEAST
+        # informative experiment. inv() is exact on a (1, 1) array, so the
+        # general branch below is the correct single-parameter answer.
+        #
+        # V-optimal is dispatched natively to Pyomo, so the reversal did not
+        # reach design_experiment()'s optimiser; it reached compute_criterion_
+        # value(), apportion()'s reporting, and the SLSQP fallback.
 
         # --- invert FIM with regularization / pseudoinverse fallback ---
         if self._regularize_fim:
@@ -7168,9 +7379,10 @@ class Designer:
 
         if self._pseudo_bayesian:
             # fim is a plain numpy array supplied by _solve_pyomo_cvar
-            fim = np.asarray(fim)
-            if fim.size == 1:
-                return -float(np.squeeze(fim))
+            # No special case for a 1x1 FIM: slogdet is exact on a (1, 1)
+            # array. The removed branch returned -FIM (LINEAR) against this
+            # branch's -log det (LOG), the same split as _d_opt_criterion.
+            fim = np.atleast_2d(np.asarray(fim, dtype=float))
             sign, logdet = np.linalg.slogdet(fim)
             return -logdet if sign == 1 else np.inf
         else:
@@ -9430,19 +9642,29 @@ class Designer:
         """ D-optimality: maximise log-det(FIM). """
         self.eval_fim(efforts)
 
-        if self.fim.size == 1:
-            d_opt = -self.fim
-            if self._fd_jac:
-                return np.squeeze(d_opt)
-            else:
-                jac = -np.array([1 / self.fim * m for m in self.atomic_fims])
-                return d_opt, jac
+        # No special case for a 1x1 FIM. slogdet/inv are exact on a (1, 1)
+        # array, so a separate scalar branch is redundant -- and the one that
+        # used to live here returned -FIM (LINEAR) where this branch returns
+        # -log det(FIM) (LOG), so the two disagreed by a factor of the FIM for
+        # every single-parameter model. Its own Jacobian was the gradient of
+        # -log(FIM), which is what fixed the intent: the value was the bug.
+        # Keeping one formula for all sizes makes the scales agree by
+        # construction rather than by two code paths happening to match.
+        n_grad = self._n_grad(efforts)
+        fim = self._prepare_fim(self.fim)
+        if fim is None:
+            # Degenerate FIM (absent, wrong shape, all-zero, non-finite). The
+            # removed scalar branch returned -0.0 for the np.array([0])
+            # sentinel _eval_fim can produce -- the BEST value for a minimised
+            # criterion, i.e. the same "broken design scores perfectly" trap
+            # that a_opt's guard exists for. Same convention as a_opt/ds_opt.
+            return np.inf if self._fd_jac else (np.inf, np.zeros(n_grad))
 
-        sign, d_opt = np.linalg.slogdet(self.fim)
+        sign, d_opt = np.linalg.slogdet(fim)
         if self._fd_jac:
             return -d_opt if sign == 1 else np.inf
         else:
-            fim_inv = np.linalg.inv(self.fim)
+            fim_inv = np.linalg.inv(fim)
             jac = -np.array([np.sum(fim_inv.T * m) for m in self.atomic_fims])
             return (-d_opt, jac) if sign == 1 else (np.inf, jac)
 
@@ -9866,24 +10088,18 @@ class Designer:
         n_grad = self._n_grad(efforts)
         fim_raw = self.fim
 
-        # Single-parameter case, checked BEFORE _prepare_fim because the
-        # original implementation short-circuited on fim.size == 1 without
-        # consulting n_mp; preserving that ordering keeps genuine
-        # single-parameter studies bit-identical. Kept as the historical
-        # monotone-equivalent surrogate -maximise(FIM) rather than
-        # minimise(1/FIM): both order designs identically for FIM > 0.
-        # The finite/positive guard is new, so that the np.array([0]) sentinel
-        # _eval_fim can return routes to the infeasible branch instead of
-        # yielding a meaningless -0.
-        if isinstance(fim_raw, np.ndarray) and fim_raw.size == 1:
-            _v = float(np.asarray(fim_raw, dtype=float).reshape(-1)[0])
-            if np.isfinite(_v) and _v > 0.0:
-                if self._fd_jac:
-                    return -fim_raw
-                jac = np.array([m for m in self.atomic_fims])
-                return -fim_raw, jac
-            return np.inf if self._fd_jac else (np.inf, np.zeros(n_grad))
-
+        # No special case for a 1x1 FIM. eigvalsh/inv are exact on a (1, 1)
+        # array and give sum(1/eig) == 1/FIM == trace(FIM^-1), so the general
+        # branch already IS the single-parameter answer.
+        #
+        # The surrogate that used to live here returned -FIM, defended as
+        # "monotone-equivalent" -- true for CHOOSING a design, false for every
+        # consumer that reads the VALUE. It is negative where this branch is
+        # positive (section 38 asserts "a finite POSITIVE score"), and it is
+        # the reciprocal of the right magnitude, so the reported rounding
+        # efficiency came out ~0% for designs that were in fact 100%
+        # efficient. The Pyomo objective already uses -trace(FIM^-1); this
+        # aligns the numpy evaluator to it instead of keeping two conventions.
         fim = self._prepare_fim(fim_raw)
         if fim is None:
             # degenerate FIM (absent, wrong shape, all-zero, non-finite)
@@ -9921,11 +10137,14 @@ class Designer:
         """ E-optimality: maximise minimum eigenvalue of FIM. """
         self.eval_fim(efforts)
 
-        if self.fim.size == 1:
-            return -self.fim
-
+        # No special case for a 1x1 FIM: eigvalsh([[f]]).min() == f, so the
+        # removed branch was numerically identical here -- E-optimality is the
+        # one criterion whose scalar branch DID agree with its matrix formula,
+        # which is what identified "scalar must equal matrix at 1x1" as the
+        # rule the others were breaking. Removed as redundant, not as a fix:
+        # it also returned a (1, 1) ARRAY where this returns a float.
         if self._fd_jac:
-            return -np.linalg.eigvalsh(self.fim).min()
+            return -np.linalg.eigvalsh(np.atleast_2d(self.fim)).min()
         else:
             raise NotImplementedError  # TODO: implement analytic jac for e-opt
 

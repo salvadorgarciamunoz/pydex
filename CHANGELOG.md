@@ -5,6 +5,213 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-26
+
+### Fixed
+
+- **Every criterion's scalar-FIM branch had drifted from its own matrix
+  branch.** Five criteria carried an `if fim.size == 1:` short-circuit, and
+  each computed a different function from the general branch it was meant to
+  reproduce:
+
+  | criterion | matrix branch | correct at 1×1 | scalar branch returned |
+  |---|---|---|---|
+  | `d_opt` | `-log det(FIM)` | `-log(FIM)` | `-FIM` — LOG vs LINEAR |
+  | `a_opt` | `trace(FIM⁻¹)` | `+1/FIM` | `-FIM` — sign AND form |
+  | `e_opt` | `-min(eig)` | `-FIM` | `-FIM` — correct |
+  | `v_opt` | `trace(W FIM⁻¹ Wᵀ)` | `∝ 1/FIM` | `+FIM` — DIRECTION REVERSED |
+  | `cvar_d` | `-log det(FIM)` | `-log(FIM)` | `-FIM` — LOG vs LINEAR |
+
+  E-optimality was the one that agreed, which is what identified the rule the
+  others were breaking: **a scalar branch must return exactly what the matrix
+  branch computes for a 1×1 matrix.**
+
+  Observable consequences, all on single-parameter models:
+
+  - `apportion()` reported a rounding efficiency of **871%** for a D-optimal
+    design whose rounded efforts were BIT-IDENTICAL to the continuous ones
+    (`max |difference| = 0.000e+00`, so the true answer is exactly 100%), and
+    **~0%** for the same design under A-optimality. An efficiency above 100%
+    is impossible for a rounding of the optimum. All three `examples/ode/
+    case_1*.py` are single-parameter and print this line five times each.
+  - `compute_criterion_value()` returned `-FIM` (`-5297.49`) where the
+    documented log-det answer is `-8.575`.
+  - `a_opt` returned a NEGATIVE score, contradicting capability suite section
+    38's assertion that a well-conditioned FIM gives "a finite POSITIVE
+    score" — that section uses `n_mp=4` and never reached the scalar branch.
+  - `v_opt`, which is MINIMISED, preferred the LEAST informative experiment
+    when scored through the numpy evaluator. Latent: V-optimal dispatches
+    natively to Pyomo, so this reached reporting and the SLSQP fallback
+    rather than the optimiser.
+  - `ds_opt` inherited the `d_opt` defect by delegation whenever the nuisance
+    set is empty.
+  - `d_opt`'s branch also caught the `np.array([0])` sentinel `_eval_fim` can
+    return and produced `-0.0` — the BEST value for a minimised criterion,
+    the same "broken design scores perfectly" trap `a_opt` was guarded
+    against in 0.5.0. It now reports `+inf`, matching `a_opt`/`ds_opt`.
+
+  **Fixed by DELETING all five special cases rather than correcting them.**
+  `slogdet`, `inv` and `eigvalsh` are exact on a `(1, 1)` array and `self.fim`
+  is already `(1, 1)` when `n_mp == 1`, so the matrix branch already *was* the
+  single-parameter answer. The invariant now holds by construction instead of
+  by five code paths agreeing.
+
+  This also resolves a value/gradient mismatch inside `_d_opt_criterion`: its
+  Jacobian was already the gradient of `-log(FIM)` while the value was `-FIM`
+  (measured ratio `FD/jac = 5213.474448` against `FIM = 5213.474154`). The
+  gradient identified the intent — the value was the bug. Unreachable in
+  production, since `_fd_jac` is `True` in every `design_experiment()` path.
+
+  **No recorded reference value changes.** No single-parameter criterion value
+  is recorded anywhere in the tree, and `v_optimal_test_case*.py` uses six
+  parameters.
+
+- **`apportion()` produced NaN run counts that `astype(int)` cast silently
+  (Open Item 24), and over-allocated the budget on the greatest-effort
+  branch.** `opt_eff` was a RECTANGULAR `(n_opt_c, max_n_opt_spt)` array
+  NaN-padded to a common width, because supported candidates can carry effort
+  at different NUMBERS of sampling times. Its indices addressed "position in
+  the supported list" × "position in that candidate's own support list", a
+  coordinate system that does not exist in the model, and the padding leaked
+  two ways:
+
+  - `_adams_apportionment` composes `ceil(effort * mu)`, and `ceil(NaN)` is
+    NaN, so padding cells survived into the result and the final
+    `astype(int)` turned them into `-9223372036854775808` behind a single
+    `RuntimeWarning`. Ragged support is the NORMAL outcome of optimising
+    sampling times, reproduced on the first attempt by three separate real
+    IPOPT solves.
+  - `_greatest_effort_apportionment` selects with
+    `np.where(work == np.nanmax(work))[0]`, which on a 2-D array returns ROW
+    indices, so it assigned an entire candidate's row of sampling times at
+    once. **This needed no raggedness** — only two or more support times on
+    some candidate. `apportion(2)` allocated SIX runs, printed
+    `Run 3/2 Experiments`, and reported a Kiefer bound of **150.82%**, which
+    is impossible for a bound that is at most 100% — with no warning of any
+    kind.
+
+  Both are fixed by flattening the supports to a 1-D vector of real
+  `(candidate, sampling time)` pairs, apportioning there, and scattering the
+  result back at each candidate's own length. Both helpers are correct on 1-D
+  input, which is the representation the `_specified_n_spt` branch already
+  used. `_greatest_effort_apportionment` now refuses 2-D input outright.
+  Pukelsheim's `mu` is no longer computed from a padded width.
+
+  The apportionment ARITHMETIC was always correct — real cells summed to
+  `n_exp` — and the printed per-candidate protocol was never affected, because
+  it iterates each candidate's own support list and never reads the padding.
+  The garbage existed only in the returned array.
+
+  **Closes Open Item 24**, and corrects that item's premise: it recorded that
+  nobody had isolated which branch produced the NaN. The answer is Adams
+  ONLY — `_greatest_effort_apportionment` initialises with `np.zeros_like`, so
+  its padding was `0` and never NaN. That branch was broken too, but
+  differently and worse: silently, with no warning at all. It had no open-item
+  number and was found while verifying Item 24.
+
+  Item 24 also noted that the defect stopped reproducing on
+  `case_3_ift.py` after 0.6.0 and warned against concluding it was fixed. That
+  was right: 0.6.0 moved that example's Design 1 to `n_spt = <full grid>`,
+  which takes the already-correct flat branch. The input changed; the code did
+  not.
+
+- **The rounding-efficiency ratio mixed two subsystems.** It combined
+  `self._criterion_value` — the Pyomo OPTIMISER's objective — with
+  `criterion(rounded)` from the numpy evaluator, which is a valid ratio only
+  if the two agree up to sign. Nothing asserted that, and they did not (see
+  above). Both endpoints are now scored through the SAME evaluator.
+
+  This is independent of the scale fix and still required after it: the two
+  numbers describe slightly DIFFERENT designs, because
+  `get_optimal_candidates()` → `_remove_zero_effort_candidates()` trims and
+  renormalises `self.efforts` in place before the efficiency block runs. Even
+  where the scales agreed, `_criterion_value + criterion(continuous)` measured
+  `-2.5e-07` rather than 0.
+
+- **`trimmed`, and the Kiefer bound, were silent no-ops at the default
+  verbosity.** The `if not trimmed:` swap, `self.epsilon` and
+  `non_trimmed_apportionments` all sat inside `if self._verbose >= 1:`, so at
+  `verbose=0` the documented `trimmed` argument was ignored and both
+  attributes stayed `None`. Only the PRINTING is gated now.
+
+- **`apportion()` returned `None` on the `_specified_n_spt` branch** while
+  every other branch returned an array — one function, two return contracts,
+  depending on a flag the caller may not be tracking. Affected `case_2.py`,
+  `case_3.py`, `case_3_ift.py` and capability suite section 47.
+
+- **`apportion()` called CVaR criteria with an effort vector.**
+  `cvar_d_opt_criterion(self, fim)` takes a FIM; the efficiency block passed
+  it efforts, which returned `inf` silently. CVaR has no relative-efficiency
+  definition, so those criteria are now skipped outright.
+
+- **`_get_apportioned_candidates()` did `int(app)`**, which raised on any
+  dynamic design. Unreferenced dead code (Open Item 21), corrected rather than
+  left as a landmine now that per-candidate entries are vectors.
+
+### Changed
+
+- **`compute_actual_efficiency` is now tri-state.** `None` (the default) means
+  "compute it if it will be reported", preserving the previous cost profile
+  exactly — two criterion evaluations are skipped at `verbose=0` as before.
+  `True` forces the computation even when silent. The result is stored on the
+  new `Designer.rounding_efficiency` so it is reachable programmatically
+  rather than only ever appearing in a print.
+
+- **`apportion()` returns ragged per-candidate counts for ragged support.**
+  Uniform support widths still return a plain 2-D array. Consumers that
+  already aggregate with `np.nansum` per candidate are unaffected.
+
+### Added
+
+- `tests/test_criterion_scale_and_apportion_shape.py` — 21 solver-free tests
+  covering both invariants: a criterion's value at a 1×1 FIM equals its own
+  matrix formula, and `apportion()` allocates exactly `n_exp` runs with no
+  non-finite count whatever the support shape. **20 of the 21 fail against the
+  pre-fix `designer.py`, and the one that passes is the E-optimal case** — the
+  criterion that already satisfied the invariant, so the suite discriminates
+  rather than merely passing.
+
+  `tests/` 123 → **145**.
+
+### Open items
+
+- **Closes Open Item 24** (`apportion()` NaN + silent `astype(int)` cast). The
+  root cause was the NaN padding, not the cast; the padding is gone and the
+  cast now raises on any non-finite value rather than converting it.
+- **Open Item 21** (`_get_apportioned_candidates()` is dead code) is NOT
+  closed. It remains unreferenced; only its `int(app)`, which raised on any
+  dynamic design and would have broken differently under the new ragged
+  representation, was corrected. The delete-or-keep decision stands.
+- The following were found during this work and had no item numbers: the
+  greatest-effort 2-D row-indexing defect, the criterion scalar-branch scale
+  drift across five criteria, `trimmed`/`epsilon` being gated on verbosity,
+  `apportion()` returning `None` on the `_specified_n_spt` branch, and CVaR
+  criteria being called with an effort vector.
+
+### Notes
+
+The four pre-existing efficiency tests in
+`tests/test_apportion_efficiency_report.py` were rewritten. They pinned the
+OLD formula using a criterion stub that returned a CONSTANT, which under
+like-with-like scoring makes the ratio exactly 1 by construction and cannot
+fail. They now use asymmetric efforts, callable stubs, and read the rounded
+design back from `non_trimmed_apportionments` rather than hand-computing it —
+Adams does not round the way you would guess (0.55/0.45 over 10 runs goes to
+5/5, not 6/4).
+
+No capability suite section or committed example was exposed to either
+apportionment defect before this release: every one either specifies `n_spt`
+(taking the already-correct flat branch) or produces `max_n_opt_spt == 1`,
+where the row assignment happens to touch exactly one cell. That is a property
+of the models in the tree, not a safeguard — which is why the guards above are
+new fixtures rather than assertions added to existing sections.
+
+Verified before release: capability suite **301/301** across 60 sections
+(absorbed noise **865 + 1** unchanged), every recorded reference value
+unchanged including §17 `23.7240` via BARON/GAMS, §53 `5.258e-13`, §54
+`1.802e-12`/`3.526e-09`, sequential D-optimal `32.8910` and static
+multi-response `12.01978119`; flat-copy `pytest` **145 passed**; smoke test
+4/4; `compileall -W error` and `ast.parse(feature_version=(3,9))` clean.
 ## [0.6.0] - 2026-08-26
 
 ### Fixed

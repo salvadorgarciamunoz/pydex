@@ -104,7 +104,8 @@ _NO_RATIO = [
 _RATIO = ["d_opt_criterion", "ds_opt_criterion", "a_opt_criterion", "e_opt_criterion"]
 
 
-def _designer(criterion, criterion_value, rounded_value, n_mp=2, interest=None):
+def _designer(criterion, criterion_value, rounded_value, n_mp=2, interest=None,
+              efforts=None):
     """
     A designer positioned exactly where apportion() picks up: a solved
     STATIC design supported on candidates 1 and 4 of 4, with the criterion
@@ -135,14 +136,21 @@ def _designer(criterion, criterion_value, rounded_value, n_mp=2, interest=None):
     d.ti_controls_candidates = np.array([[0.0], [1.0], [2.0], [3.0]])
     d.tv_controls_candidates = np.empty((4, 1))
     d.sampling_times_candidates = np.zeros((4, 1))
-    d.efforts = np.array([[0.5], [0.0], [0.0], [0.5]])
+    d.efforts = (np.array([[0.5], [0.0], [0.0], [0.5]]) if efforts is None
+                 else np.asarray(efforts, dtype=float))
     d._current_criterion = criterion
     d._criterion_value = criterion_value
     if interest is not None:
         d.model_parameter_names = np.array(["a", "b"])
         d.interest_parameters = interest
-    # instance attribute shadows the class method -> criterion is stubbed
-    setattr(d, criterion, lambda efforts: rounded_value)
+    # instance attribute shadows the class method -> criterion is stubbed.
+    # rounded_value may be a CALLABLE, which is what the efficiency tests
+    # below need: apportion() now scores the continuous AND the rounded design
+    # through the same evaluator, so a stub returning a constant makes the
+    # ratio exactly 1 by construction and cannot test the formula at all.
+    setattr(d, criterion,
+            rounded_value if callable(rounded_value)
+            else (lambda efforts: rounded_value))
     return d
 
 
@@ -182,15 +190,86 @@ def test_kiefer_bound_still_reported_without_a_ratio(criterion, capsys):
 
 
 # ======================================================= the four with a ratio
-def test_d_opt_efficiency_matches_documented_formula(capsys):
-    """exp((1/n_mp) * (-rounded - continuous)); n_mp = 2 here."""
-    cv, rv, n_mp = 13.8155, -13.5, 2
-    d = _designer("d_opt_criterion", cv, rv, n_mp=n_mp)
+#
+# These four used to pin the OLD formula, which combined self._criterion_value
+# (the Pyomo OPTIMISER's objective) with criterion(rounded) from the numpy
+# evaluator. That is only a valid ratio if the two subsystems agree up to sign,
+# and nothing asserted it -- for a 1x1 FIM they did not, so a design whose
+# rounded efforts were BIT-IDENTICAL to the continuous ones was reported as
+# 871% efficient (d_opt) and ~0% (a_opt). apportion() now scores BOTH
+# endpoints through the same evaluator.
+#
+# That change makes a constant stub useless: if the criterion returns the same
+# number for every effort vector then the ratio is exactly 1 by construction
+# and the test cannot fail. So each fixture below
+#   (a) uses ASYMMETRIC efforts, so the rounded design genuinely differs from
+#       the continuous one (0.55/0.45 rounds to 6/4 at n_exp=10), and
+#   (b) stubs the criterion with a CALLABLE that actually depends on the
+#       efforts, so the two endpoints score differently.
+# Each test asserts the resulting percentage is NOT 100%, which is exactly the
+# assertion that fails if someone reverts (b) to a constant.
+_ASYM = np.array([[0.55], [0.0], [0.0], [0.45]])
+
+
+def _linear_scorer(weights, offset=0.0):
+    """A stand-in criterion: linear in the efforts, so hand-computable."""
+    w = np.asarray(weights, dtype=float)
+
+    def _score(efforts):
+        e = np.asarray(efforts, dtype=float).ravel()
+        return float(offset - np.dot(w, e))
+
+    return _score
+
+
+def _endpoints(d, scorer):
+    """
+    Score the two designs apportion() compared: the CONTINUOUS efforts and the
+    rounded design, read back from non_trimmed_apportionments rather than
+    hand-computed. Adams does not always round the way you would guess -- 0.55
+    / 0.45 over 10 runs goes to 5/5, not 6/4 -- and a test that guesses wrong
+    fails for the wrong reason.
+
+    non_trimmed_apportionments is now populated regardless of verbosity, which
+    is what makes reading it here possible at all.
+    """
+    rounded_efforts = (d.non_trimmed_apportionments
+                       / np.sum(d.non_trimmed_apportionments))
+    return scorer(d.efforts), scorer(rounded_efforts)
+
+
+def test_d_opt_efficiency_compares_like_with_like(capsys):
+    """exp((continuous - rounded) / n_mp), both from the SAME evaluator."""
+    n_mp = 2
+    scorer = _linear_scorer([4.0, 1.0, 1.0, 2.0])
+    d = _designer("d_opt_criterion", 13.8155, scorer, n_mp=n_mp, efforts=_ASYM)
     d.apportion(n_exp=10)
     out = capsys.readouterr().out
-    expected = np.exp(1 / n_mp * (-rv - cv)) * 100
+
+    cont, rounded = _endpoints(d, scorer)
+    expected = np.exp((cont - rounded) / n_mp) * 100
     assert f"{expected:.2f}%" in out
-    assert expected < 100.0, "fixture sanity: rounded design should be worse"
+    assert abs(expected - 100.0) > 1e-6, (
+        "fixture sanity: the rounded and continuous designs must score "
+        "differently, or this test cannot fail"
+    )
+
+
+def test_d_opt_efficiency_is_exactly_100_when_rounding_changes_nothing(capsys):
+    """
+    THE regression case for the 871% report. When the rounded design equals the
+    continuous one the efficiency is exactly 100% -- and this is the fixture
+    that the old formula got catastrophically wrong, because it read the
+    baseline off _criterion_value instead of the evaluator.
+
+    0.5/0.5 at n_exp=10 apportions to 5/5, i.e. back to 0.5/0.5 exactly.
+    """
+    scorer = _linear_scorer([4.0, 1.0, 1.0, 4.0])
+    d = _designer("d_opt_criterion", 13.8155, scorer, n_mp=2)
+    d.apportion(n_exp=10)
+    out = capsys.readouterr().out
+    assert "100.00%" in out
+    assert np.isclose(d.rounding_efficiency, 1.0)
 
 
 def test_ds_opt_efficiency_uses_n_interest_not_n_mp(capsys):
@@ -199,37 +278,52 @@ def test_ds_opt_efficiency_uses_n_interest_not_n_mp(capsys):
     is 1/n_s (ONE interest parameter here), not 1/n_mp (two). Using n_mp
     would give a visibly different percentage, so this pins the distinction.
     """
-    cv, rv = 13.8155, -13.5
-    d = _designer("ds_opt_criterion", cv, rv, n_mp=2, interest=["a"])
+    scorer = _linear_scorer([4.0, 1.0, 1.0, 2.0])
+    d = _designer("ds_opt_criterion", 13.8155, scorer, n_mp=2, interest=["a"],
+                  efforts=_ASYM)
     d.apportion(n_exp=10)
     out = capsys.readouterr().out
-    expected_ns = np.exp(1 / 1 * (-rv - cv)) * 100      # correct: n_s = 1
-    expected_nmp = np.exp(1 / 2 * (-rv - cv)) * 100     # wrong: n_mp = 2
+
+    cont, rounded = _endpoints(d, scorer)
+    expected_ns = np.exp((cont - rounded) / 1) * 100      # correct: n_s = 1
+    expected_nmp = np.exp((cont - rounded) / 2) * 100     # wrong: n_mp = 2
     assert f"{expected_ns:.2f}%" in out
     assert f"{expected_nmp:.2f}%" not in out
 
 
 def test_a_opt_efficiency_matches_documented_formula(capsys):
-    """-continuous / rounded. Section 04 of the capability suite reports a
-    NEGATIVE A-optimal criterion value, hence cv < 0 here."""
-    cv, rv = -1.0622, 1.30
-    d = _designer("a_opt_criterion", cv, rv)
+    """
+    continuous / rounded, both positive. a_opt is minimised trace(FIM^-1) > 0;
+    the scalar-FIM branch that used to return -FIM (NEGATIVE, the reciprocal
+    magnitude) is gone, so this convention now holds for every n_mp.
+    """
+    scorer = _linear_scorer([0.0, 0.0, 0.0, 0.0], offset=0.0)
+
+    def a_scorer(efforts):
+        e = np.asarray(efforts, dtype=float).ravel()
+        return float(1.0 / (0.5 + np.dot([1.0, 0.0, 0.0, 3.0], e)))
+
+    d = _designer("a_opt_criterion", -1.0622, a_scorer, efforts=_ASYM)
     d.apportion(n_exp=10)
     out = capsys.readouterr().out
-    expected = (-cv / rv) * 100
+
+    cont, rounded = _endpoints(d, a_scorer)
+    expected = (cont / rounded) * 100
     assert f"{expected:.2f}%" in out
-    assert expected < 100.0
+    assert abs(expected - 100.0) > 1e-6, "fixture sanity: must not be 100%"
 
 
 def test_e_opt_efficiency_matches_documented_formula(capsys):
-    """-rounded / continuous. Section 05 reports a POSITIVE E-optimal value."""
-    cv, rv = 1.1130, -1.00
-    d = _designer("e_opt_criterion", cv, rv)
+    """rounded / continuous. e_opt is minimised -min(eig)."""
+    scorer = _linear_scorer([4.0, 1.0, 1.0, 2.0])
+    d = _designer("e_opt_criterion", 1.1130, scorer, efforts=_ASYM)
     d.apportion(n_exp=10)
     out = capsys.readouterr().out
-    expected = (-rv / cv) * 100
+
+    cont, rounded = _endpoints(d, scorer)
+    expected = (rounded / cont) * 100
     assert f"{expected:.2f}%" in out
-    assert expected < 100.0
+    assert abs(expected - 100.0) > 1e-6, "fixture sanity: must not be 100%"
 
 
 @pytest.mark.parametrize("criterion", _RATIO)
