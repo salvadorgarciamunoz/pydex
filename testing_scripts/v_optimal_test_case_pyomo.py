@@ -221,7 +221,7 @@ CD_MAX = 0.05   # maximum allowable decomposition product concentration
 # are taken (i.e. IFT sensitivities are nearly equal at all times).
 #
 # Minimum effort threshold for sampling time sparsity enforcement.
-# When optimize_sampling_times=True, pydex may distribute effort equally
+# When pydex may distribute effort equally
 # across all sampling time candidates if the IFT sensitivities are nearly
 # identical at all times (the system is genuinely indifferent to when
 # samples are taken — this is mathematically correct, not a bug).
@@ -641,7 +641,7 @@ def simulate(ti_controls, sampling_times, model_parameters):
                        [T0 (C), Tjacket (C), catalyst_load]
     sampling_times   : 1-D array of measurement times (hr)
                        Pydex passes the candidate sampling times here.
-                       When optimize_sampling_times=True, pydex optimises
+                       When pydex optimises
                        over these times as additional decision variables.
     model_parameters : 1-D array, length 6
                        [k_ref, Ea, k_ref_imp, Ea_imp, k_ref_dec, Ea_dec]
@@ -776,7 +776,7 @@ tic_candidates = np.array([
 ])   # shape (n_c, 3)
 
 # Sampling time candidates: 20 uniformly spaced points over [0.05, 1.0] hr.
-# When optimize_sampling_times=True, pydex allocates effort over these
+# When pydex allocates effort over these
 # times as additional decision variables alongside the candidate selection.
 spt_grid       = np.linspace(0.05, 1.0, 10)                          # (hr)
 spt_candidates = np.tile(spt_grid, (len(tic_candidates), 1))          # (n_c, 10)
@@ -1477,7 +1477,7 @@ if __name__ == "__main__":
         solver                  = v_solver,
         solver_options          = v_solver_options,
         regularize_fim          = False,
-        optimize_sampling_times = True,   # let pydex choose when to sample
+        # let pydex choose when to sample
         min_effort              = v_min_effort,
     )
     print(f"\nV-optimal  J_V = {designer._criterion_value:.6f}")
@@ -1520,7 +1520,6 @@ if __name__ == "__main__":
         criterion               = designer.a_opt_criterion,
         solver                  = v_solver,
         solver_options          = v_solver_options,
-        optimize_sampling_times = True,
         regularize_fim          = True,   # stabilises FIM^{-1} when FIM is near-singular
         e0                      = v_opt_efforts,  # warm-start from V-optimal solution
         min_effort              = v_min_effort,
@@ -1543,7 +1542,6 @@ if __name__ == "__main__":
         criterion               = designer.d_opt_criterion,
         solver                  = v_solver,
         solver_options          = v_solver_options,
-        optimize_sampling_times = True,
         regularize_fim          = True,
         e0                      = v_opt_efforts,  # warm-start from V-optimal solution
         min_effort              = v_min_effort,

@@ -334,7 +334,7 @@ def simulate(ti_controls, sampling_times, model_parameters):
                        [T0 (C), Tjacket (C), catalyst_load]
     sampling_times   : 1-D array of measurement times (hr)
                        Pydex passes the candidate sampling times here.
-                       When optimize_sampling_times=True, pydex optimises
+                       When pydex optimises
                        over these times as additional decision variables.
     model_parameters : 1-D array, length 6
                        [k_ref, Ea, k_ref_imp, Ea_imp, k_ref_dec, Ea_dec]
@@ -457,7 +457,7 @@ tic_candidates = np.array([
 ])   # shape (n_c, 3)
 
 # Sampling time candidates: 20 uniformly spaced points over [0.05, 1.0] hr.
-# When optimize_sampling_times=True, pydex allocates effort over these
+# When pydex allocates effort over these
 # times as additional decision variables alongside the candidate selection.
 spt_grid       = np.linspace(0.05, 1.0, 20)                          # (hr)
 spt_candidates = np.tile(spt_grid, (len(tic_candidates), 1))          # (n_c, 20)
@@ -1113,7 +1113,7 @@ if __name__ == "__main__":
         solver                  = "ipopt",
         solver_options          = {"linear_solver": LINEAR_SOLVER, "tol": 1e-8, "max_iter": 1000},
         regularize_fim          = False,
-        optimize_sampling_times = True,   # let pydex choose when to sample
+        # let pydex choose when to sample
     )
     print(f"\nV-optimal  J_V = {designer._criterion_value:.6f}")
     designer.print_optimal_candidates(tol=1e-3)
@@ -1131,7 +1131,6 @@ if __name__ == "__main__":
         criterion               = designer.a_opt_criterion,
         solver                  = "ipopt",
         solver_options          = {"linear_solver": LINEAR_SOLVER, "tol": 1e-8, "max_iter": 1000},
-        optimize_sampling_times = True,
     )
     print(f"\nA-optimal  J_A = {designer._criterion_value:.6f}")
     designer.print_optimal_candidates(tol=1e-3)
@@ -1151,7 +1150,6 @@ if __name__ == "__main__":
         criterion               = designer.d_opt_criterion,
         solver                  = "ipopt",
         solver_options          = {"linear_solver": LINEAR_SOLVER, "tol": 1e-8, "max_iter": 1000},
-        optimize_sampling_times = True,
     )
     print(f"\nD-optimal  J_D = {designer._criterion_value:.6f}")
     designer.print_optimal_candidates(tol=1e-3)

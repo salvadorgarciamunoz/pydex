@@ -56,7 +56,6 @@ designer.sens_report_freq = 2
 """ Local D-optimal design """
 designer.design_experiment(
     designer.d_opt_criterion,
-    optimize_sampling_times=True,
     solver="ipopt",
     write=False,
 )

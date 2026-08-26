@@ -7,7 +7,7 @@ the shape get_optimal_candidates() produces, so no design is solved and the
 whole file runs in milliseconds.
 
 Two defects are guarded here. Both were live in the fixed-grid branch
-(optimize_sampling_times=False) and both were found by diffing the report
+(sampling times not restricted by n_spt) and both were found by diffing the report
 against the new table on a real solve, NOT by any assertion:
 
   1. The branch printed ``self.sampling_times_candidates[i]`` where ``i`` is
@@ -19,7 +19,7 @@ against the new table on a real solve, NOT by any assertion:
   2. The branch printed the candidate's entire grid regardless of effort,
      implying every grid time was part of the protocol. It is not: the FIM
      depends on how effort is distributed across sampling times even when
-     optimize_sampling_times is False (verified by construction -- moving a
+     n_spt is not set (verified by construction -- moving a
      candidate's effort onto a zero-effort time changes log-det(FIM)
      drastically), so a time at zero effort is genuinely not in the design.
 

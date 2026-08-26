@@ -178,9 +178,13 @@ for label, interest, criterion in (
         ("D",  None,     "d_opt_criterion"),
         ("Ds", INTEREST, "ds_opt_criterion")):
     d = build_designer(interest)
+        # Sampling times are OPTIMIZED here (no n_spt): effort is spent per
+        # (condition, time) cell, so the optimiser chooses which listed times
+        # to measure and may leave most at zero effort. Pass n_spt=k for
+        # exactly k samples per run, or n_spt=<number of listed times> to FIX
+        # the grid so every one is measured (see case_2.py round 1).
     d.design_experiment(
         getattr(d, criterion),
-        optimize_sampling_times=False,
         solver=SOLVER,
         solver_options=dict(SOLVER_OPTIONS),
         write=False,

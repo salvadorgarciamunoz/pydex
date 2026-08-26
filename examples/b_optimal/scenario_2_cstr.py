@@ -77,7 +77,7 @@ def design_b_opt(d, n_exp, output_weight, verbose=0):
     N = d.n_c
     e0 = np.ones((N, 1)) / N
     d.design_experiment(d.b_opt_criterion, n_exp=n_exp, solver="bonmin",
-                         output_weight=output_weight, e0=e0, verbose=verbose)
+                         output_weight=output_weight, e0=e0)
     return np.where(np.asarray(d.efforts).ravel() > 1e-6)[0]
 
 

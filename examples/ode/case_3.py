@@ -456,7 +456,8 @@ designer.show_plots()
 print()
 print("=" * 100)
 print(" DESIGN 1 / 2 — D-optimal, fixed sampling times ".center(100, "="))
-print(" All 11 evenly-spaced time points used per run ".center(100, " "))
+print(" All 11 evenly-spaced time points measured on every run ".center(100, " "))
+print(" (n_spt = the full grid: one schedule per candidate, effort per EXPERIMENT) ".center(100, " "))
 print("=" * 100)
 print()
 # ══════════════════════════════════════════════════════════════════════════════
@@ -474,7 +475,12 @@ print()
 # optimum that leans on a near-null direction rounds badly.
 designer.design_experiment(
     designer.d_opt_criterion,
-    optimize_sampling_times=False,
+    # n_spt = the number of listed times gives ONE schedule per candidate
+    # containing every time, so effort is allocated per EXPERIMENT and all 11
+    # points really are measured on every run -- which is what the banner
+    # above claims. Until pydex 0.6.0 this example requested optimized
+    # sampling times instead, so the design actually used ONE time per run.
+    n_spt=designer.n_spt,
     solver="ipopt",
     solver_options={"linear_solver": "ma57"},
     write=False,
@@ -490,7 +496,7 @@ print()
 print("=" * 100)
 print(" DESIGN 2 / 2 — D-optimal, optimised sampling times ".center(100, "="))
 print(" 5 measurement times per run chosen optimally from the 11-point grid ".center(100, " "))
-print(" Note: lower criterion than Design 1 is expected — fewer samples per run ".center(100, " "))
+print(" Note: expect a LOWER criterion than Design 1 — 5 samples per run, not 11 ".center(100, " "))
 print("=" * 100)
 print()
 # ══════════════════════════════════════════════════════════════════════════════
@@ -500,7 +506,6 @@ print()
 designer.atomic_fims = None
 designer.design_experiment(
     designer.d_opt_criterion,
-    optimize_sampling_times=True,
     n_spt=5,                        # select 5 optimal measurement times per run
     solver="ipopt",
     solver_options={"linear_solver": "ma57"},

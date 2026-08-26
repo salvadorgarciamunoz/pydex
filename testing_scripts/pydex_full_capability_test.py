@@ -20,7 +20,7 @@ Capabilities exercised (in order)
  03.  Local D-optimal design
  04.  Local A-optimal design
  05.  Local E-optimal design
- 06.  D-optimal with optimize_sampling_times=True
+ 06.  Optimized sampling times vs a fixed sampling grid
  07.  Pseudo-Bayesian D-optimal (average-information, type 0)
  08.  Pseudo-Bayesian D-optimal (average-criterion, type 1)
  09.  CVaR D-optimal design
@@ -504,23 +504,73 @@ def test_05_e_optimal(d):
     ok(f"E-optimal criterion value: {d._criterion_value:.4f}")
 
 
-def test_06_optimize_sampling_times(d):
-    section("06 — D-optimal with optimize_sampling_times=True")
+def test_06_optimized_vs_fixed_sampling_times(d):
+    """OPTIMIZED sampling times vs a FIXED sampling grid.
 
-    d.design_experiment(
-        criterion               = d.d_opt_criterion,
-        solver                  = "ipopt",
-        solver_options          = {"linear_solver": LINEAR_SOLVER,
-                                   "tol": 1e-8, "max_iter": 2000},
-        optimize_sampling_times = True,
-    )
-    d.print_optimal_candidates(tol=1e-3)
-    ok(f"D-optimal (opt spt) criterion value: {d._criterion_value:.4f}")
+    This section used to be "D-optimal with optimize_sampling_times=True" and
+    was a duplicate of section 03 without anyone noticing: the flag never
+    entered the optimisation, so both calls posed the SAME problem and
+    reported the SAME criterion. That coincidence sat in the suite output for
+    a long time as an unexplained curiosity.
 
-    figs = d.plot_optimal_sensitivities()
-    show(figs)
-    figs = d.plot_optimal_predictions()
-    show(figs)
+    n_spt is the real control, and it selects between three cases:
+
+      * omitted (default) -- sampling times are OPTIMIZED. Effort is
+        allocated per (candidate, sampling-time) cell, so the optimiser picks
+        which listed times to measure. Section 03 leaves most of this model's
+        20 grid times at zero effort.
+      * n_spt=k -- exactly k samples per run, optimiser chooses which k.
+      * n_spt = <number of listed times> -- the grid is FIXED. C(n, n) == 1,
+        so one schedule per candidate holding every time, and effort is
+        allocated per EXPERIMENT.
+
+    Cases 1 and 3 are compared here, and asserted to differ. If they ever
+    stopped differing the fixed-grid route would silently be doing nothing.
+    """
+    section("06 — optimized sampling times vs a fixed sampling grid")
+
+    sopts = {"linear_solver": LINEAR_SOLVER, "tol": 1e-8, "max_iter": 2000}
+
+    d.design_experiment(criterion=d.d_opt_criterion, solver="ipopt",
+                        solver_options=sopts)
+    e_free = np.asarray(d.efforts, dtype=float).copy()
+    crit_free = float(d._criterion_value)
+    w_free = e_free.sum(axis=1)
+    ok(f"optimized sampling times: effort shape {e_free.shape}, "
+       f"criterion {crit_free:.4f}")
+
+    n_listed = d.n_spt
+    d.design_experiment(criterion=d.d_opt_criterion, solver="ipopt",
+                        solver_options=sopts, n_spt=n_listed)
+    e_fix = np.asarray(d.efforts, dtype=float).copy()
+    crit_fix = float(d._criterion_value)
+    w_fix = e_fix.sum(axis=1)
+    ok(f"fixed grid (n_spt={n_listed}): effort shape {e_fix.shape}, "
+       f"criterion {crit_fix:.4f}")
+
+    # one effort per EXPERIMENT on a fixed grid
+    assert e_fix.shape == (d.n_c, 1), (
+        f"n_spt = all listed times must give one schedule per candidate, "
+        f"hence efforts of shape (n_c, 1); got {e_fix.shape}")
+    ok("fixed grid allocates one effort per experiment, not per cell")
+
+    # optimized sampling times really does leave listed times unused -- the
+    # fact that made the old "this measures every listed time" claim
+    # false.
+    used = int(np.sum(e_free > 1e-4))
+    assert used < e_free.size, (
+        "every (candidate, time) cell carries effort, so this model cannot "
+        "demonstrate that optimizing sampling times leaves times unused")
+    ok(f"optimized sampling times leaves {e_free.size - used} of "
+       f"{e_free.size} (candidate, time) cells at zero effort")
+
+    # and the two are genuinely different problems
+    assert not np.allclose(w_free, w_fix, atol=1e-5), (
+        "optimized and fixed designs are identical -- they are different "
+        "problems and should not generally coincide")
+    ok(f"optimized and fixed give different designs "
+       f"(max |difference| in candidate weights "
+       f"{np.max(np.abs(w_free - w_fix)):.3e})")
 
 
 def test_07_pseudo_bayesian_type0(d_small):
@@ -787,7 +837,6 @@ def test_13_v_optimal(d):
         solver_options          = {"linear_solver": LINEAR_SOLVER,
                                    "tol": 1e-8, "max_iter": 1000},
         regularize_fim          = False,
-        optimize_sampling_times = True,
     )
     # W matrix should be (n_spt_dw * n_m_r, n_mp) = (1 * 4, 6) = (4, 6)
     # with a single best dw point. A doubled W (8, 6) indicates the
@@ -934,7 +983,6 @@ def test_16_visualisation_suite(d):
         solver                  = "ipopt",
         solver_options          = {"linear_solver": LINEAR_SOLVER,
                                    "tol": 1e-8, "max_iter": 2000},
-        optimize_sampling_times = True,
     )
 
     figs = d.plot_optimal_efforts();          ok("plot_optimal_efforts");          show(figs)
@@ -2175,20 +2223,21 @@ def test_33_ift_sampling_time_optimisation():
     Regression test for the bug where designer._eval_sensitivities_pyomo_ift()
     always passed t_f (endpoint) to pyomo_model_fn regardless of _current_spt,
     causing the IFT Jacobian to be evaluated at the wrong time and making
-    optimize_sampling_times=True produce uniform effort across all times.
+    optimized sampling times (the default) produce uniform effort across all
+    times.
 
     Two independent checks are applied:
 
     Check A — Analytical truth (first-order reaction, k=0.5):
         dA/dt = -k*A  →  A(t) = A0*exp(-k*t)
-        The D-optimal design with optimize_sampling_times=True must select
+        The D-optimal design with optimized sampling times must select
         a sampling time near t* = 1/k = 2.0.  If the bug is present, all
         sampling times receive equal effort (uniform spread) and the selected
         time may be far from 2.0.
 
     Check B — FD vs IFT cross-validation:
         Build two designers for the same model — one using finite differences,
-        one using Pyomo IFT.  Both run with optimize_sampling_times=True.
+        one using Pyomo IFT.  Both run with sampling times optimized.
         The selected optimal sampling time must agree within the candidate
         grid spacing (0.4 hr for a 26-point grid over [0, 10]).
         If the bug is present, IFT selects a different (wrong) time to FD.
@@ -2230,7 +2279,6 @@ def test_33_ift_sampling_time_optimisation():
         solver                = "ipopt",
         solver_options        = {"linear_solver": LINEAR_SOLVER,
                                  "tol": 1e-10, "max_iter": 3000},
-        optimize_sampling_times = True,
     )
 
     efforts_ift  = d_ift.efforts.flatten()
@@ -2275,7 +2323,7 @@ def test_33_ift_sampling_time_optimisation():
 
     # ── Check B: FD vs IFT cross-validation ──────────────────────────────────
     # Both designers use the same candidate grid and sampling time candidates.
-    # With optimize_sampling_times=True, both must select the same optimal spt.
+    # With both must select the same optimal spt.
     spt_grid_b = np.linspace(0.0, 10.0, 26)
 
     # FD designer
@@ -2291,7 +2339,6 @@ def test_33_ift_sampling_time_optimisation():
         solver                = "ipopt",
         solver_options        = {"linear_solver": LINEAR_SOLVER,
                                  "tol": 1e-10, "max_iter": 3000},
-        optimize_sampling_times = True,
     )
 
     # IFT designer — same grid
@@ -2309,7 +2356,6 @@ def test_33_ift_sampling_time_optimisation():
         solver                = "ipopt",
         solver_options        = {"linear_solver": LINEAR_SOLVER,
                                  "tol": 1e-10, "max_iter": 3000},
-        optimize_sampling_times = True,
     )
 
     crit_fd  = d_fd._criterion_value
@@ -2322,12 +2368,12 @@ def test_33_ift_sampling_time_optimisation():
 
     assert rel_err < 0.05, (
         f"IFT and FD D-optimal criteria differ by more than 5% with "
-        f"optimize_sampling_times=True: FD={crit_fd:.6f}, IFT={crit_ift:.6f}, "
+        f"optimized sampling times: FD={crit_fd:.6f}, IFT={crit_ift:.6f}, "
         f"rel_err={rel_err:.4f}. "
         f"This likely indicates IFT is not evaluating sensitivities at the "
         f"correct sampling time (the designer.py _current_spt fix may be missing)."
     )
-    ok(f"IFT and FD criteria agree within 5% with optimize_sampling_times=True "
+    ok(f"IFT and FD criteria agree within 5% with optimized sampling times "
        f"(rel err {rel_err:.4f})")
 
     # Support point check: both should select the same candidate(s)
@@ -2890,9 +2936,12 @@ def test_39_pb_type0_native_solve(d_small):
             calls["n"] = 0
             d = make_designer(small=True)
             d.model_parameters = scenarios
+            # NOTE no package= here: it belongs to the pre-0.2.0 cvxpy API and
+            # was silently discarded by **kwargs. The solver is chosen by
+            # solver=/solver_options=.
             d.design_experiment(d.d_opt_criterion, solver="ipopt",
                                 pseudo_bayesian_type=pb_type,
-                                write=False, package="pyomo")
+                                write=False)
             results[pb_type] = (float(d._criterion_value), calls["n"])
     finally:
         Designer._solve_scipy_slsqp = orig
@@ -3584,32 +3633,47 @@ def test_45_ift_two_factor_path_variants():
     ok(f"parallel (n_jobs=-1) matches sequential for MULTI-response IFT "
        f"(max diff {dmax:.2e})")
 
-    # fixed sampling times
+    # FIXED grid: n_spt = every listed time, so there is one schedule per
+    # candidate and effort is allocated per EXPERIMENT.
+    #
+    # This comparison used to be optimize_sampling_times False vs True, which
+    # posed the SAME problem twice -- so `assert v_opt <= v_fixed` compared a
+    # number with itself and could never fail. It is a real assertion only now
+    # that the two calls differ, which the added inequality below enforces.
     d1 = _make_2f2r_designer(use_ift=True, n_jobs=1)
-    d1.design_experiment(d1.d_opt_criterion, optimize_sampling_times=False,
+    d1.design_experiment(d1.d_opt_criterion, n_spt=d1.n_spt,
                          solver="ipopt", write=False)
     v_fixed = float(d1._criterion_value)
     assert np.isfinite(v_fixed), v_fixed
-    ok(f"D-optimal, fixed sampling times: {v_fixed:.8f}")
+    ok(f"D-optimal, FIXED grid (all {d1.n_spt} times per run): {v_fixed:.8f}")
 
-    # optimised sampling times -- this x IFT x multi-response was empty
+    # OPTIMIZED sampling times (default) -- this x IFT x multi-response
+    # combination was previously untested
     d2 = _make_2f2r_designer(use_ift=True, n_jobs=1)
-    d2.design_experiment(d2.d_opt_criterion, optimize_sampling_times=True,
+    d2.design_experiment(d2.d_opt_criterion,
                          solver="ipopt", write=False)
     v_opt = float(d2._criterion_value)
     assert np.isfinite(v_opt), v_opt
-    # optimising over a subset of the same grid cannot beat using all of it
+    # With sampling times optimized, a unit of effort buys ONE measurement;
+    # on a fixed grid it buys the whole series, whose information is the SUM
+    # over its times. So spreading the same budget across individual cells
+    # cannot beat the fixed grid.
     assert v_opt <= v_fixed + 1e-6, (v_opt, v_fixed)
-    ok(f"D-optimal, optimised sampling times: {v_opt:.8f}  (<= fixed, as expected)")
+    assert abs(v_opt - v_fixed) > 1e-6, (
+        f"optimized and fixed returned the same criterion ({v_opt}); they "
+        f"are different problems, and an equal result makes the inequality "
+        f"above vacuous -- which is exactly how it passed before 0.6.0")
+    ok(f"D-optimal, optimized sampling times: {v_opt:.8f}  "
+       f"(< fixed grid, as expected)")
 
     # explicit n_spt with IFT. case_2.py documents needing atomic_fims = None
     # before changing n_spt, or the cached atomics are indexed with the new
     # layout and raise IndexError -- exercise that path.
     d3 = _make_2f2r_designer(use_ift=True, n_jobs=1)
-    d3.design_experiment(d3.d_opt_criterion, optimize_sampling_times=True,
+    d3.design_experiment(d3.d_opt_criterion,
                          solver="ipopt", write=False)
     d3.atomic_fims = None
-    d3.design_experiment(d3.d_opt_criterion, optimize_sampling_times=True,
+    d3.design_experiment(d3.d_opt_criterion,
                          n_spt=2, solver="ipopt", write=False)
     v_nspt = float(d3._criterion_value)
     assert np.isfinite(v_nspt), v_nspt
@@ -3621,12 +3685,12 @@ def test_45_ift_two_factor_path_variants():
     # (§11/§12). An earlier version of this comment claimed both, which was
     # wrong: no call to set_prior_fim appears below.
     d4 = _make_2f2r_designer(use_ift=True, n_jobs=1)
-    d4.design_experiment(d4.d_opt_criterion, optimize_sampling_times=False,
+    d4.design_experiment(d4.d_opt_criterion,
                          solver="ipopt", write=False)
     base = float(d4._criterion_value)
     d5 = _make_2f2r_designer(use_ift=True, n_jobs=1)
     d5._eps = 1e-3
-    d5.design_experiment(d5.d_opt_criterion, optimize_sampling_times=False,
+    d5.design_experiment(d5.d_opt_criterion,
                          solver="ipopt", write=False, regularize_fim=True)
     v_reg = float(d5._criterion_value)
     assert np.isfinite(v_reg) and v_reg >= base - 1e-6, (v_reg, base)
@@ -3684,7 +3748,6 @@ def test_46_ds_and_structural_gate_on_ift():
     d_ds = _make_2f2r_designer(use_ift=True, n_jobs=1,
                                interest=["theta_0", "theta_1"])
     d_ds.design_experiment(d_ds.ds_opt_criterion,
-                           optimize_sampling_times=False,
                            solver="ipopt", write=False)
     v_ds = float(d_ds._criterion_value)
     assert np.isfinite(v_ds), v_ds
@@ -3728,7 +3791,6 @@ def test_46_ds_and_structural_gate_on_ift():
 
     try:
         d_sing.design_experiment(d_sing.d_opt_criterion,
-                                optimize_sampling_times=False,
                                 solver="ipopt", write=False)
         raise AssertionError("D-optimal proceeded on a structurally singular FIM")
     except ValueError as exc:
@@ -3852,7 +3914,7 @@ def test_47_apportion_with_n_spt():
     # rule that assigns at most one run per support -- for budgets LARGER than
     # the support count, where Adams apportionment is required.
     d = _make_2f2r_designer(use_ift=True, n_jobs=1)
-    d.design_experiment(d.d_opt_criterion, optimize_sampling_times=True,
+    d.design_experiment(d.d_opt_criterion,
                         n_spt=2, solver="ipopt", write=False)
     d.get_optimal_candidates()
     n_sup = sum(len(oc[4]) for oc in d.optimal_candidates)
@@ -3907,7 +3969,7 @@ def test_47_apportion_with_n_spt():
     # which is the case that discriminates proportional rounding from
     # one-run-each
     d2 = _make_2f2r_designer(use_ift=True, n_jobs=1)
-    d2.design_experiment(d2.d_opt_criterion, optimize_sampling_times=True,
+    d2.design_experiment(d2.d_opt_criterion,
                          n_spt=1, solver="ipopt", write=False)
     d2.apportion(12)
     tot2 = int(sum(int(np.nansum(a)) for a in d2.apportionments))
@@ -3964,7 +4026,7 @@ def test_48_simulate_signature_3_tv_controls():
     assert np.linalg.matrix_rank(F) == d.n_mp, np.linalg.eigvalsh(F)
     ok(f"FIM full rank {d.n_mp}/{d.n_mp}, cond={np.linalg.cond(F):.3e}")
 
-    d.design_experiment(d.d_opt_criterion, optimize_sampling_times=False,
+    d.design_experiment(d.d_opt_criterion,
                         solver="ipopt", write=False)
     val = float(d._criterion_value)
     assert np.isfinite(val), val
@@ -4024,7 +4086,7 @@ def test_49_simulate_signature_4_both_controls():
     d._fd_jac = True
     d.eval_fim(np.ones(n_eff) / n_eff)
     assert np.linalg.matrix_rank(np.asarray(d.fim)) == d.n_mp
-    d.design_experiment(d.d_opt_criterion, optimize_sampling_times=False,
+    d.design_experiment(d.d_opt_criterion,
                         solver="ipopt", write=False)
     assert np.isfinite(float(d._criterion_value))
     ok(f"D-optimal with both control types: criterion "
@@ -4035,12 +4097,12 @@ def test_49_simulate_signature_4_both_controls():
 
     # sampling-time optimisation and apportionment with both blocks present
     d.atomic_fims = None
-    d.design_experiment(d.d_opt_criterion, optimize_sampling_times=True,
+    d.design_experiment(d.d_opt_criterion,
                         n_spt=2, solver="ipopt", write=False)
     d.apportion(9)
     tot = int(sum(int(np.nansum(a)) for a in d.apportionments))
     assert tot == 9, tot
-    ok("optimize_sampling_times + n_spt + apportion all work with tvc present")
+    ok("optimized sampling times + n_spt + apportion all work with tvc present")
 
 
 def test_50_simulate_signature_5_no_controls():
@@ -4084,7 +4146,7 @@ def test_50_simulate_signature_5_no_controls():
     ok(f"FIM full rank {d.n_mp}/{d.n_mp} from one candidate "
        f"(cond {np.linalg.cond(F):.3e})")
 
-    d.design_experiment(d.d_opt_criterion, optimize_sampling_times=False,
+    d.design_experiment(d.d_opt_criterion,
                         solver="ipopt", write=False)
     val = float(d._criterion_value)
     assert np.isfinite(val), val
@@ -4248,13 +4310,13 @@ def test_51_vdi_criterion():
 
     # a full design solve, and it must differ from D-optimal
     d_v = build()
-    d_v.design_experiment(d_v.vdi_criterion, optimize_sampling_times=False,
+    d_v.design_experiment(d_v.vdi_criterion,
                           solver="ipopt", write=False)
     v_val = float(d_v._criterion_value)
     eff_v = np.asarray(d_v.efforts).ravel()
     assert np.isfinite(v_val) and abs(eff_v.sum() - 1.0) < 1e-6, (v_val, eff_v.sum())
     d_d = build()
-    d_d.design_experiment(d_d.d_opt_criterion, optimize_sampling_times=False,
+    d_d.design_experiment(d_d.d_opt_criterion,
                           solver="ipopt", write=False)
     eff_d = np.asarray(d_d.efforts).ravel()
     ok(f"design_experiment(vdi_criterion) -> {v_val:.8f}, "
@@ -4346,7 +4408,7 @@ def test_52_criterion_sensitivity_path_matrix():
     d_cv._fd_jac = True
     try:
         d_cv.design_experiment(
-            d_cv.cvar_d_opt_criterion, optimize_sampling_times=False,
+            d_cv.cvar_d_opt_criterion,
             beta=0.7, solver="ipopt", write=False,
         )
         v = float(d_cv._criterion_value)
@@ -4360,7 +4422,6 @@ def test_52_criterion_sensitivity_path_matrix():
     d_mi = _make_2f2r_designer(use_ift=True, n_jobs=1)
     try:
         d_mi.design_experiment(d_mi.d_opt_criterion,
-                               optimize_sampling_times=False,
                                min_effort=0.15, solver="ipopt", write=False)
         eff = np.asarray(d_mi.efforts).ravel()
         nz = eff[eff > 1e-6]
@@ -4784,9 +4845,13 @@ def test_55_b_opt_vs_exhaustive_enumeration():
     fin_fout, objective = _s55_reference(Y)
 
     def design(w):
+        # NOTE no verbose= here: design_experiment has no such parameter and
+        # never did. It used to be accepted and silently discarded by
+        # **kwargs, so this call was never actually quiet. Set d._verbose if
+        # you want to change verbosity.
         d.design_experiment(d.b_opt_criterion, n_exp=_S55_N_EXP,
                             solver="bonmin", output_weight=w,
-                            e0=np.ones((N, 1)) / N, verbose=0)
+                            e0=np.ones((N, 1)) / N)
         eff = np.asarray(d.efforts).ravel()
         return sorted(np.where(eff > 1e-6)[0].tolist()), eff
 
@@ -4890,7 +4955,7 @@ def test_55_b_opt_vs_exhaustive_enumeration():
     try:
         d.design_experiment(d.b_opt_criterion, n_exp=n_resp + 1,
                             solver="bonmin", output_weight=0.5,
-                            e0=np.ones((N, 1)) / N, verbose=0)
+                            e0=np.ones((N, 1)) / N)
         raise AssertionError(
             f"n_exp={n_resp + 1} should have been rejected (bound is "
             f"{max(phi, n_resp + 2)})")
@@ -4901,27 +4966,52 @@ def test_55_b_opt_vs_exhaustive_enumeration():
 
 
 # =============================================================================
-#  56 — fixed_sampling_grid vs an INDEPENDENT reformulation
+#  56 — fixed sampling grid (n_spt = all times) vs an INDEPENDENT reformulation
 # =============================================================================
-#  fixed_sampling_grid=True ties each candidate's sampling-time efforts
-#  together, so one effort is chosen per EXPERIMENT and every listed time is
-#  measured on every run. This section is the only BEHAVIOURAL guard on that
-#  flag (tests/test_fixed_sampling_grid.py covers its argument guards, which
-#  is a different thing).
+#  A FIXED SAMPLING GRID, VERIFIED AGAINST AN INDEPENDENT REFORMULATION.
+#
+#  pydex spends a fixed budget of effort, and the question this section pins
+#  down is what one unit of that budget BUYS.
+#
+#    * By default (and with which changes
+#      nothing about the formulation) the budget is spent per
+#      (candidate, sampling-time) CELL -- sampling times are OPTIMIZED: the
+#      optimiser may put effort on a candidate at t=4h and ZERO at t=0.5h.
+#      Nothing obliges it to use the times you listed -- section 03 leaves 19
+#      of 20 at zero effort.
+#
+#    * With n_spt set to the NUMBER OF LISTED TIMES, there is exactly one
+#      schedule per candidate -- C(n, n) == 1 -- containing every time, so the
+#      budget is spent per EXPERIMENT -- the grid is FIXED: you cannot
+#      buy t=4h without also buying t=0.5h. That is the fixed analytical
+#      schedule case (the autosampler is programmed; you cannot skip a sample
+#      mid-run and spend it elsewhere).
+#
+#  These are DIFFERENT design problems and generally give different answers,
+#  which is asserted below rather than assumed.
 #
 #  The reference is deliberately NOT another pydex path doing the same thing.
 #  It is the same experiment posed as a STATIC MULTI-RESPONSE model, with the
 #  fixed grid folded into the response vector: n_spt=1, no sampling-time axis,
-#  no per-time atomic FIMs. Agreement between them is therefore evidence, not
-#  two code paths sharing a bug -- the same construction as §54 (closed form)
-#  and §55 (exhaustive enumeration).
+#  no per-time atomic FIMs. Agreement is therefore evidence, not two code
+#  paths sharing a bug -- the same construction as section 54 (closed form)
+#  and section 55 (exhaustive enumeration).
+#
+#  This section is also the behavioural guard on the combination atomic FIM.
+#  That was previously built as (mean_t S_t)^T W (mean_t S_t) -- the outer
+#  product of the MEAN sensitivity -- instead of the sum of the per-time
+#  information sum_t S_t^T W S_t. Information from independent measurements
+#  ADDS; averaging first collapses k samples into one pseudo-sample and, in
+#  the limit S_t = -S_t', reports ZERO information from two highly informative
+#  measurements. Measured, the old form deviated by 40% relative and REORDERED
+#  the candidates. With the summed form the two routes below agree exactly.
 #
 #  THE FIXTURE MATTERS. Three parameters but only TWO sampling times per
 #  candidate, so no single candidate can identify the model (rank <= 2 < 3)
 #  and the optimal design MUST spread over several candidates. An earlier
 #  draft used 2 parameters and 4 times; its design collapsed onto ONE
 #  candidate, where "agreement" means only that both paths picked the same
-#  single point -- which would pass even if the constraint did nothing.
+#  single point -- which would pass even if the mathematics were wrong.
 # =============================================================================
 _S56_TIMES = np.array([1.0, 3.0])
 _S56_TIC = np.array([[0.5], [1.0], [2.0], [4.0], [8.0]])
@@ -4943,8 +5033,8 @@ def _s56_sim_static(ti_controls, model_parameters):
     return a * u + b * _S56_TIMES + c * u * _S56_TIMES
 
 
-def test_56_fixed_sampling_grid_vs_static_reformulation():
-    section("56 — fixed_sampling_grid vs static multi-response reformulation")
+def test_56_fixed_grid_vs_static_reformulation():
+    section("56 — fixed sampling grid (n_spt = all) vs static reformulation")
 
     if not _PYOMO_AVAILABLE:
         ok("SKIPPED — Pyomo not available")
@@ -4953,7 +5043,7 @@ def test_56_fixed_sampling_grid_vs_static_reformulation():
         ok("SKIPPED — ipopt not available")
         return
 
-    def dynamic(fixed):
+    def dynamic(fix_grid):
         d = Designer()
         d.simulate = _s56_sim_dynamic
         d.model_parameters = _S56_THETA.copy()
@@ -4961,13 +5051,13 @@ def test_56_fixed_sampling_grid_vs_static_reformulation():
         d.sampling_times_candidates = np.tile(_S56_TIMES, (len(_S56_TIC), 1))
         d.error_cov = np.array([[0.01]])
         d.initialize(verbose=0)
+        kw = {"n_spt": len(_S56_TIMES)} if fix_grid else {}
         d.design_experiment(criterion=d.d_opt_criterion, solver="ipopt",
-                            solver_options=_S56_SOPT,
-                            fixed_sampling_grid=fixed)
+                            solver_options=_S56_SOPT, **kw)
         return d
 
-    d_fix = dynamic(True)
-    d_free = dynamic(False)
+    d_fix = dynamic(True)     # fixed grid: one effort per experiment
+    d_free = dynamic(False)   # optimized: effort per (candidate, time) cell
 
     d_ref = Designer()
     d_ref.simulate = _s56_sim_static
@@ -4981,11 +5071,17 @@ def test_56_fixed_sampling_grid_vs_static_reformulation():
     e_fix = np.asarray(d_fix.efforts, dtype=float)
     e_free = np.asarray(d_free.efforts, dtype=float)
     w_fix = e_fix.sum(axis=1)
+    w_free = e_free.sum(axis=1)
     w_ref = np.asarray(d_ref.efforts, dtype=float).ravel()
-    n_spt, n_mp = d_fix.n_spt, d_fix.n_mp
 
-    # (a) the fixture must actually produce a spread design, or the agreement
-    #     assertion below is vacuous.
+    # (a) one effort variable per EXPERIMENT, not per cell
+    assert e_fix.shape == (len(_S56_TIC), 1), (
+        f"n_spt = all times must give one schedule per candidate, so efforts "
+        f"of shape (n_c, 1); got {e_fix.shape}")
+    ok(f"n_spt={len(_S56_TIMES)} gives one effort per experiment "
+       f"{e_fix.shape}, vs {e_free.shape} for the free-effort default")
+
+    # (b) the fixture must actually produce a spread design, or (d) is vacuous
     support = int(np.sum(w_fix > 1e-6))
     assert support >= 2, (
         f"fixture degenerate: design supported on {support} candidate(s), so "
@@ -4993,39 +5089,32 @@ def test_56_fixed_sampling_grid_vs_static_reformulation():
     ok(f"design spread over {support} of {len(_S56_TIC)} candidates "
        f"(weights {np.round(w_fix[w_fix > 1e-6], 6).tolist()})")
 
-    # (b) effort really is uniform within each candidate
-    spread = float(np.max(np.max(e_fix, axis=1) - np.min(e_fix, axis=1)))
-    assert spread < 1e-8, f"efforts not uniform across sampling times: {spread:.3e}"
-    ok(f"within-candidate effort spread {spread:.3e} (uniform)")
-
-    # (c) CONTROL: the constraint must actually bind. Without this, (b) would
-    #     pass on any problem whose unconstrained optimum happens to be flat.
-    spread_free = float(np.max(np.max(e_free, axis=1) - np.min(e_free, axis=1)))
-    assert spread_free > 1e-4, (
-        f"unconstrained design is already uniform (spread {spread_free:.3e}), "
-        f"so this fixture cannot demonstrate the constraint binding")
-    assert not np.allclose(e_fix, e_free, atol=1e-5), (
-        "constrained and unconstrained designs are identical -- the "
-        "fixed_sampling_grid constraint is not binding")
-    ok(f"control: unconstrained spread {spread_free:.3e}, designs differ")
+    # (c) CONTROL: fixed and optimized must be DIFFERENT problems. Without this
+    #     the agreement in (d) could hold trivially.
+    assert not np.allclose(w_fix, w_free, atol=1e-5), (
+        "fixed-grid and free-effort designs are identical -- this fixture "
+        "cannot demonstrate that they are different problems")
+    ok(f"control: free-effort design differs "
+       f"(weights {np.round(w_free, 6).tolist()})")
 
     # (d) the design agrees with the independent reformulation
     dev = float(np.max(np.abs(w_fix - w_ref)))
     assert dev < 1e-5, (
         f"per-candidate weights disagree with the static reformulation by "
-        f"{dev:.3e}\n  fixed_sampling_grid: {np.round(w_fix, 8)}"
-        f"\n  static reference   : {np.round(w_ref, 8)}")
+        f"{dev:.3e}\n  n_spt=all       : {np.round(w_fix, 8)}"
+        f"\n  static reference: {np.round(w_ref, 8)}")
     ok(f"design agrees with static reformulation to {dev:.3e}")
 
-    # (e) the criterion is offset by exactly n_mp*ln(n_spt) -- a CONSTANT
-    #     rescaling, because e[c,k]=w_c/n_spt makes the FIM 1/n_spt times the
-    #     per-experiment FIM. Pinning this documents that criterion VALUES are
-    #     not comparable across the flag while DESIGNS are.
-    offset = float(d_ref._criterion_value - d_fix._criterion_value)
-    expected = float(n_mp * np.log(n_spt))
-    assert abs(offset - expected) < 1e-5, (
-        f"criterion offset {offset:.9f} != n_mp*ln(n_spt) = {expected:.9f}")
-    ok(f"criterion offset {offset:.9f} == n_mp*ln(n_spt) = {expected:.9f}")
+    # (e) and so does the CRITERION, to solver tolerance. This is the guard on
+    #     the summed combination atomic: with the old averaged form the two
+    #     disagreed outright.
+    cdev = abs(d_fix._criterion_value - d_ref._criterion_value)
+    assert cdev < 1e-6, (
+        f"criterion disagrees with the static reformulation by {cdev:.3e} "
+        f"({d_fix._criterion_value!r} vs {d_ref._criterion_value!r}) -- the "
+        f"combination atomic FIM is not the SUM of its per-time information")
+    ok(f"criterion agrees with static reformulation to {cdev:.3e} "
+       f"({d_fix._criterion_value:.9f})")
 
 
 # =============================================================================
@@ -5230,7 +5319,7 @@ if __name__ == "__main__":
     d_eff = run(test_03_d_optimal, d_full)
     run(test_04_a_optimal, d_full)
     run(test_05_e_optimal, d_full)
-    run(test_06_optimize_sampling_times, d_full)
+    run(test_06_optimized_vs_fixed_sampling_times, d_full)
     run(test_07_pseudo_bayesian_type0, d_small)
     run(test_08_pseudo_bayesian_type1, d_small)
     run(test_09_cvar, d_small)
@@ -5303,7 +5392,7 @@ if __name__ == "__main__":
     run(test_55_b_opt_vs_exhaustive_enumeration)
 
     # ── fixed sampling grid, apportion reporting, static placeholder shape
-    run(test_56_fixed_sampling_grid_vs_static_reformulation)
+    run(test_56_fixed_grid_vs_static_reformulation)
     run(test_57_apportion_non_d_optimal, d_small)
     run(test_58_static_sampling_times_shape_and_state_roundtrip)
 

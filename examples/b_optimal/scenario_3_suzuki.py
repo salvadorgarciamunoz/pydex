@@ -84,7 +84,7 @@ def design_b_opt(d, n_exp, output_weight, time_limit=90):
     N = d.n_c
     e0 = np.ones((N, 1)) / N
     d.design_experiment(d.b_opt_criterion, n_exp=n_exp, solver="bonmin",
-                         output_weight=output_weight, e0=e0, verbose=0,
+                         output_weight=output_weight, e0=e0,
                          solver_options={"bonmin.time_limit": time_limit})
     return np.where(np.asarray(d.efforts).ravel() > 1e-6)[0]
 
@@ -270,7 +270,7 @@ print("=" * 74)
 # D1: forgot n_exp
 try:
     e0 = np.ones((N, 1)) / N
-    d.design_experiment(d.b_opt_criterion, solver="bonmin", e0=e0, verbose=0)
+    d.design_experiment(d.b_opt_criterion, solver="bonmin", e0=e0)
     print("D1 [no n_exp]                 : NO ERROR -- unexpected")
 except ValueError as exc:
     print(f"D1 [no n_exp]                 : ValueError -- {str(exc)[:52]}...")
@@ -285,7 +285,7 @@ d2.error_cov = np.eye(3)
 d2.initialize(verbose=0)
 try:
     e0 = np.ones((N, 1)) / N
-    d2.design_experiment(d2.b_opt_criterion, n_exp=5, solver="bonmin", e0=e0, verbose=0)
+    d2.design_experiment(d2.b_opt_criterion, n_exp=5, solver="bonmin", e0=e0)
     print("D2 [no simulate_candidates()] : NO ERROR -- unexpected")
 except RuntimeError as exc:
     print(f"D2 [no simulate_candidates()] : RuntimeError -- {str(exc)[:48]}...")
@@ -301,7 +301,7 @@ d3.initialize(verbose=0)
 d3.simulate_candidates()
 try:
     e0 = np.ones((N, 1)) / N
-    d3.design_experiment(d3.b_opt_criterion, n_exp=5, solver="bonmin", e0=e0, verbose=0)
+    d3.design_experiment(d3.b_opt_criterion, n_exp=5, solver="bonmin", e0=e0)
     print("D3 [pseudo-Bayesian]          : NO ERROR -- unexpected")
 except ValueError as exc:
     print(f"D3 [pseudo-Bayesian]          : ValueError -- {str(exc)[:52]}...")

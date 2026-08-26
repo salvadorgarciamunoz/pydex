@@ -56,14 +56,26 @@ The design problem is identical to case_2_no_ift.py and case_2.py:
   Sampling     : 11 time points from 0 to 200 min (same for all candidates)
 
 Three design rounds are performed:
-  Round 1 — D-optimal, fixed sampling times (all 11)
-  Round 2 — D-optimal, optimize_sampling_times=True, n_spt=1
-  Round 3 — D-optimal, optimize_sampling_times=True, n_spt=2
+  Round 1 — D-optimal, FIXED sampling grid (all 11 measured)
+  Round 2 — D-optimal, n_spt=1
+  Round 3 — D-optimal, n_spt=2
 
 Expected results
 ----------------
-Measured D-optimal criterion, round 1 (fixed sampling times):
+Measured D-optimal criterion, round 1 (FIXED sampling grid, all 11 times):
 
+    SUPERSEDED IN 0.6.0 -- re-measure before quoting. The values below were
+    recorded when round 1 requested OPTIMIZED sampling times rather than a
+    fixed grid: effort stayed free per (condition, time) cell, so those
+    numbers describe a ONE-SAMPLE-per-run design, not the eleven-sample design
+    the heading claims. Round 1 now passes n_spt = the full grid.
+
+    For reference, case_2.py under the corrected round 1 reports 19.489976,
+    and its round 2 (free per-cell effort) reports 10.657395 -- which is
+    exactly the old round-1 figure below, confirming the two rounds were the
+    same problem.
+
+    old, mislabelled values:
     case_2.py                        (collocation + IFT)   10.657395
     case_2_no_ift.py                 (collocation + FD)    10.724136
     case_2_no_ift_no_collocation.py  (scipy + FD)          10.724134   <- here
@@ -93,13 +105,26 @@ WHAT THIS SCRIPT DOES, AND IN WHAT ORDER
 Three D-optimal design rounds on the same model and the same 25-candidate grid,
 differing only in how much freedom the optimiser has over WHEN to sample.
 
-  ROUND 1 — fixed sampling times   design_experiment(..., optimize_sampling_times=False)
+  ROUND 1 — FIXED sampling grid    design_experiment(..., n_spt=<all times>)
       Every selected experiment is measured at ALL ELEVEN sampling times. The
       optimiser only chooses WHICH conditions (CA0, T) to run and their shares.
+
+      pydex offers exactly three treatments of sampling times, selected by
+      n_spt:
+        * omit n_spt          -- sampling times are OPTIMIZED: effort is spent
+                                 per (condition, time) cell and the optimiser
+                                 picks which listed times to measure.
+        * n_spt=k             -- exactly k samples per run; the optimiser
+                                 chooses WHICH k.
+        * n_spt=<all listed>  -- the grid is FIXED: one schedule per candidate
+                                 holding every listed time, so effort is spent
+                                 per EXPERIMENT and all of them are measured.
+      (This example claimed the fixed-grid behaviour while requesting the
+      optimized one until pydex 0.6.0.)
       -> Figure 1: optimal efforts
       -> apportion(2)
 
-  ROUND 2 — one sample per EXPERIMENT   design_experiment(..., optimize_sampling_times=True, n_spt=1)
+  ROUND 2 — one sample per EXPERIMENT   design_experiment(..., n_spt=1)
       n_spt = 1 constrains each individual experiment to a single sample. It
       does NOT constrain a candidate to a single sampling time: the same
       (CA0, T) condition may be run several times over, each run sampled at a
@@ -126,7 +151,7 @@ differing only in how much freedom the optimiser has over WHEN to sample.
       -> Figure 2: optimal efforts
       -> apportion(12)
 
-  ROUND 3 — two samples per run    design_experiment(..., optimize_sampling_times=True, n_spt=2)
+  ROUND 3 — two samples per run    design_experiment(..., n_spt=2)
       Each experiment collects exactly TWO samples; the optimiser picks the best
       PAIR of times per condition.
       -> Figure 3: optimal efforts
@@ -252,11 +277,11 @@ designer_1.response_names         = ["CA", "CB"]
 designer_1.initialize(verbose=1)
 
 # =============================================================================
-# Round 1 — D-optimal, fixed sampling times (all 11 per candidate)
+# Round 1 — D-optimal, FIXED sampling grid (all 11 measured per run)
 # =============================================================================
 designer_1.design_experiment(
     designer_1.d_opt_criterion,
-    optimize_sampling_times = False,
+    n_spt                   = designer_1.n_spt,
     solver                  = "ipopt",
     solver_options          = {"linear_solver": "ma57"},
     write                   = False,
@@ -266,11 +291,10 @@ designer_1.plot_optimal_efforts()
 designer_1.apportion(2)
 
 # =============================================================================
-# Round 2 — D-optimal, 1 sampling time per experiment (optimize_sampling_times)
+# Round 2 — D-optimal, sampling times optimised (the default: no n_spt)
 # =============================================================================
 designer_1.design_experiment(
     designer_1.d_opt_criterion,
-    optimize_sampling_times = True,
     n_spt                   = 1,
     solver                  = "ipopt",
     solver_options          = {"linear_solver": "ma57"},
@@ -285,7 +309,6 @@ designer_1.apportion(12)
 # =============================================================================
 designer_1.design_experiment(
     designer_1.d_opt_criterion,
-    optimize_sampling_times = True,
     n_spt                   = 2,
     solver                  = "ipopt",
     solver_options          = {"linear_solver": "ma57"},

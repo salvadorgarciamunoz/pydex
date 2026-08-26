@@ -44,7 +44,6 @@ designer_1.design_experiment(
     designer_1.d_opt_criterion,
     solver="ipopt",
     solver_options={"linear_solver": "ma57"},
-    optimize_sampling_times=True,
 )
 
 designer_1.print_optimal_candidates()

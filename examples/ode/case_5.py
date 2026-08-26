@@ -76,7 +76,6 @@ designer.sens_report_freq = 2
 """ Pseudo-Bayesian Type-1 D-optimal design """
 designer.design_experiment(
     designer.d_opt_criterion,
-    optimize_sampling_times=True,
     pseudo_bayesian_type=1,
     save_atomics=True,   # must be passed here -- see docstring above
 )

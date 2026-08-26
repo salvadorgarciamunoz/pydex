@@ -23,21 +23,34 @@ They differ only in how much freedom the optimiser has over WHEN to sample.
 Each round prints a report and then produces three figures, so the run ends
 with nine figures numbered in the order below.
 
-  ROUND 1 — fixed sampling times            design_experiment(..., optimize_sampling_times=False)
+  ROUND 1 — FIXED sampling grid             design_experiment(..., n_spt=<all times>)
       Every selected experiment is measured at ALL ELEVEN sampling times.
       The optimiser only chooses WHICH conditions (CA0, T) to run and how
       much of the budget each one gets.
+
+      pydex offers exactly three treatments of sampling times, selected by
+      n_spt:
+        * omit n_spt          -- sampling times are OPTIMIZED: effort is spent
+                                 per (condition, time) cell and the optimiser
+                                 picks which listed times to measure.
+        * n_spt=k             -- exactly k samples per run; the optimiser
+                                 chooses WHICH k.
+        * n_spt=<all listed>  -- the grid is FIXED: one schedule per candidate
+                                 holding every listed time, so effort is spent
+                                 per EXPERIMENT and all of them are measured.
+      (This example claimed the fixed-grid behaviour while requesting the
+      optimized one until pydex 0.6.0.)
       -> Figures 1-3: optimal efforts, predicted responses, sensitivities
       -> apportion(2): the continuous design rounded to 2 physical runs
 
-  ROUND 2 — sampling times optimised        design_experiment(..., optimize_sampling_times=True)
+  ROUND 2 — sampling times optimised        design_experiment(...)   [the default]
       Now the optimiser also chooses WHEN to sample, one time point per
       experiment. The same experimental condition may appear more than once
       with different sampling times (see "sampling schedules" below).
       -> Figures 4-6
       -> apportion(12)
 
-  ROUND 3 — exactly two samples per run     design_experiment(..., optimize_sampling_times=True, n_spt=2)
+  ROUND 3 — exactly two samples per run     design_experiment(..., n_spt=2)
       As round 2, but each experiment collects exactly TWO samples. The
       optimiser picks the best PAIR of times for each condition.
       -> Figures 7-9
@@ -165,10 +178,13 @@ designer_1.error_cov = np.diag([0.1, 0.1])
 
 designer_1.initialize(verbose=2)
 
-# ── D-optimal design (fixed sampling times) ───────────────────────────────────
+# ── D-optimal design (FIXED sampling grid: every listed time measured) ────────
+# n_spt equal to the NUMBER of listed times gives exactly one sampling
+# schedule per candidate -- C(n, n) == 1 -- containing every time, so effort
+# is allocated per EXPERIMENT rather than per (condition, time) cell.
 designer_1.design_experiment(
     designer_1.d_opt_criterion,
-    optimize_sampling_times=False,
+    n_spt=designer_1.n_spt,
     solver="ipopt",
     solver_options={"linear_solver": "ma57"},
     write=False,
@@ -182,7 +198,6 @@ designer_1.apportion(2)
 # ── D-optimal design (sampling times optimised) ───────────────────────────────
 designer_1.design_experiment(
     designer_1.d_opt_criterion,
-    optimize_sampling_times=True,
     solver="ipopt",
     solver_options={"linear_solver": "ma57"},
     write=False,
@@ -203,7 +218,6 @@ designer_1.apportion(12)
 designer_1.atomic_fims = None
 designer_1.design_experiment(
     designer_1.d_opt_criterion,
-    optimize_sampling_times=True,
     n_spt=2,
     solver="ipopt",
     solver_options={"linear_solver": "ma57"},

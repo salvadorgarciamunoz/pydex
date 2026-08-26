@@ -430,8 +430,9 @@ class Designer:
             designer.dw_bounds_tvc       = []
 
             dw_tic, dw_tvc = designer.find_optimal_operating_point(
-                init_guess = np.array([[60.0, 70.0, 1.0]]),
-                optimizer  = "mumps",
+                init_guess     = np.array([[60.0, 70.0, 1.0]]),
+                solver         = "ipopt",
+                solver_options = {"linear_solver": "mumps"},
             )
 
     *Stage 2 — V-optimal MBDoE (design experiments):*
@@ -444,9 +445,8 @@ class Designer:
             designer.dw_spt = np.array([t_final])
 
             designer.design_v_optimal(
-                package               = "ipopt",
-                optimizer             = "mumps",
-                optimize_sampling_times = True,
+                solver         = "ipopt",
+                solver_options = {"linear_solver": "mumps"},
             )
 
 
@@ -700,9 +700,54 @@ class Designer:
     ``sampling_times`` — measurement time points
         The times within a dynamic experiment at which measurements are
         taken.  Set as ``designer.sampling_times_candidates``, shape (n_c, n_spt).
-        When ``optimize_sampling_times=True`` is passed to design_experiment,
-        pydex optimises the effort allocation over both candidates and
-        sampling times simultaneously.
+
+    Sampling times: the three cases
+    -------------------------------
+    pydex spends a fixed budget of experimental effort, and everything here
+    follows from what one unit of that budget BUYS. There are exactly three
+    ways to say what you want, and ``n_spt`` selects between them.
+
+    ===============================  =====================  ================
+    What you want                    How to ask for it      Effort allocated
+                                                            per
+    ===============================  =====================  ================
+    Optimize sampling: choose the    omit ``n_spt``         measurement --
+    conditions AND which times to    (the default)          (candidate, time)
+    measure                                                 cell
+    Collect exactly k samples per    ``n_spt=k``            run of k samples
+    run; you choose which k
+    Measure every time I listed,     ``n_spt=n_listed``     run of the whole
+    on every run                                            series
+    ===============================  =====================  ================
+
+    where ``n_listed`` is the number of sampling times you supplied, i.e.
+    ``designer.n_spt``.
+
+    **1. Optimize sampling times (the default).** Effort is allocated per
+    *(candidate, sampling-time)* cell, so the optimiser chooses both which
+    conditions to run and which of the listed times to spend measurements on.
+    It may put effort on a condition at t=4 h and none at t=0.5 h, and in
+    practice it drives most listed times to zero effort. The times you supply
+    are candidates to choose from, not a schedule.
+
+    **2. A fixed number of samples per run** (``n_spt=k``). Each run collects
+    exactly k measurements and the optimiser chooses WHICH k of the listed
+    times, so one condition may appear under several sampling SCHEDULES --
+    the same experiment repeated with different measurement times. Effort is
+    allocated per (candidate, schedule).
+
+    **3. A fixed sampling grid** (``n_spt`` = the number of listed times).
+    Since ``C(n, n) == 1`` there is exactly one schedule per candidate, and it
+    contains every listed time, so effort is allocated per EXPERIMENT. One run
+    buys the whole time series: you cannot take t=4 h without also taking
+    t=0.5 h. This is the fixed analytical schedule case, where the instrument
+    is programmed and a sample cannot be skipped mid-run and spent elsewhere.
+
+    Cases 1 and 3 are genuinely different design problems and generally give
+    different answers, because when sampling times are optimized an
+    uninformative time costs nothing -- it simply gets zero effort -- whereas
+    on a fixed grid you pay for it regardless. Case 2 lies between them, and
+    case 3 is its limit at k = n.
 
     Infeasibility conventions
     -------------------------
@@ -1059,10 +1104,6 @@ class Designer:
         self._sensitivity_is_normalized = None
         self._opt_sampling_times = False
         self._var_n_sampling_time = None
-        # One effort per EXPERIMENT rather than per (candidate, sampling-time)
-        # cell: every listed sampling time is measured on every run. Default
-        # False preserves the historical behaviour exactly.
-        self._fixed_sampling_grid = False
         # numerical options
         self._regularize_fim = None
         self._num_steps = 5
@@ -1251,14 +1292,17 @@ class Designer:
         measured. Rows may be padded with ``numpy.nan`` when candidates have
         different numbers of usable times.
 
-        Per-sampling-time effort is a free decision variable by default, so
-        the optimiser allocates effort across these times and routinely drives
-        most of them to zero. ``optimize_sampling_times`` does NOT change that
-        (it affects reporting only). To require that every listed time is
-        measured on every run, pass ``fixed_sampling_grid=True`` to
-        :meth:`design_experiment`. ``n_spt=k`` instead has the optimiser choose
-        WHICH k of the listed times to use, and the same candidate may then
-        appear under several sampling schedules.
+        These are CANDIDATE times, and by default the optimiser chooses which
+        of them to spend measurements on -- effort is allocated per
+        (candidate, sampling-time) cell, and most listed times typically end
+        at zero effort. ``n_spt`` changes that:
+
+        * omitted -- sampling times are optimized (the default above);
+        * ``n_spt=k`` -- exactly k samples per run, optimiser picks which k,
+          so a candidate may appear under several schedules;
+        * ``n_spt`` = the NUMBER of listed times -- the grid is FIXED and
+          every listed time is measured on every run.
+
 
         Assigning marks the candidate set changed.
         """
@@ -2117,7 +2161,7 @@ class Designer:
         return app_tic_candidates, app_tvc_candidates, app_spt_candidates
 
     def solve_cvar_problem(self, criterion, beta, n_spt=None, n_exp=None,
-                           optimize_sampling_times=False, solver="ipopt",
+                           solver="ipopt",
                            solver_options=None, e0=None, write=False,
                            save_sensitivities=False, trim_fim=False,
                            pseudo_bayesian_type=None, regularize_fim=False,
@@ -2169,7 +2213,6 @@ class Designer:
             return dict(
                 n_spt=n_spt,
                 n_exp=n_exp,
-                optimize_sampling_times=optimize_sampling_times,
                 solver=solver,
                 solver_options=solver_options,
                 e0=e0,
@@ -2684,36 +2727,6 @@ class Designer:
                 m.e[i].fix(float(fixed[i]))
 
         m.sum_con = pyo.Constraint(expr=sum(m.e[i] for i in m.E) == 1.0)
-
-        # --- fixed_sampling_grid: one effort per EXPERIMENT, not per
-        # (candidate, sampling-time) cell.
-        #
-        # The effort vector is flattened row-major over (n_c, n_spt), so
-        # candidate c owns indices [c*n_spt, (c+1)*n_spt). Tying those cells
-        # together makes a candidate's whole listed grid a single indivisible
-        # experiment: you cannot buy time t1 of candidate c without buying t2.
-        # n_spt-1 equalities per candidate, all LINEAR, so the program stays
-        # the same class it already was.
-        #
-        # Effect on the FIM: e[c,k] = w_c/n_spt gives
-        # FIM = (1/n_spt) * sum_c w_c * (sum_k A[c,k]), i.e. exactly 1/n_spt
-        # times the per-experiment FIM. Verified numerically to 2.8e-14 and
-        # bit-identical to a static multi-response reformulation of the same
-        # experiment. Since n_spt is a constant here (ragged grids are
-        # refused in design_experiment), this is a CONSTANT rescaling: the
-        # argmax is unaffected and log-det criteria shift by exactly
-        # n_mp*ln(n_spt) -- the same structure as error_cov scaling. The
-        # criterion VALUE is therefore not comparable across values of this
-        # flag; the design is.
-        if getattr(self, "_fixed_sampling_grid", False):
-            _n_spt = self.n_spt
-            if _n_spt > 1:
-                def _tie(m, c, k):
-                    base = c * _n_spt
-                    return m.e[base + k] == m.e[base]
-                m.C_fsg = pyo.RangeSet(0, self.n_c - 1)
-                m.K_fsg = pyo.RangeSet(1, _n_spt - 1)
-                m.fixed_grid_con = pyo.Constraint(m.C_fsg, m.K_fsg, rule=_tie)
 
         for i in m.E:
             m.e[i].set_value(float(e0_flat[i]))
@@ -3363,23 +3376,6 @@ class Designer:
 
         constraints = [{"type": "eq", "fun": lambda e: np.sum(e) - 1.0}]
 
-        # fixed_sampling_grid: tie each candidate's sampling-time cells
-        # together, so one effort is chosen per EXPERIMENT. Must be applied
-        # here as well as in _solve_pyomo -- this path serves every
-        # non-native criterion (pseudo-Bayesian type 1, vdi, the six
-        # prediction-variance criteria, CVaR), and omitting it would let the
-        # flag be silently ignored for exactly those. See _solve_pyomo for
-        # the derivation and the constant-rescaling note.
-        if getattr(self, "_fixed_sampling_grid", False) and self.n_spt > 1:
-            _n_spt, _n_c = self.n_spt, self.n_c
-
-            def _fsg_residuals(e, _n_spt=_n_spt, _n_c=_n_c):
-                E = np.asarray(e, dtype=float).reshape(_n_c, _n_spt)
-                # each candidate's cells minus that candidate's first cell
-                return (E[:, 1:] - E[:, [0]]).ravel()
-
-            constraints.append({"type": "eq", "fun": _fsg_residuals})
-
         opts = {"ftol": 1e-9, "maxiter": 5000, "disp": self._verbose >= 2}
         if solver_options:
             opts.update({k: v for k, v in solver_options.items()
@@ -3847,7 +3843,7 @@ class Designer:
         )
 
     def solve_cvar_problem_alt(self, criterion, beta, n_spt=None, n_exp=None,
-                           optimize_sampling_times=False, solver="ipopt",
+                           solver="ipopt",
                            solver_options=None, e0=None, write=True,
                            save_sensitivities=False, trim_fim=False,
                            pseudo_bayesian_type=None, regularize_fim=False,
@@ -3897,7 +3893,6 @@ class Designer:
             return dict(
                 n_spt=n_spt,
                 n_exp=n_exp,
-                optimize_sampling_times=optimize_sampling_times,
                 solver=solver,
                 solver_options=solver_options,
                 e0=e0,
@@ -4030,14 +4025,38 @@ class Designer:
             "CVaR problems are now solved via _solve_pyomo_cvar."
         )
 
+    def _sampling_time_mode_str(self):
+        """One line describing how sampling times are being treated.
+
+        DERIVED, never user-supplied. This replaces the old
+        "Sampling Times Optimized: True/False" line, which came from
+        optimize_sampling_times and was misleading in both directions: it
+        reported False while sampling-time effort was in fact being optimised,
+        and after that flag was removed it reported True even for a FIXED grid
+        (n_spt = every listed time), which is the one case where sampling times
+        are NOT being chosen. The three cases are distinguishable from
+        _specified_n_spt, _n_spt_spec and n_spt, so the report states which one
+        applies instead of printing a boolean the reader has to decode.
+        """
+        if not self._dynamic_system:
+            return "n/a (static model, no sampling-time axis)"
+        if not getattr(self, "_specified_n_spt", False):
+            return (f"optimized -- effort allocated per (candidate, sampling "
+                    f"time) over {self.n_spt} listed time(s)")
+        k = self._n_spt_spec
+        if k == self.n_spt:
+            return (f"FIXED -- all {self.n_spt} listed time(s) measured on "
+                    f"every run; effort allocated per experiment")
+        return (f"{k} of {self.n_spt} listed time(s) per run, chosen by the "
+                f"optimiser; effort allocated per (candidate, schedule)")
+
     def design_experiment(self, criterion, n_spt=None, n_exp=None,
-                          optimize_sampling_times=False, solver="ipopt",
+                          solver="ipopt",
                           solver_options=None, e0=None, write=False,
                           save_sensitivities=False, trim_fim=False,
                           pseudo_bayesian_type=None, regularize_fim=False, beta=0.90,
                           min_expected_value=None, fix_effort=None, save_atomics=False,
                           min_effort=None, allow_singular_fim=False, output_weight=0.5,
-                          fixed_sampling_grid=False,
                           **kwargs):
         """Solve for the optimal continuous experimental design.
 
@@ -4059,36 +4078,27 @@ class Designer:
             criterion (callable): A bound criterion method such as
                 ``designer.d_opt_criterion``, or any callable taking the effort
                 vector and returning a scalar to MINIMISE.
-            n_spt (int, optional): Restrict each experiment to exactly this many
-                samples. Requires ``optimize_sampling_times=True``. Clear
+            n_spt (int, optional): See the fuller description below. Clear
                 :attr:`atomic_fims` first if changing it between runs.
             n_exp (int, optional): Solve for a discrete design of this many
                 experiments instead of a continuous one.
-            optimize_sampling_times (bool): Controls how the design is
-                REPORTED and extracted, not how it is formulated. Note per
-                sampling-time effort is a free decision variable EITHER WAY:
-                the flag appears nowhere in the optimisation, and passing
-                False vs True yields bit-identical efforts. The formulation
-                is changed by ``n_spt`` (which selects WHICH times to sample,
-                and force-overrides this flag to True) or by
-                ``fixed_sampling_grid`` (which ties a candidate's times
-                together). Do not read False as "every listed time is
-                measured" -- the optimiser routinely drives most grid times
-                to zero effort regardless.
-            fixed_sampling_grid (bool): Allocate one effort per EXPERIMENT
-                instead of per (candidate, sampling-time) cell, so every
-                listed sampling time is measured on every run and the only
-                decision is WHICH experimental conditions to run. For a fixed
-                analytical schedule you do not control. Implemented as
-                ``n_spt - 1`` linear equalities per candidate; the resulting
-                FIM is ``1/n_spt`` times the per-experiment FIM, a CONSTANT
-                rescaling, so the design is unaffected but log-det criteria
-                shift by exactly ``n_mp * ln(n_spt)``. Criterion values are
-                therefore NOT comparable across this flag; designs are.
-                Requires a dynamic model, a common grid for every candidate
-                (ragged/NaN-padded grids raise), and is mutually exclusive
-                with ``n_spt``. Default False, which reproduces all previous
-                behaviour exactly.
+            n_spt (int, optional): Number of samples collected per run. This
+                is the ONLY control over how sampling times are treated, and
+                it selects between three cases:
+
+                * **omitted (default) -- optimize sampling times.** Effort is
+                  allocated per (candidate, sampling-time) cell, so the
+                  optimiser chooses the conditions AND which listed times to
+                  measure. Most listed times typically end at zero effort.
+                * **``n_spt=k`` -- exactly k samples per run, optimiser
+                  chooses which k.** Effort is allocated per (candidate,
+                  schedule); one condition may appear under several schedules.
+                * **``n_spt = <number of listed times>`` -- fixed grid.**
+                  ``C(n, n) == 1``, so there is one schedule per candidate
+                  containing every listed time and effort is allocated per
+                  EXPERIMENT. Every time you listed is measured on every run.
+                  This is the fixed-analytical-schedule case and the only way
+                  to express it.
             solver (str): NLP solver for the native Pyomo path — any
                 AMPL-compatible solver. Ignored on the SLSQP path.
             solver_options (dict, optional): Passed to the solver. On the SLSQP
@@ -4136,6 +4146,55 @@ class Designer:
             for that case and checks its own Schur complement instead.
         """
         # storing user choices
+        """ argument validation """
+        # design_experiment forwards **kwargs to the solver interface, which
+        # means an unrecognised keyword is SILENTLY IGNORED unless it is
+        # checked here. That has real teeth: a typo (optimise_sampling_times,
+        # n_spts) or a withdrawn argument produces a different design with no
+        # error at all. Validate against what is actually consumed downstream.
+        _FORWARDED = {"n_exp", "output_weight"}
+        _WITHDRAWN = {
+            "fixed_sampling_grid": (
+                "fixed_sampling_grid was withdrawn after 0.5.0. To hold the "
+                "sampling grid fixed -- every listed time measured on every "
+                "run, only the experimental CONDITIONS chosen -- pass "
+                "n_spt=<number of listed sampling times>, e.g. "
+                "design_experiment(..., n_spt=designer.n_spt). That is the "
+                "same problem through the one n_spt mechanism."
+            ),
+            "optimize_sampling_times": (
+                "optimize_sampling_times was removed after 0.5.0. It never "
+                "affected the optimisation -- True and False gave "
+                "bit-identical designs -- and only selected how results were "
+                "reported, which is now derived from the model. Sampling "
+                "times are OPTIMIZED BY DEFAULT, so there is nothing to "
+                "enable. Use n_spt instead: omit it to optimize sampling "
+                "times; n_spt=k for exactly k samples per run with the "
+                "optimiser choosing which k; n_spt=<number of listed sampling "
+                "times> to FIX the grid so every listed time is measured on "
+                "every run."
+            ),
+            "package": (
+                "package= belongs to the pre-0.2.0 cvxpy API. This fork "
+                "solves with Pyomo; pass solver=/solver_options= instead."
+            ),
+            "optimizer": (
+                "optimizer= belongs to the pre-0.2.0 cvxpy API. This fork "
+                "solves with Pyomo; pass solver=/solver_options= instead."
+            ),
+        }
+        for _k in kwargs:
+            if _k in _WITHDRAWN:
+                raise SyntaxError(_WITHDRAWN[_k])
+            if _k not in _FORWARDED:
+                raise SyntaxError(
+                    f"design_experiment() got an unrecognised keyword "
+                    f"'{_k}'. Recognised extras forwarded to the solver "
+                    f"interface are {sorted(_FORWARDED)}. Unknown keywords "
+                    f"used to be swallowed silently, which turned a typo into "
+                    f"a silently different design."
+                )
+
         self._regularize_fim = regularize_fim
         # Clear the latched det/pseudo-det decision for dg/di/vdi so each design
         # run re-decides from scratch (the choice must be fixed WITHIN a run, but
@@ -4145,52 +4204,15 @@ class Designer:
         self._solver         = solver
         self._fd_jac         = True          # always True; gradient strategy is internal
         self._unconstrained_form = False     # no longer a user concern
-        self._opt_sampling_times = optimize_sampling_times
+        # Derived, not user-supplied: a dynamic system reports per sampling
+        # time, a static one has no time axis to report over. n_spt overrides
+        # this to True further down. See _warn_deprecated_ost.
+        self._opt_sampling_times = bool(self._dynamic_system)
         self._save_sensitivities = save_sensitivities
         self._current_criterion  = criterion.__name__
         self._trim_fim           = trim_fim
         self._save_atomics       = save_atomics
         self._min_effort         = min_effort  # sparsity threshold (MINLP when set)
-        self._fixed_sampling_grid = bool(fixed_sampling_grid)
-
-        """ fixed_sampling_grid: validate before anything is built """
-        if self._fixed_sampling_grid:
-            if not self._dynamic_system:
-                raise SyntaxError(
-                    "fixed_sampling_grid=True is meaningless for a static "
-                    "model: there is no sampling-time axis to hold fixed, and "
-                    "effort is already allocated per experiment."
-                )
-            if n_spt is not None:
-                raise SyntaxError(
-                    "fixed_sampling_grid=True and n_spt are mutually "
-                    "exclusive. n_spt asks the optimiser to CHOOSE which "
-                    "n_spt of the listed times to sample (selection over "
-                    "sampling-time combinations); fixed_sampling_grid says "
-                    "every listed time is measured on every run. Pick one."
-                )
-            if self._var_n_sampling_time:
-                # Deliberate refusal, not an oversight. With a ragged
-                # (NaN-padded) grid the uniform-effort constraint below
-                # rescales candidate c's information by 1/n_spt_c, which
-                # differs BETWEEN candidates -- so it is no longer a constant
-                # offset and it silently reweights candidates against each
-                # other, changing which design is optimal. Getting that right
-                # needs a modelling decision (is one run of a 4-point
-                # candidate worth the same as one run of a 1-point
-                # candidate?), not just a code change. Note that ragged grids
-                # do not currently survive eval_sensitivities at all -- see
-                # the variable-length sampling-time Open Item -- so this
-                # guard refuses a case that is unreachable today anyway.
-                raise NotImplementedError(
-                    "fixed_sampling_grid=True is not supported for candidates "
-                    "with DIFFERENT numbers of sampling times "
-                    "(sampling_times_candidates is NaN-padded, so "
-                    "_var_n_sampling_time is True). The uniform-effort "
-                    "constraint would rescale each candidate by 1/n_spt_c and "
-                    "change the resulting design. Use a common grid for every "
-                    "candidate."
-                )
 
         """ checking if CVaR problem """
         if "cvar" in self._current_criterion:
@@ -4216,12 +4238,9 @@ class Designer:
                 raise SyntaxError(
                     f"n_spt specified for a non-dynamic system."
                 )
-            if not self._opt_sampling_times:
-                print(
-                    f"[Warning]: n_spt specified, but "
-                    f"optimize_sampling_times = False. "
-                    f"Overriding, and setting optimize_sampling_times = True."
-                )
+            # No override warning: _opt_sampling_times is derived, and is
+            # already True for every dynamic system (n_spt raises above for a
+            # static one).
             self._opt_sampling_times = True
             self._n_spt_spec = n_spt
             if not isinstance(n_spt, int):
@@ -4305,7 +4324,7 @@ class Designer:
             print(f"{'Number of Candidates':<40}: {self.n_c}")
             if self._dynamic_system:
                 print(f"{'Number of Sampling Time Choices':<40}: {self.n_spt}")
-                print(f"{'Sampling Times Optimized':<40}: {self._opt_sampling_times}")
+                print(f"{'Sampling Times':<40}: {self._sampling_time_mode_str()}")
             if self._pseudo_bayesian:
                 print(f"{'Number of Scenarios':<40}: {self.n_scr}")
             print(f"{'Solver':<40}: {self._solver}")
@@ -4404,7 +4423,6 @@ class Designer:
             "pseudo_bayesian": self._pseudo_bayesian,
             "pseudo_bayesian_type": self._pseudo_bayesian_type,
             "optimize_sampling_times": self._opt_sampling_times,
-            "fixed_sampling_grid": self._fixed_sampling_grid,
             "regularized": self._regularize_fim,
             "n_spt_spec": self._n_spt_spec,
             "prior_fim": self._prior_fim,
@@ -4722,8 +4740,7 @@ class Designer:
                 print(f"{'Dynamic':<40}: {self._dynamic_system}")
                 print(f"{'Number of Candidates':<40}: {self.n_c}")
                 print(f"{'Number of Optimal Candidates':<40}: {self.n_opt_c}")
-                print(f"{'Sampling Times Optimized':<40}: {self._opt_sampling_times}")
-                print(f"{'Number of Samples Per Experiment':<40}: {self._n_spt_spec}")
+                print(f"{'Sampling Times':<40}: {self._sampling_time_mode_str()}")
                 for i, (app_eff, opt_cand) in enumerate(zip(self.apportionments, self.optimal_candidates)):
                     print(f"{f'[Candidate {opt_cand[0] + 1:d}]':-^100}")
                     print(f"{f'Recommended Apportionment: Run {np.nansum(app_eff):.0f}/{n_exp:d} Experiments':^100}")
@@ -4796,9 +4813,7 @@ class Designer:
             print(f"{'Number of Optimal Candidates':<40}: {self.n_opt_c}")
             if self._dynamic_system:
                 print(f"{'Number of Sampling Time Choices':<40}: {self.n_spt}")
-                print(f"{'Sampling Times Optimized':<40}: {self._opt_sampling_times}")
-                if self._opt_sampling_times:
-                    print(f"{'Number of Samples Per Experiment':<40}: {self._n_spt_spec}")
+                print(f"{'Sampling Times':<40}: {self._sampling_time_mode_str()}")
             if self._pseudo_bayesian:
                 print(f"{'Number of Scenarios':<40}: {self.n_scr}")
 
@@ -4841,8 +4856,8 @@ class Designer:
                         # times. Report which times those are: the ones
                         # carrying effort in the design. A grid time at zero
                         # effort is not part of the design (the FIM depends on
-                        # the per-time effort split even when
-                        # optimize_sampling_times is False).
+                        # the per-time effort split, so a time carrying no
+                        # effort contributes nothing).
                         print("Sampling Times:")
                         spt_arr = np.asarray(opt_cand[3])
                         eff_arr = np.asarray(opt_cand[4], dtype=float).ravel()
@@ -5896,9 +5911,7 @@ class Designer:
         print(f"{'Number of Optimal Candidates':<40}: {self.n_opt_c}")
         if self._dynamic_system:
             print(f"{'Number of Sampling Time Choices':<40}: {self.n_spt}")
-            print(f"{'Sampling Times Optimized':<40}: {self._opt_sampling_times}")
-            if self._opt_sampling_times:
-                print(f"{'Number of Samples Per Experiment':<40}: {self._n_spt_spec}")
+            print(f"{'Sampling Times':<40}: {self._sampling_time_mode_str()}")
         if self._pseudo_bayesian:
             print(f"{'Number of Scenarios':<40}: {self.n_scr}")
         print(f"{'Information Matrix Regularized':<40}: {self._regularize_fim}")
@@ -5946,9 +5959,8 @@ class Designer:
                     #
                     # Report only the times that actually carry effort. The FIM
                     # depends on how effort is distributed across sampling
-                    # times even when optimize_sampling_times is False, so a
-                    # time at zero effort is genuinely not part of the design;
-                    # printing the whole grid implied otherwise.
+                    # times, so a time at zero effort is genuinely not part of
+                    # the design; printing the whole grid implied otherwise.
                     print("Sampling Times:")
                     spt_arr = np.asarray(opt_cand[3])
                     eff_arr = np.asarray(opt_cand[4])
@@ -6316,10 +6328,6 @@ class Designer:
         self._pseudo_bayesian = oed_result["pseudo_bayesian"]
         self._pseudo_bayesian_type = oed_result["pseudo_bayesian_type"]
         self._opt_sampling_times = oed_result["optimize_sampling_times"]
-        # .get(), not [...]: results written before fixed_sampling_grid existed
-        # have no such key, and False is exactly the behaviour they were
-        # produced under.
-        self._fixed_sampling_grid = oed_result.get("fixed_sampling_grid", False)
         self._regularize_fim = oed_result["regularized"]
         self._n_spt_spec = oed_result["n_spt_spec"]
         self._prior_fim    = oed_result.get("prior_fim",    None)
@@ -8958,10 +8966,51 @@ class Designer:
             self.atomic_fims = []
             self.fim = 0
             if self._specified_n_spt:
+                # A combination is ONE experiment that collects a sample at
+                # each of its n_spt times. Information from independent
+                # measurements ADDS, so the combination's atomic FIM is the
+                # SUM over its times of  S_t^T W S_t.
+                #
+                # This previously did  s = np.mean(sen[spt], axis=0)  and then
+                # formed the FIM from that averaged sensitivity, i.e.
+                # (mean_t S_t)^T W (mean_t S_t) -- the outer product of the
+                # MEAN rather than the sum (or even the mean) of the outer
+                # products. Those are not equal: they differ by the covariance
+                # of S over the combination, which is precisely the information
+                # contributed by the times being DIFFERENT. Averaging first
+                # collapses k samples into one pseudo-sample at the average
+                # sensitivity; in the limit S_t = -S_t' it reports ZERO
+                # information from two highly informative measurements.
+                #
+                # Measured on a 4-candidate/4-time model: the old expression
+                # deviated from the correct one by 40% relative and REORDERED
+                # the candidates (it preferred candidate 2 where the summed
+                # form prefers candidate 3), so this changed designs, not just
+                # criterion values.
+                #
+                # Consequence worth knowing: with the summed form,
+                # n_spt = <all grid times> agrees EXACTLY (design to 3.6e-17,
+                # criterion to all digits) with a static multi-response
+                # reformulation of the same experiment -- the fixed grid
+                # folded into the response vector, which reaches the FIM
+                # through entirely different machinery. Before this fix they
+                # disagreed. That equivalence is what makes n_spt = <all
+                # times> the canonical way to hold the sampling grid fixed.
                 for c, (eff, sen, spt_combs) in enumerate(zip(self.efforts, self.sensitivities, self.spt_candidates_combs)):
                     for comb, (e, spt) in enumerate(zip(eff, spt_combs)):
-                        s = np.mean(sen[spt], axis=0)
-                        add_candidates(s, e, self.error_fim)
+                        _s_comb = sen[spt]
+                        if np.any(np.isnan(_s_comb)):
+                            _atom_fim = np.zeros((self.n_mp, self.n_mp))
+                        else:
+                            _atom_fim = sum(
+                                _s.T @ self.error_fim @ _s for _s in _s_comb
+                            )
+                        self.fim += e * _atom_fim
+                        if not self._large_memory_requirement:
+                            if self.atomic_fims is None:
+                                self.atomic_fims = []
+                            if self._compute_atomics:
+                                self.atomic_fims.append(_atom_fim)
             else:
                 for c, (eff, sen) in enumerate(zip(self.efforts, self.sensitivities)):
                     for spt, (e, s) in enumerate(zip(eff, sen)):
@@ -8989,11 +9038,22 @@ class Designer:
                 (self.n_c, self.n_spt, self.n_mp, self.n_mp)
             )
             if self._specified_n_spt:
-                for c, (eff, atom, spt_combs) in enumerate(
-                    zip(self.efforts, atomic_fims_4d, self.spt_candidates_combs)
+                # NOTE this branch is currently UNREACHABLE for the
+                # _specified_n_spt case, verified by instrumenting
+                # _compute_atomics across repeated design_experiment() calls:
+                # the atomics stored here number n_c * n_spt_comb, while the
+                # reshape above expects n_c * n_spt, so the staleness guard
+                # forces a recompute and the fresh branch runs every time.
+                # It is corrected anyway so that reviving it cannot silently
+                # reintroduce the averaging defect fixed above.
+                #
+                # The atomics stored by the fresh branch are already the SUMMED
+                # per-combination FIMs, so they are used directly -- no mean,
+                # no further summation over spt.
+                for c, (eff, atom) in enumerate(
+                    zip(self.efforts, atomic_fims_4d)
                 ):
-                    for comb, (e, spt) in enumerate(zip(eff, spt_combs)):
-                        a = np.mean(atom[spt], axis=0)
+                    for comb, (e, a) in enumerate(zip(eff, atom)):
                         self.fim += e * a
             else:
                 for c, (eff, atom) in enumerate(zip(self.efforts, atomic_fims_4d)):
@@ -10851,7 +10911,7 @@ class Designer:
         # measurement times into the collocation grid.  The IFT Jacobian is then
         # evaluated at collocation points that coincide with (or are very close to)
         # the actual sampling times, enabling correct sensitivity discrimination
-        # across different sampling times when optimize_sampling_times=True.
+        # across different sampling times.
         #
         # For static/signature-1 systems, _current_spt holds the ti_controls
         # value (not a sampling time), so we guard with _is_dynamic to avoid

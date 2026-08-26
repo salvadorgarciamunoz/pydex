@@ -409,10 +409,9 @@ designer.find_optimal_operating_point(
 # Stage 2
 designer.dw_spt = np.array([t_final])
 designer.design_experiment(
-    criterion               = designer.v_opt_criterion,
-    solver                  = "ipopt",
-    solver_options          = {"linear_solver": "ma57"},
-    optimize_sampling_times = True,
+    criterion      = designer.v_opt_criterion,
+    solver         = "ipopt",
+    solver_options = {"linear_solver": "ma57"},
 )
 ```
 

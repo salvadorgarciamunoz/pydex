@@ -5,6 +5,166 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-26
+
+### Fixed
+
+- **The combination atomic FIM averaged sensitivities instead of summing
+  information.** For a design with `n_spt=k`, a sampling-time combination's
+  contribution was built as `(mean_t S_t)ᵀ W (mean_t S_t)` — the outer product
+  of the MEAN sensitivity. Information from independent measurements ADDS, so
+  a combination collecting k samples contributes `Σ_t S_tᵀ W S_t`: square,
+  then add. Averaging first collapses k samples into one pseudo-sample at the
+  average sensitivity and discards exactly the information that comes from the
+  times being *different*; in the limit `S_t = −S_t'` it reports ZERO
+  information from two highly informative measurements.
+
+  **This changed designs, not just criterion values.** Measured on a
+  4-candidate/4-time model, the averaged form deviated from the summed form by
+  40% relative and REORDERED the candidates — it preferred candidate 2 where
+  the correct form prefers candidate 3.
+
+  A second, separate expression in the cached-atomics branch used
+  `mean(Sᵀ W S)`, a third quantity (exactly `sum/k`, so design-preserving).
+  That branch was verified UNREACHABLE by instrumentation — the atomics stored
+  for `_specified_n_spt` number `n_c × n_spt_comb` while its reshape expects
+  `n_c × n_spt`, so the staleness guard always forces a recompute — but it has
+  been corrected too, so reviving it cannot silently reintroduce the defect.
+
+  Every design using `n_spt=k` is affected. Superseded reference values are
+  listed at the end of this entry.
+
+### Removed
+
+- **`optimize_sampling_times` removed.** It never entered the optimisation: it
+  appears nowhere in `_solve_pyomo` or `_solve_scipy_slsqp`, and `True` vs
+  `False` gave bit-identical efforts (`max |difference| = 0.0`, criterion
+  identical to every digit). It selected only how results were REPORTED, while
+  reading as though it controlled whether sampling times were optimised —
+  which they always are, per (candidate, sampling-time) cell, unless `n_spt`
+  says otherwise.
+
+  That name caused real damage: five examples documented behaviour they never
+  had, capability suite sections 03 and 06 were byte-identical duplicates that
+  reported the same criterion indefinitely without anyone being able to
+  explain it, and section 45's `assert v_opt <= v_fixed` compared a number
+  with itself.
+
+  Reporting granularity is a property of the problem rather than a user
+  preference, so it is now derived from the model. Passing the argument raises
+  with a message naming the replacement.
+
+- **`fixed_sampling_grid`, added in 0.5.0, withdrawn.** With the atomic FIM
+  corrected, `n_spt = <number of listed sampling times>` expresses exactly the
+  same design problem through the single existing mechanism: `C(n, n) == 1`,
+  so one schedule per candidate containing every time, hence one effort per
+  experiment. Verified identical — design agreement `2.2e-16` and criterion
+  agreement `3.6e-15` against a static multi-response reformulation, which
+  reaches the FIM through entirely different machinery. Two ways to pose one
+  problem, resting on two different pieces of arithmetic, is worse than one,
+  so its constraint machinery was deleted from both solver paths rather than
+  kept as a wrapper. Its `1/n_spt` criterion rescaling goes with it.
+
+- **Unknown keywords to `design_experiment()` now raise.** `**kwargs` used to
+  swallow anything unrecognised, so a typo (`optimise_sampling_times`,
+  `n_spts`) or a withdrawn argument silently produced a different design with
+  no error. `optimize_sampling_times`, `fixed_sampling_grid`, `package` and
+  `optimizer` (the last two from the pre-0.2.0 cvxpy API, never parameters of
+  this fork) each raise with a message naming the replacement.
+
+  **This immediately found nine live instances of the bug it was written to
+  prevent**, all in this repository and all silently discarded until now:
+  `verbose=0` passed to `design_experiment()` eight times (capability suite
+  section 55 twice, and all three `examples/b_optimal/` scenarios) — the
+  method has no `verbose` parameter and never has, so none of those calls was
+  ever quiet — and `package="pyomo"` once in section 39. All nine call sites
+  were corrected rather than the check being relaxed. It also caught a
+  `README.md` snippet and a `Designer` docstring example that passed
+  non-existent arguments and would have raised if copy-pasted.
+
+### Changed
+
+- **`n_spt` is now the only control over sampling times, and documents three
+  cases** — in the `Designer` class docstring, `design_experiment`'s parameter
+  documentation, the `sampling_times_candidates` property, capability suite
+  sections 06 and 56, and every affected example:
+
+  | What you want | How to ask | Effort allocated per |
+  |---|---|---|
+  | Optimize sampling: choose conditions AND which times | omit `n_spt` (default) | measurement — (candidate, time) cell |
+  | Exactly k samples per run; optimiser chooses which k | `n_spt=k` | run of k samples |
+  | Measure every listed time, on every run | `n_spt=<number listed>` | run of the whole series |
+
+  The first and third are genuinely different design problems and generally
+  give different answers, because when sampling times are optimized an
+  uninformative time costs nothing — it simply gets zero effort — whereas on a
+  fixed grid you pay for it regardless. On the suite's own model, optimizing
+  leaves **3,195 of 3,200** (candidate, time) cells at zero effort.
+
+- **The design report no longer prints a boolean the reader has to decode.**
+  `Sampling Times Optimized: True/False` is replaced at all four print sites
+  by a derived line stating which of the three cases applies, e.g.
+  `Sampling Times: FIXED -- all 11 listed time(s) measured on every run;
+  effort allocated per experiment`. The old line was misleading in both
+  directions: it reported `False` while sampling-time effort was in fact being
+  optimised, and once the flag was removed it reported `True` even for a fixed
+  grid — the one case where sampling times are *not* being chosen. The now
+  redundant `Number of Samples Per Experiment` line was folded in.
+
+- **Five examples claimed a fixed sampling grid while requesting the
+  optimized case.** `case_2.py`, `case_2_no_ift.py` and
+  `case_2_no_ift_no_collocation.py` documented round 1 as "Every selected
+  experiment is measured at ALL ELEVEN sampling times"; `case_3.py` and
+  `case_3_ift.py` printed "All 11 evenly-spaced time points used per run".
+  Their fixed-grid designs now pass `n_spt` equal to the full grid, which is
+  what those sentences describe. `case_2_ds.py` makes no such claim and is
+  unchanged.
+
+### Testing
+
+- Capability suite: **301 assertions across 60 sections** (was 297 / 60).
+  Absorbed Pyomo noise unchanged at **865 + 1** — the fingerprint has held
+  across four releases, because the noise originates in `pyomo.dae`
+  collocation which none of the new sections builds.
+- **Section 06 repurposed.** It was a byte-identical duplicate of section 03.
+  It now contrasts optimized sampling times with a fixed grid, asserting they
+  give different designs, that the fixed grid allocates one effort per
+  experiment, and that optimizing genuinely leaves listed times unused.
+  Section 03's criterion is unchanged at `23.2105`.
+- **Section 45's comparison de-vacuumed.** `assert v_opt <= v_fixed` compared
+  identical calls; the two sides now differ (`8.81110749` optimized vs
+  `11.23398687` fixed) and an added assertion requires them to differ, so it
+  cannot silently become vacuous again.
+- **Section 56 rewritten** to assert the fixed-grid route and the static
+  multi-response reformulation agree on BOTH design and criterion, and that
+  the optimized default is a different answer. Tightened from `1e-5` with an
+  `n_mp·ln(n_spt)` offset to `2.2e-16` / `3.6e-15` with no offset.
+- `tests/test_fixed_sampling_grid.py` removed with the feature (129 → 123
+  solver-free tests).
+- Drift references unchanged: section 17 `23.7240` (BARON/GAMS), section 53
+  `5.258e-13`, section 54 `1.802e-12` / `3.526e-09`, section 03 `23.2105`.
+
+### Superseded reference values
+
+Recomputed after the atomic fix and the example corrections:
+
+| what | was | now |
+|---|---|---|
+| `case_2.py` round 1 (fixed grid, all 11) | `10.657395` (mislabelled) | `19.489976` |
+| `case_2.py` round 2 (optimized) | — | `10.657395` |
+| `case_2.py` round 3 (`n_spt=2`) | `10.610118` | `13.429393` |
+| `case_3.py` design 1 (fixed grid, all 11) | `69.59152865937244` | `75.68585637815247` |
+| `case_3.py` design 2 (`n_spt=5`) | `55.96287449735705` | `74.93783375850808` |
+| `case_3_ift.py` design 1 (fixed grid, all 11) | — | `33.532162683726085` |
+| `case_3_ift.py` design 2 (`n_spt=5`) | — | `32.32621199537052` |
+
+Note `case_2.py`'s old round-1 figure is exactly its new round-2 figure,
+confirming those two rounds had been posing the same problem. `case_3_ift.py`
+design 2 is bit-identical before and after, as expected — it already used
+`n_spt=5` and the corrected atomic, so only design 1 could move.
+`case_2_no_ift*.py`'s recorded round-1 values are marked superseded in their
+docstrings and need re-measuring.
+
 ## [0.5.0] - 2026-08-25
 
 ### Added
