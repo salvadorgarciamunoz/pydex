@@ -5,6 +5,82 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-08-27
+
+### Fixed
+
+- **`set_prior_experiments()` raised if called in the documented order.**
+  `self.feval_sensitivity` — a counter of model evaluations made during
+  sensitivity analysis — was initialised to `None` in `__init__` and only set
+  to `0` inside `eval_sensitivities()`' per-candidate loop.
+  `set_prior_experiments()` computes its own sensitivities through a path that
+  reaches `_sensitivity_sim_wrapper`'s unconditional
+  `self.feval_sensitivity += 1` without ever entering that loop, so
+
+  ```
+  designer.initialize()
+  designer.set_prior_experiments(...)
+  ```
+
+  failed with `TypeError: unsupported operand type(s) for +=: 'NoneType' and
+  'int'`, re-raised as `RuntimeError: Sensitivity computation failed for prior
+  experiment 1/1.` — a message naming neither the cause nor anything the user
+  had done wrong. Sequential MBDoE was unusable on a fresh `Designer` unless a
+  design or an explicit `eval_sensitivities()` call happened to come first.
+
+  Fixed by initialising the counter to `0` where it is declared, which is what
+  an accumulator should be from construction. The counter is written but never
+  read anywhere in the package, so nothing else is affected: the only
+  behavioural difference is in the case that previously raised, and no code
+  path that previously succeeded can now produce a different number.
+
+  **Capability suite section 12 exercises `set_prior_experiments()` and passed
+  throughout**, because it receives a designer fixture that earlier sections
+  have already run `design_experiment()` on — leaving the counter an int. The
+  defect is invisible to any ordering that designs first, so a green suite
+  meant "not exercised" rather than "correct". Found while testing something
+  else (Open Item 3), not by review.
+
+### Added
+
+- `tests/test_set_prior_experiments_ordering.py`, 4 solver-free tests: that
+  the counter is an int from construction, that `set_prior_experiments()`
+  works directly after `initialize()`, that the resulting prior FIM matches a
+  closed-form reference, and that the two orderings agree bit for bit. All
+  four fail against 0.7.1.
+
+  **This also closes Open Item 3 on the substance for one of its two sites.**
+  That item recorded that `set_prior_experiments()` and `_eval_W_matrix()` are
+  untested at their DEFAULT finite-difference step, because the capability
+  suite passes explicit `base_step` overrides in every section that reaches
+  them — masking the default entirely. The new test passes no override, on a
+  model whose small parameter (`k = 0.02`) is exactly the magnitude the
+  pre-0.3.0 flat `base_step=2` perturbed by ~2.0, and at long sampling times
+  where finite-difference error grows. Measured agreement with the closed form
+  is **1.96e-12**, so the 0.3.0 per-parameter step fix genuinely did land at
+  that site. `_eval_W_matrix()` remains untested at its default.
+
+  `tests/` 149 → **153**.
+
+### Notes
+
+A false positive worth not repeating: pydex normalises sensitivities by
+parameter magnitude (`_norm_sens_by_params` is True by default), i.e. it works
+with `d y / d ln(theta) = theta * d y / d theta`. A closed-form reference must
+therefore be scaled the same way, `diag(theta) @ FIM @ diag(theta)`. Compared
+against the UNSCALED form the deviation is 125% and looks exactly like a
+broken FD step. The test docstring records this.
+
+Also noted while verifying: the `Sequential D-optimal (Case B prior + updated
+θ)` value the suite prints is only ever printed, never asserted, so drift
+there would not fail the run. It is protected by reading the log, not by the
+suite.
+
+Verified before release: flat-copy `pytest` **153 passed**; the four new tests
+all fail against 0.7.1; capability suite sections 01, 11 and 12 pass;
+`compileall -W error` and `ast.parse(feature_version=(3,9))` clean; smoke test
+4/4.
+
 ## [0.7.1] - 2026-08-27
 
 ### Changed

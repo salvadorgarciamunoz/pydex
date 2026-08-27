@@ -1073,7 +1073,20 @@ class Designer:
 
         """ performance-related """
         self.feval_simulation = None
-        self.feval_sensitivity = None
+        # Accumulator for model evaluations made during sensitivity analysis.
+        # MUST be an int from construction, not None: `_sensitivity_sim_wrapper`
+        # does `self.feval_sensitivity += 1` unconditionally, while the only
+        # place that used to set it to 0 was inside eval_sensitivities()'
+        # per-candidate loop. set_prior_experiments() reaches the wrapper
+        # WITHOUT going through that loop, so calling it in the documented order
+        # -- initialize() then set_prior_experiments() -- raised
+        # `TypeError: unsupported operand type(s) for +=: 'NoneType' and 'int'`,
+        # surfaced as "Sensitivity computation failed for prior experiment 1/1".
+        # Capability suite section 12 passes only because it receives a designer
+        # that earlier sections have already run design_experiment() on, which
+        # leaves the counter an int; the defect is invisible to any ordering
+        # that does a design first.
+        self.feval_sensitivity = 0
         self._fim_eval_time = None
         # temporary for current design
         self._sensitivity_analysis_time = 0

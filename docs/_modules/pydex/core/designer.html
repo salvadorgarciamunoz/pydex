@@ -5,14 +5,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>pydex.core.designer &mdash; pydex 0.7.1 documentation</title>
+  <title>pydex.core.designer &mdash; pydex 0.7.2 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
 
   
       <script src="../../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="../../../_static/documentation_options.js?v=5a057da9"></script>
+      <script src="../../../_static/documentation_options.js?v=6dfdf7c3"></script>
       <script src="../../../_static/doctools.js?v=9bcbadda"></script>
       <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../../../_static/js/theme.js"></script>
@@ -1150,7 +1150,20 @@
 
 <span class="w">        </span><span class="sd">&quot;&quot;&quot; performance-related &quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">feval_simulation</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">feval_sensitivity</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="c1"># Accumulator for model evaluations made during sensitivity analysis.</span>
+        <span class="c1"># MUST be an int from construction, not None: `_sensitivity_sim_wrapper`</span>
+        <span class="c1"># does `self.feval_sensitivity += 1` unconditionally, while the only</span>
+        <span class="c1"># place that used to set it to 0 was inside eval_sensitivities()&#39;</span>
+        <span class="c1"># per-candidate loop. set_prior_experiments() reaches the wrapper</span>
+        <span class="c1"># WITHOUT going through that loop, so calling it in the documented order</span>
+        <span class="c1"># -- initialize() then set_prior_experiments() -- raised</span>
+        <span class="c1"># `TypeError: unsupported operand type(s) for +=: &#39;NoneType&#39; and &#39;int&#39;`,</span>
+        <span class="c1"># surfaced as &quot;Sensitivity computation failed for prior experiment 1/1&quot;.</span>
+        <span class="c1"># Capability suite section 12 passes only because it receives a designer</span>
+        <span class="c1"># that earlier sections have already run design_experiment() on, which</span>
+        <span class="c1"># leaves the counter an int; the defect is invisible to any ordering</span>
+        <span class="c1"># that does a design first.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">feval_sensitivity</span> <span class="o">=</span> <span class="mi">0</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_fim_eval_time</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="c1"># temporary for current design</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_sensitivity_analysis_time</span> <span class="o">=</span> <span class="mi">0</span>
