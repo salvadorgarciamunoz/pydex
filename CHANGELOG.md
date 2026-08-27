@@ -5,6 +5,88 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-08-27
+
+### Changed
+
+- **Ragged (variable-length or NaN-padded) CANDIDATE sampling grids are now
+  refused at `initialize()`** with a `NotImplementedError` that names the real
+  per-candidate sampling-time counts and states the supported alternative.
+  Previously they raised an opaque numpy broadcasting error from deep inside
+  `np.pad`, which named numpy internals rather than the cause and gave no
+  indication that the feature was unimplemented rather than that the user had
+  made a mistake.
+
+  This is a guard, not a fix: ragged candidate grids reach a FIM through no
+  path, and never did. Two independent defects sit behind them, and the first
+  masks the second:
+
+  1. `_store_current_response` pads with a 2-tuple `pad_width` for an array
+     that is 3-D by that point — the `n_r == 1` branch adds an axis — so
+     `np.pad` raises from `_as_pairs`. This fires FIRST, during the simulate
+     calls, and takes out `simulate_candidates()` as well. The padding logic
+     looks correct on reading and has never executed.
+  2. `eval_sensitivities` preallocates
+     `np.empty((n_c, n_spt, n_m_r, n_mp))` at the full PADDED width, while
+     each of its three assignment sites (serial FD, serial IFT, parallel IFT)
+     does `self.sensitivities[i, :] = temp_sens` with that candidate's REAL
+     length, because `_current_spt` is NaN-stripped before the model is
+     called. `_pad_sensitivities()` exists to reconcile this but runs after
+     the loop, too late. The preallocation is shared across all three
+     branches, so this is **not** specific to finite differences.
+
+  **Use a union grid instead.** Give every candidate the same grid containing
+  the union of the times of interest and leave the sampling times optimised
+  (the default: omit `n_spt`). An uninformative time then costs nothing — it
+  simply receives zero effort — which is what a per-candidate grid was
+  expressing, derived against the FIM rather than committed to in advance.
+  Measured on the capability suite's own model, optimising leaves 3,195 of
+  3,200 (candidate, time) cells at zero effort.
+
+  Known limitation of that workaround: a union grid cannot express a time that
+  is UNMEASURABLE rather than merely uninformative — a batch that has already
+  ended, say — because `simulate()` will return an extrapolated value and the
+  optimiser may allocate effort to a sample that cannot be taken. The fix for
+  that is a per-candidate bound on measurable time, not a ragged grid.
+
+- **`set_prior_experiments()` is unaffected and continues to accept ragged,
+  NaN-padded schedules.** It strips NaN per experiment and accumulates the
+  prior FIM one sampling time at a time, through a path that never touches the
+  candidate-grid machinery. Experiments already run have whatever schedules
+  they had, so raggedness there is not a design choice — hence the guard is
+  scoped to the candidate grid only. Sequential MBDoE is not restricted.
+
+### Added
+
+- Four tests in `tests/test_criterion_scale_and_apportion_shape.py`: that a
+  ragged candidate grid is refused with the per-candidate counts and the
+  alternative in the message, that the message does not leave a reader
+  believing prior experiments are affected, and — parametrised over
+  single- and multi-response models — that uniform grids still initialise.
+  The single-response case is parametrised deliberately: the `n_r == 1` branch
+  is what triggers the underlying response defect, so it is the case most
+  likely to be caught by an over-broad guard.
+
+  `tests/` 145 → **149**.
+
+### Notes
+
+`_var_n_sampling_time` is now only ever `False`, which leaves
+`_pad_sampling_times()`, the `_pad_sensitivities()` call site and the response
+pad unreachable. All three are kept and marked as such rather than deleted:
+they are the partial implementation whoever lifts this restriction will start
+from, and the reconciliation logic is the hard part. The response-pad comment
+also records that the pad is itself defective, so it cannot be revived on the
+assumption that it works.
+
+Verified before release: capability suite **301/301** across 60 sections
+(absorbed noise **865 + 1** unchanged), every recorded reference value
+unchanged including §17 `23.7240` via BARON/GAMS, §53 `5.258e-13`, §54
+`1.802e-12`/`3.526e-09`, sequential D-optimal `32.8910`, static
+multi-response `12.01978119` and §55's three b_opt designs; the guard fired on
+no legitimate section. Flat-copy `pytest` **149 passed**; smoke test 4/4;
+`compileall -W error` and `ast.parse(feature_version=(3,9))` clean.
+
 ## [0.7.0] - 2026-08-26
 
 ### Fixed

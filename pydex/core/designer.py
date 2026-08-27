@@ -7778,6 +7778,8 @@ class Designer:
             print("".center(100, "-"))
         self._sensitivity_analysis_time += finish - start
 
+        # Unreachable while ragged candidate grids are refused (Open Item 20);
+        # _var_n_sampling_time is only ever set False. Kept deliberately.
         if self._var_n_sampling_time:
             self._pad_sensitivities()
 
@@ -11703,6 +11705,10 @@ class Designer:
             fig.savefig(fname=fp, dpi=dpi)
         return fig
 
+    # UNREACHABLE while _check_var_spt refuses ragged candidate grids (Open
+    # Item 20). Kept, not deleted: it is the partial implementation whoever
+    # lifts that restriction will start from, and the reconciliation logic is
+    # the hard part. Do not treat it as live code.
     def _pad_sampling_times(self):
         """ check the required number of sampling times """
         max_num_sampling_times = 1
@@ -11755,6 +11761,11 @@ class Designer:
         if self.n_r == 1:
             self._current_res = self._current_res[:, np.newaxis]
 
+        # Unreachable while ragged candidate grids are refused (Open Item 20).
+        # NOTE this pad is itself defective: pad_width is a 2-tuple but
+        # _current_res is 3-D by here, so it raises from _as_pairs. That is the
+        # defect that fires FIRST on a ragged grid, ahead of the sensitivity
+        # preallocation, and it is why simulate_candidates() fails too.
         if self._var_n_sampling_time:
             self._current_res = np.pad(
                 self._current_res,
@@ -11944,8 +11955,71 @@ class Designer:
                 and np.all(~np.isnan(self.sampling_times_candidates)):
             self._var_n_sampling_time = False
         else:
-            self._var_n_sampling_time = True
-            self._pad_sampling_times()
+            # RAGGED CANDIDATE GRIDS ARE NOT SUPPORTED. Refused here, at the
+            # earliest possible point, because nothing downstream of one works
+            # and the errors it produces name numpy internals rather than the
+            # cause. Two independent defects sit behind it, and the first masks
+            # the second:
+            #
+            #   1. `_store_current_response` pads with a 2-tuple `pad_width`
+            #      for an array that is 3-D by then (the n_r == 1 branch adds
+            #      an axis), so `np.pad` raises "operands could not be
+            #      broadcast together with remapped shapes (2,2) and requested
+            #      shape (3,2)" from `_as_pairs`. This fires FIRST, during the
+            #      simulate calls, and takes out `simulate_candidates()` too --
+            #      so the response path does NOT work either, despite having
+            #      padding logic that looks correct on reading.
+            #   2. `eval_sensitivities` preallocates
+            #      `np.empty((n_c, n_spt, n_m_r, n_mp))` at the full PADDED
+            #      width, then each of its three assignment sites (serial FD,
+            #      serial IFT, parallel IFT) does
+            #      `self.sensitivities[i, :] = temp_sens` where temp_sens has
+            #      that candidate's REAL length, because `_current_spt` is
+            #      NaN-stripped before the model is called.
+            #      `_pad_sensitivities()` exists to reconcile this but runs
+            #      AFTER the loop, too late. Shared preallocation means this is
+            #      NOT specific to finite differences.
+            #
+            # WHAT TO DO INSTEAD: list the UNION of the times you care about as
+            # a grid common to every candidate and let the optimiser choose.
+            # With sampling times optimised an uninformative time costs
+            # nothing -- it simply receives zero effort -- which is the same
+            # result a per-candidate grid would express, derived against the
+            # FIM rather than committed to up front. Measured on the capability
+            # suite's own model, optimising leaves 3,195 of 3,200
+            # (candidate, time) cells at zero effort.
+            #
+            # The union grid cannot express a time that is UNMEASURABLE rather
+            # than merely uninformative (a batch that has already ended, say).
+            # That is a real gap, but the fix for it is a per-candidate bound
+            # on measurable time, not a ragged grid.
+            #
+            # PRIOR EXPERIMENTS ARE UNAFFECTED. `set_prior_experiments()`
+            # accepts NaN-padded ragged schedules and handles them correctly
+            # through an entirely separate path: it strips NaN per experiment
+            # and accumulates the prior FIM one sampling time at a time. Past
+            # experiments genuinely have whatever schedules they had, so that
+            # is a case where raggedness is not a design choice -- hence the
+            # guard is scoped to the CANDIDATE grid only.
+            _lens = [int(np.sum(~np.isnan(np.asarray(spt, dtype=float))))
+                     for spt in self.sampling_times_candidates]
+            raise NotImplementedError(
+                "sampling_times_candidates has a ragged (variable-length or "
+                f"NaN-padded) grid: real sampling times per candidate are "
+                f"{_lens}. Ragged CANDIDATE grids are not supported -- neither "
+                "the response path nor either sensitivity path handles them, "
+                "and the numpy errors they raise do not name the cause.\n\n"
+                "Instead, give every candidate the same grid, containing the "
+                "UNION of the times of interest, and let the sampling times be "
+                "optimised (the default: omit n_spt). An uninformative time "
+                "then costs nothing, because it receives zero effort -- which "
+                "is what a per-candidate grid was expressing, chosen against "
+                "the FIM rather than fixed in advance.\n\n"
+                "This restriction applies only to the candidate grid. "
+                "set_prior_experiments() accepts ragged, NaN-padded schedules "
+                "for experiments you have already run, and handles them "
+                "correctly."
+            )
 
     def _get_component_sizes(self):
 

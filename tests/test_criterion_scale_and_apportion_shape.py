@@ -338,3 +338,79 @@ def test_apportion_returns_counts_on_the_n_spt_branch():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# =====================================================================
+# Ragged CANDIDATE sampling grids are refused early (Open Item 20)
+# =====================================================================
+def _grid_designer(spt_candidates, n_r=1):
+    """A designer initialised far enough to reach _check_var_spt."""
+    def simulate(ti_controls, sampling_times, model_parameters):
+        u = ti_controls[0]
+        k, A = model_parameters
+        y = A * u * np.exp(-k * np.asarray(sampling_times, dtype=float))
+        return np.column_stack([y] * n_r)
+
+    d = Designer()
+    d.simulate = simulate
+    d.model_parameters = np.array([0.5, 1.0])
+    d.model_parameter_names = ["k", "A"]
+    d.error_cov = np.eye(n_r) * 0.01 ** 2
+    d.response_names = [f"y{j}" for j in range(n_r)]
+    d.ti_controls_names = ["u"]
+    d.ti_controls_candidates = np.array([[0.5], [1.0], [1.5]])
+    d.sampling_times_candidates = np.asarray(spt_candidates, dtype=float)
+    return d
+
+
+def test_ragged_candidate_grid_is_refused_at_initialize():
+    """
+    Ragged candidate grids reach a FIM through no path. Two independent
+    defects sit behind them and the first masks the second: the response
+    padding in `_store_current_response` passes a 2-tuple `pad_width` for a
+    3-D array (so `simulate_candidates()` fails too, despite that padding
+    LOOKING correct on reading), and `eval_sensitivities` preallocates at the
+    padded width while assigning each candidate's real length. Refusing at
+    `initialize()` turns a numpy-internals traceback into a statement of the
+    cause and the alternative.
+    """
+    d = _grid_designer([[0.5, 1.0, 1.5, 2.0],
+                        [0.5, 2.0, np.nan, np.nan],
+                        [0.5, 1.0, 2.0, np.nan]])
+    with pytest.raises(NotImplementedError) as exc:
+        d.initialize(verbose=0)
+    msg = str(exc.value)
+    # the real per-candidate counts, so the user can see WHICH rows are short
+    assert "[4, 2, 3]" in msg
+    # and the alternative, not just the refusal
+    assert "union" in msg.lower()
+    assert "n_spt" in msg
+
+
+def test_the_guard_does_not_claim_prior_experiments_are_affected():
+    """
+    `set_prior_experiments()` accepts ragged NaN-padded schedules and handles
+    them correctly, stripping NaN per experiment. Past experiments have
+    whatever schedules they had, so raggedness there is not a design choice.
+    A guard that left a reader thinking sequential MBDoE was broken would be
+    worse than no guard.
+    """
+    d = _grid_designer([[0.5, 1.0, 1.5], [0.5, np.nan, np.nan],
+                        [0.5, 1.0, np.nan]])
+    with pytest.raises(NotImplementedError) as exc:
+        d.initialize(verbose=0)
+    assert "set_prior_experiments" in str(exc.value)
+
+
+@pytest.mark.parametrize("n_r", [1, 2])
+def test_uniform_candidate_grids_still_initialise(n_r):
+    """
+    The guard must fire on raggedness ONLY. n_r is parametrised because the
+    response defect behind Item 20 is triggered by the `n_r == 1` branch
+    adding an axis, so a single-response model is the case most likely to be
+    caught by an over-broad guard.
+    """
+    d = _grid_designer(np.tile(np.linspace(0.5, 2.0, 4), (3, 1)), n_r=n_r)
+    d.initialize(verbose=0)
+    assert d._var_n_sampling_time is False
+    assert d.n_spt == 4

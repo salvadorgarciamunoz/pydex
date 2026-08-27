@@ -5,14 +5,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>pydex.core.designer &mdash; pydex 0.7.0 documentation</title>
+  <title>pydex.core.designer &mdash; pydex 0.7.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
 
   
       <script src="../../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="../../../_static/documentation_options.js?v=fe7df9b0"></script>
+      <script src="../../../_static/documentation_options.js?v=5a057da9"></script>
       <script src="../../../_static/doctools.js?v=9bcbadda"></script>
       <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../../../_static/js/theme.js"></script>
@@ -8029,6 +8029,8 @@
             <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="o">.</span><span class="n">center</span><span class="p">(</span><span class="mi">100</span><span class="p">,</span> <span class="s2">&quot;-&quot;</span><span class="p">))</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_sensitivity_analysis_time</span> <span class="o">+=</span> <span class="n">finish</span> <span class="o">-</span> <span class="n">start</span>
 
+        <span class="c1"># Unreachable while ragged candidate grids are refused (Open Item 20);</span>
+        <span class="c1"># _var_n_sampling_time is only ever set False. Kept deliberately.</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_var_n_sampling_time</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_pad_sensitivities</span><span class="p">()</span>
 
@@ -11979,6 +11981,10 @@
             <span class="n">fig</span><span class="o">.</span><span class="n">savefig</span><span class="p">(</span><span class="n">fname</span><span class="o">=</span><span class="n">fp</span><span class="p">,</span> <span class="n">dpi</span><span class="o">=</span><span class="n">dpi</span><span class="p">)</span>
         <span class="k">return</span> <span class="n">fig</span>
 
+    <span class="c1"># UNREACHABLE while _check_var_spt refuses ragged candidate grids (Open</span>
+    <span class="c1"># Item 20). Kept, not deleted: it is the partial implementation whoever</span>
+    <span class="c1"># lifts that restriction will start from, and the reconciliation logic is</span>
+    <span class="c1"># the hard part. Do not treat it as live code.</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">_pad_sampling_times</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot; check the required number of sampling times &quot;&quot;&quot;</span>
         <span class="n">max_num_sampling_times</span> <span class="o">=</span> <span class="mi">1</span>
@@ -12031,6 +12037,11 @@
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_r</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_current_res</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_res</span><span class="p">[:,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
 
+        <span class="c1"># Unreachable while ragged candidate grids are refused (Open Item 20).</span>
+        <span class="c1"># NOTE this pad is itself defective: pad_width is a 2-tuple but</span>
+        <span class="c1"># _current_res is 3-D by here, so it raises from _as_pairs. That is the</span>
+        <span class="c1"># defect that fires FIRST on a ragged grid, ahead of the sensitivity</span>
+        <span class="c1"># preallocation, and it is why simulate_candidates() fails too.</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_var_n_sampling_time</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_current_res</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">pad</span><span class="p">(</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">_current_res</span><span class="p">,</span>
@@ -12220,8 +12231,71 @@
                 <span class="ow">and</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="o">~</span><span class="n">np</span><span class="o">.</span><span class="n">isnan</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sampling_times_candidates</span><span class="p">)):</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_var_n_sampling_time</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="k">else</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_var_n_sampling_time</span> <span class="o">=</span> <span class="kc">True</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_pad_sampling_times</span><span class="p">()</span>
+            <span class="c1"># RAGGED CANDIDATE GRIDS ARE NOT SUPPORTED. Refused here, at the</span>
+            <span class="c1"># earliest possible point, because nothing downstream of one works</span>
+            <span class="c1"># and the errors it produces name numpy internals rather than the</span>
+            <span class="c1"># cause. Two independent defects sit behind it, and the first masks</span>
+            <span class="c1"># the second:</span>
+            <span class="c1">#</span>
+            <span class="c1">#   1. `_store_current_response` pads with a 2-tuple `pad_width`</span>
+            <span class="c1">#      for an array that is 3-D by then (the n_r == 1 branch adds</span>
+            <span class="c1">#      an axis), so `np.pad` raises &quot;operands could not be</span>
+            <span class="c1">#      broadcast together with remapped shapes (2,2) and requested</span>
+            <span class="c1">#      shape (3,2)&quot; from `_as_pairs`. This fires FIRST, during the</span>
+            <span class="c1">#      simulate calls, and takes out `simulate_candidates()` too --</span>
+            <span class="c1">#      so the response path does NOT work either, despite having</span>
+            <span class="c1">#      padding logic that looks correct on reading.</span>
+            <span class="c1">#   2. `eval_sensitivities` preallocates</span>
+            <span class="c1">#      `np.empty((n_c, n_spt, n_m_r, n_mp))` at the full PADDED</span>
+            <span class="c1">#      width, then each of its three assignment sites (serial FD,</span>
+            <span class="c1">#      serial IFT, parallel IFT) does</span>
+            <span class="c1">#      `self.sensitivities[i, :] = temp_sens` where temp_sens has</span>
+            <span class="c1">#      that candidate&#39;s REAL length, because `_current_spt` is</span>
+            <span class="c1">#      NaN-stripped before the model is called.</span>
+            <span class="c1">#      `_pad_sensitivities()` exists to reconcile this but runs</span>
+            <span class="c1">#      AFTER the loop, too late. Shared preallocation means this is</span>
+            <span class="c1">#      NOT specific to finite differences.</span>
+            <span class="c1">#</span>
+            <span class="c1"># WHAT TO DO INSTEAD: list the UNION of the times you care about as</span>
+            <span class="c1"># a grid common to every candidate and let the optimiser choose.</span>
+            <span class="c1"># With sampling times optimised an uninformative time costs</span>
+            <span class="c1"># nothing -- it simply receives zero effort -- which is the same</span>
+            <span class="c1"># result a per-candidate grid would express, derived against the</span>
+            <span class="c1"># FIM rather than committed to up front. Measured on the capability</span>
+            <span class="c1"># suite&#39;s own model, optimising leaves 3,195 of 3,200</span>
+            <span class="c1"># (candidate, time) cells at zero effort.</span>
+            <span class="c1">#</span>
+            <span class="c1"># The union grid cannot express a time that is UNMEASURABLE rather</span>
+            <span class="c1"># than merely uninformative (a batch that has already ended, say).</span>
+            <span class="c1"># That is a real gap, but the fix for it is a per-candidate bound</span>
+            <span class="c1"># on measurable time, not a ragged grid.</span>
+            <span class="c1">#</span>
+            <span class="c1"># PRIOR EXPERIMENTS ARE UNAFFECTED. `set_prior_experiments()`</span>
+            <span class="c1"># accepts NaN-padded ragged schedules and handles them correctly</span>
+            <span class="c1"># through an entirely separate path: it strips NaN per experiment</span>
+            <span class="c1"># and accumulates the prior FIM one sampling time at a time. Past</span>
+            <span class="c1"># experiments genuinely have whatever schedules they had, so that</span>
+            <span class="c1"># is a case where raggedness is not a design choice -- hence the</span>
+            <span class="c1"># guard is scoped to the CANDIDATE grid only.</span>
+            <span class="n">_lens</span> <span class="o">=</span> <span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="o">~</span><span class="n">np</span><span class="o">.</span><span class="n">isnan</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">spt</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">))))</span>
+                     <span class="k">for</span> <span class="n">spt</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">sampling_times_candidates</span><span class="p">]</span>
+            <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span>
+                <span class="s2">&quot;sampling_times_candidates has a ragged (variable-length or &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;NaN-padded) grid: real sampling times per candidate are &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">_lens</span><span class="si">}</span><span class="s2">. Ragged CANDIDATE grids are not supported -- neither &quot;</span>
+                <span class="s2">&quot;the response path nor either sensitivity path handles them, &quot;</span>
+                <span class="s2">&quot;and the numpy errors they raise do not name the cause.</span><span class="se">\n\n</span><span class="s2">&quot;</span>
+                <span class="s2">&quot;Instead, give every candidate the same grid, containing the &quot;</span>
+                <span class="s2">&quot;UNION of the times of interest, and let the sampling times be &quot;</span>
+                <span class="s2">&quot;optimised (the default: omit n_spt). An uninformative time &quot;</span>
+                <span class="s2">&quot;then costs nothing, because it receives zero effort -- which &quot;</span>
+                <span class="s2">&quot;is what a per-candidate grid was expressing, chosen against &quot;</span>
+                <span class="s2">&quot;the FIM rather than fixed in advance.</span><span class="se">\n\n</span><span class="s2">&quot;</span>
+                <span class="s2">&quot;This restriction applies only to the candidate grid. &quot;</span>
+                <span class="s2">&quot;set_prior_experiments() accepts ragged, NaN-padded schedules &quot;</span>
+                <span class="s2">&quot;for experiments you have already run, and handles them &quot;</span>
+                <span class="s2">&quot;correctly.&quot;</span>
+            <span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_get_component_sizes</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
 

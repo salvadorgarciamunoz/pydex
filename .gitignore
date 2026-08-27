@@ -240,3 +240,4 @@ tmp*.pyomo.*
 
 # flat designer.py copy for the solver-free test recipe (see README)
 _flat/
+docs/*.bak
