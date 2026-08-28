@@ -217,6 +217,7 @@ designer.sampling_times_candidates = np.array([
 # ── Optional metadata ─────────────────────────────────────────────────────────
 designer.measurable_responses  = [0, 1]
 designer.response_names        = ["$c_A$", "$c_B$"]
+designer.ti_controls_names     = ["cA0", "T", "tau"]
 designer.model_parameter_names = [
     r"$\theta_{10}$", r"$\theta_{11}$",
     r"$\theta_{20}$", r"$\theta_{21}$",

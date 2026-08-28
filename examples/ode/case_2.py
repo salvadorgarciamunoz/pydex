@@ -155,6 +155,10 @@ tic = designer_1.enumerate_candidates(
 )
 designer_1.ti_controls_candidates = tic
 
+# Control labels, so the design table reads "CA0"/"T" rather than
+# "Time-invariant Control 0"/"1".
+designer_1.ti_controls_names = ["CA0", "T"]
+
 # NOTE the first sampling time. 0.001 with a 200-minute horizon normalises to
 # 5e-6, which sits a hair off the collocation node at 0. Embedding both would
 # create a machine-epsilon finite element and silently corrupt the solve, so the

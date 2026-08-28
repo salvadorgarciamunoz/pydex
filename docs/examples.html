@@ -48,6 +48,7 @@
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Examples</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#naming-scheme">Naming scheme</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#sampling-times-n-spt-is-the-only-control">Sampling times — <code class="docutils literal notranslate"><span class="pre">n_spt</span></code> is the only control</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#steady-state-vle">Steady-state VLE</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#ode-examples">ODE examples</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#case-1-first-order-reaction-one-parameter">Case 1 — first-order reaction, one parameter</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#case-2-ab-with-arrhenius-kinetics-four-parameters">Case 2 — A→B with Arrhenius kinetics, four parameters</a></li>
@@ -200,6 +201,33 @@ schedules they had.</p></li>
 <p>The report states which case is in force rather than printing a boolean, for
 example <code class="docutils literal notranslate"><span class="pre">FIXED</span> <span class="pre">--</span> <span class="pre">all</span> <span class="pre">11</span> <span class="pre">listed</span> <span class="pre">time(s)</span> <span class="pre">measured</span> <span class="pre">on</span> <span class="pre">every</span> <span class="pre">run;</span> <span class="pre">effort</span>
 <span class="pre">allocated</span> <span class="pre">per</span> <span class="pre">experiment</span></code>.</p>
+</section>
+<section id="steady-state-vle">
+<h2>Steady-state VLE<a class="headerlink" href="#steady-state-vle" title="Link to this heading"></a></h2>
+<p>A binary vapour–liquid equilibrium problem: estimating the two van Laar
+activity-coefficient parameters from total-pressure and vapour-composition
+measurements. Static, and nonlinear in the parameters – the step between a
+linear response surface and a dynamic model.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/vle/van_laar_model.py</span></code> – the model. Two-parameter van Laar
+activity coefficients, modified Raoult’s law, and Antoine constants that are
+known rather than fitted.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/vle/van_laar_design.py</span></code> – the runner. D-optimal design over 7
+compositions by 3 temperatures.</p></li>
+</ul>
+<p>This model has no time axis, so <code class="docutils literal notranslate"><span class="pre">n_spt</span></code> does not apply.</p>
+<p>The design is two support points for two parameters, both at the highest
+temperature, at <code class="docutils literal notranslate"><span class="pre">x1</span> <span class="pre">=</span> <span class="pre">0.05</span></code> and <code class="docutils literal notranslate"><span class="pre">0.35</span></code> – not at the corners of the
+composition range, which is where a linear model would place them. Criterion
+<code class="docutils literal notranslate"><span class="pre">16.782682</span></code>; <code class="docutils literal notranslate"><span class="pre">apportion(8)</span></code> gives 4 runs and 4, and the rounded design is
+99.88% as informative as the continuous one.</p>
+<p>Because the model is nonlinear the design depends on the nominal parameters: at
+<code class="docutils literal notranslate"><span class="pre">theta</span> <span class="pre">=</span> <span class="pre">[1.10,</span> <span class="pre">1.45]</span></code> the support moves to candidates 6 and 12. That is the
+motivation for sequential design rather than a defect.</p>
+<p>The example also demonstrates the labelling attributes
+(<code class="xref py py-attr docutils literal notranslate"><span class="pre">model_parameter_names</span></code>,
+<code class="docutils literal notranslate"><span class="pre">ti_controls_names</span></code>, <code class="docutils literal notranslate"><span class="pre">response_names</span></code> and the unit names), which put real
+names into the design table and onto the plot axes.</p>
 </section>
 <section id="ode-examples">
 <h2>ODE examples<a class="headerlink" href="#ode-examples" title="Link to this heading"></a></h2>

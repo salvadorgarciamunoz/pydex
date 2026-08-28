@@ -96,6 +96,37 @@ The report states which case is in force rather than printing a boolean, for
 example ``FIXED -- all 11 listed time(s) measured on every run; effort
 allocated per experiment``.
 
+Steady-state VLE
+----------------
+
+A binary vapour--liquid equilibrium problem: estimating the two van Laar
+activity-coefficient parameters from total-pressure and vapour-composition
+measurements. Static, and nonlinear in the parameters -- the step between a
+linear response surface and a dynamic model.
+
+* ``examples/vle/van_laar_model.py`` -- the model. Two-parameter van Laar
+  activity coefficients, modified Raoult's law, and Antoine constants that are
+  known rather than fitted.
+* ``examples/vle/van_laar_design.py`` -- the runner. D-optimal design over 7
+  compositions by 3 temperatures.
+
+This model has no time axis, so ``n_spt`` does not apply.
+
+The design is two support points for two parameters, both at the highest
+temperature, at ``x1 = 0.05`` and ``0.35`` -- not at the corners of the
+composition range, which is where a linear model would place them. Criterion
+``16.782682``; ``apportion(8)`` gives 4 runs and 4, and the rounded design is
+99.88% as informative as the continuous one.
+
+Because the model is nonlinear the design depends on the nominal parameters: at
+``theta = [1.10, 1.45]`` the support moves to candidates 6 and 12. That is the
+motivation for sequential design rather than a defect.
+
+The example also demonstrates the labelling attributes
+(:attr:`~pydex.core.designer.Designer.model_parameter_names`,
+``ti_controls_names``, ``response_names`` and the unit names), which put real
+names into the design table and onto the plot axes.
+
 ODE examples
 ------------
 

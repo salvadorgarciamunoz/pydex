@@ -98,6 +98,7 @@ def build_designer(interest_parameters=None):
     d.response_names        = ["$c_A$", "$c_B$"]
     d.model_parameter_names = PARAM_NAMES
     d.error_cov             = np.diag([0.1, 0.1])
+    d.ti_controls_names     = ["CA0", "T"]
 
     # ── the only line that differs from a D-optimal script ────────────────
     # Parameters are selected BY NAME.  A parameter's position in the FIM

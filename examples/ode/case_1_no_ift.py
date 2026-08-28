@@ -48,6 +48,16 @@ tic = designer_1.enumerate_candidates(
     ],
 )
 designer_1.ti_controls_candidates = tic
+
+# Labels for reports and plot axes. Optional, but they replace generated
+# defaults like "Time-invariant Control 0" with the real quantity.
+designer_1.model_parameter_names = ["k"]
+designer_1.ti_controls_names     = ["CA0"]
+designer_1.response_names        = ["CA"]
+designer_1.model_parameter_unit_names = ["1/min"]
+designer_1.response_unit_names        = ["mol/L"]
+designer_1.time_unit_name             = "min"
+
 designer_1.sampling_times_candidates = np.array([
     np.linspace(0, 50, 101)
     for _ in tic

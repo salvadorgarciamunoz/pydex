@@ -13,6 +13,28 @@ python case_2.py
 Most examples solve an NLP, so they need IPOPT on `PATH`. See
 `docs/source/installation.rst`.
 
+## Labelling — name your parameters, controls and responses
+
+Every example sets these, and yours should too. They are optional to the
+mathematics and they change what you can read:
+
+| attribute | what it labels |
+|---|---|
+| `model_parameter_names` | reports, plot axes, the estimability ranking — and `interest_parameters` is matched against it BY NAME, so Ds-optimal needs it |
+| `ti_controls_names` | design-table column headings and effort-plot axes |
+| `response_names` | predicted-response and sensitivity plot axes |
+| `candidate_names` | plot titles and the candidate column; useful when candidates are named lots or formulations rather than grid points |
+| `tv_controls_names` | time-varying control plots (no example here uses time-varying controls) |
+| `model_parameter_unit_names`, `response_unit_names`, `time_unit_name` | units appended to axis labels |
+
+Anything you leave unset is filled with a generated default —
+`Time-invariant Control 0`, `Model Parameter 0`, `Candidate 0` — which is why
+an unlabelled run still prints something sensible.
+
+Note the SINGULAR `parameter` in `model_parameter_names`. The plural
+`model_parameters_names`, and `measurable_responses_names`, were earlier names;
+assigning to either raises an error naming the attribute to use instead.
+
 ## Naming scheme
 
 The `case_N` families vary one axis at a time, so the suffixes tell you
@@ -66,6 +88,40 @@ Two consequences worth knowing before comparing runs:
 The report states which case is in force rather than printing a boolean, e.g.
 `FIXED -- all 11 listed time(s) measured on every run; effort allocated per
 experiment`.
+
+## Steady-state VLE — `examples/vle/`
+
+A binary vapour–liquid equilibrium problem: estimating the two van Laar
+activity-coefficient parameters from total-pressure and vapour-composition
+measurements. **Static and nonlinear in the parameters** — the step between a
+linear response surface and a dynamic model.
+
+- `van_laar_model.py` — the model. Two-parameter van Laar activity
+  coefficients, modified Raoult's law, and Antoine constants that are known
+  rather than fitted. Run it directly for a sanity check of the predictions.
+- `van_laar_design.py` — the runner. D-optimal design over 7 compositions × 3
+  temperatures.
+
+No sampling times: this model has no time axis, so `n_spt` does not apply.
+
+The design is **two support points for two parameters**, both at the highest
+temperature, at `x1 = 0.05` and `0.35` — *not* at the corners of the
+composition range, which is where a linear model would put them. Criterion
+`16.782682`; `apportion(8)` gives 4 runs and 4, and the rounded design is
+99.88% as informative as the continuous one.
+
+Because the model is nonlinear, **the design depends on the nominal
+parameters**: at `theta = [1.10, 1.45]` the support moves to candidates 6 and
+12. That is the motivation for sequential design, not a defect.
+
+This example also demonstrates the labelling attributes
+(`model_parameter_names`, `ti_controls_names`, `response_names` and the unit
+names), which turn `Time-invariant Control 0` into `x1` in the design table and
+label every plot axis. Note the singular `parameter` — the plural form is
+refused with an error naming the correct attribute.
+
+Needs an NLP solver. `solver="pounce"` works with nothing beyond `pip`; IPOPT
+works equally well.
 
 ## ODE examples — `examples/ode/`
 
