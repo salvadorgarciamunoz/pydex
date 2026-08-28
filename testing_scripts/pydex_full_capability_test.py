@@ -335,7 +335,7 @@ def make_designer(theta=None, small=False):
     d.simulate  = simulate
     d.model_parameters = theta if theta is not None else THETA_GUESS.copy()
     d.error_cov = np.diag([0.01**2] * 4)
-    d.model_parameters_names = PARAM_NAMES
+    d.model_parameter_names = PARAM_NAMES
     d.ti_controls_names      = ["T0_C", "Tjacket_C", "catalyst_load"]
     d.response_names         = ["CA", "CB", "CI", "CD"]
 

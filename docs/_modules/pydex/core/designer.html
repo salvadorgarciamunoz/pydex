@@ -5,14 +5,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>pydex.core.designer &mdash; pydex 0.7.2 documentation</title>
+  <title>pydex.core.designer &mdash; pydex 0.7.4 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
 
   
       <script src="../../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="../../../_static/documentation_options.js?v=6dfdf7c3"></script>
+      <script src="../../../_static/documentation_options.js?v=020ce317"></script>
       <script src="../../../_static/doctools.js?v=9bcbadda"></script>
       <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../../../_static/js/theme.js"></script>
@@ -895,7 +895,77 @@
 <span class="sd">                                   from its keyword argument, so setting that</span>
 <span class="sd">                                   attribute directly is silently discarded.</span>
 
+<span class="sd">    Labelling</span>
+<span class="sd">    ---------</span>
+<span class="sd">    Optional lists of names, used for report columns, plot axes and the</span>
+<span class="sd">    estimability ranking. Set any of them before :meth:`initialize`:</span>
+
+<span class="sd">    .. code-block:: text</span>
+
+<span class="sd">        model_parameter_names       one per model parameter</span>
+<span class="sd">        response_names              one per response</span>
+<span class="sd">        ti_controls_names           one per time-invariant control</span>
+<span class="sd">        tv_controls_names           one per time-varying control</span>
+<span class="sd">        candidate_names             one per candidate experiment</span>
+<span class="sd">        model_parameter_unit_names  units, for axis labels</span>
+<span class="sd">        response_unit_names         units, for axis labels</span>
+<span class="sd">        time_unit_name              units, for axis labels</span>
+
+<span class="sd">    `model_parameter_names` is the only one that is more than cosmetic:</span>
+<span class="sd">    `interest_parameters` is matched against it by exact string equality, so</span>
+<span class="sd">    Ds-optimal design needs it (see `interest_parameters`).</span>
+
+<span class="sd">    Note the SINGULAR &quot;parameter&quot; in `model_parameter_names`. The plural</span>
+<span class="sd">    `model_parameters_names`, and `measurable_responses_names`, were earlier</span>
+<span class="sd">    names for two of these; they are refused with an error naming the attribute</span>
+<span class="sd">    to use instead, rather than accepted and ignored. See</span>
+<span class="sd">    :attr:`_RENAMED_ATTRIBUTES`.</span>
+
+<span class="sd">    Attributes:</span>
+<span class="sd">        rounding_efficiency (float or None): Set by :meth:`apportion`. The</span>
+<span class="sd">            criterion value of the rounded design as a fraction of the</span>
+<span class="sd">            continuous one, for the criteria that have a standard relative</span>
+<span class="sd">            efficiency (D, Ds, A, E). ``None`` when the active criterion has no</span>
+<span class="sd">            such definition, or when the efficiency was not computed because</span>
+<span class="sd">            ``compute_actual_efficiency`` left it off at ``verbose=0``. A value</span>
+<span class="sd">            above 1.0 is not possible for a rounding of the optimum; if you see</span>
+<span class="sd">            one, investigate rather than report it.</span>
+
 <span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="c1"># Attribute names that were superseded by the 0.2.0 refactor and are no</span>
+    <span class="c1"># longer read anywhere. Assigning to one of these used to be accepted in</span>
+    <span class="c1"># silence and simply discarded, so a user&#39;s labels never appeared and</span>
+    <span class="c1"># nothing said why. Rejected BY NAME, for the same reason</span>
+    <span class="c1"># design_experiment() rejects withdrawn keywords: a typo or an out-of-date</span>
+    <span class="c1"># attribute must fail loudly rather than change nothing.</span>
+    <span class="n">_RENAMED_ATTRIBUTES</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">&quot;model_parameters_names&quot;</span><span class="p">:</span> <span class="s2">&quot;model_parameter_names&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;measurable_responses_names&quot;</span><span class="p">:</span> <span class="s2">&quot;response_names&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;responses_names&quot;</span><span class="p">:</span> <span class="s2">&quot;response_names&quot;</span><span class="p">,</span>
+    <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__setattr__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set an attribute, refusing names that were renamed by the refactor.</span>
+
+<span class="sd">        Only the handful of names in :attr:`_RENAMED_ATTRIBUTES` are refused;</span>
+<span class="sd">        every other attribute is set normally, so this does not restrict adding</span>
+<span class="sd">        your own attributes to a Designer.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            AttributeError: If ``name`` is a superseded attribute name, naming</span>
+<span class="sd">                the attribute to use instead.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">replacement</span> <span class="o">=</span> <span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">_RENAMED_ATTRIBUTES</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">replacement</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">AttributeError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39; is not an attribute of Designer; it was renamed to &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;&#39;</span><span class="si">{</span><span class="n">replacement</span><span class="si">}</span><span class="s2">&#39;. Assigning to &#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39; would have had no &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;effect, so it is refused rather than silently ignored. &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;Use: designer.</span><span class="si">{</span><span class="n">replacement</span><span class="si">}</span><span class="s2"> = ...&quot;</span>
+            <span class="p">)</span>
+        <span class="nb">object</span><span class="o">.</span><span class="fm">__setattr__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+
 <div class="viewcode-block" id="Designer.__init__">
 <a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.__init__">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
@@ -1083,10 +1153,8 @@
 
 <span class="w">        </span><span class="sd">&quot;&quot;&quot; Labelling &quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">candidate_names</span> <span class="o">=</span> <span class="kc">None</span>  <span class="c1"># plotting names</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">measurable_responses_names</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">ti_controls_names</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">tv_controls_names</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">model_parameters_names</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">model_parameter_unit_names</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">response_unit_names</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">time_unit_name</span> <span class="o">=</span> <span class="kc">None</span>
@@ -4805,9 +4873,26 @@
 <span class="sd">            n_exp (int): Number of experimental runs to allocate.</span>
 <span class="sd">            method (str): Divisor method for the proportional case.</span>
 <span class="sd">            trimmed (bool): Drop zero-effort candidates before apportioning.</span>
-<span class="sd">            compute_actual_efficiency (bool): Also evaluate the criterion at the</span>
-<span class="sd">                rounded design and report it as a percentage of the continuous</span>
-<span class="sd">                one.</span>
+<span class="sd">                Applies whatever the verbosity; it is not a reporting-only flag.</span>
+<span class="sd">            compute_actual_efficiency (bool or None): TRI-STATE, not a plain</span>
+<span class="sd">                bool. ``None`` (the default) means &quot;evaluate the rounded</span>
+<span class="sd">                criterion only if it is going to be reported&quot;, so at</span>
+<span class="sd">                ``verbose=0`` the two extra criterion evaluations are skipped.</span>
+<span class="sd">                ``True`` forces them even when nothing is printed. The result is</span>
+<span class="sd">                left on :attr:`rounding_efficiency`.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            numpy.ndarray: Integer run counts, and the SHAPE DEPENDS ON THE</span>
+<span class="sd">            DESIGN. When every supported candidate carries effort at the same</span>
+<span class="sd">            number of sampling times, this is a plain 2-D array. When the</span>
+<span class="sd">            support is RAGGED — candidates carrying effort at different numbers</span>
+<span class="sd">            of sampling times — it is a 1-D object array whose entries are</span>
+<span class="sd">            per-candidate integer arrays of differing length.</span>
+
+<span class="sd">            Total it with ``int(np.nansum(a)) for a in app``. Do NOT call</span>
+<span class="sd">            ``astype(int)`` on the whole thing: that raises on the ragged form,</span>
+<span class="sd">            and on any array still carrying non-finite padding it would cast</span>
+<span class="sd">            silently to a nonsense integer.</span>
 
 <span class="sd">        Note:</span>
 <span class="sd">            Read the reported efficiency, not just the run counts. A rounded</span>

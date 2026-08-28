@@ -820,7 +820,77 @@ class Designer:
                                    from its keyword argument, so setting that
                                    attribute directly is silently discarded.
 
+    Labelling
+    ---------
+    Optional lists of names, used for report columns, plot axes and the
+    estimability ranking. Set any of them before :meth:`initialize`:
+
+    .. code-block:: text
+
+        model_parameter_names       one per model parameter
+        response_names              one per response
+        ti_controls_names           one per time-invariant control
+        tv_controls_names           one per time-varying control
+        candidate_names             one per candidate experiment
+        model_parameter_unit_names  units, for axis labels
+        response_unit_names         units, for axis labels
+        time_unit_name              units, for axis labels
+
+    `model_parameter_names` is the only one that is more than cosmetic:
+    `interest_parameters` is matched against it by exact string equality, so
+    Ds-optimal design needs it (see `interest_parameters`).
+
+    Note the SINGULAR "parameter" in `model_parameter_names`. The plural
+    `model_parameters_names`, and `measurable_responses_names`, were earlier
+    names for two of these; they are refused with an error naming the attribute
+    to use instead, rather than accepted and ignored. See
+    :attr:`_RENAMED_ATTRIBUTES`.
+
+    Attributes:
+        rounding_efficiency (float or None): Set by :meth:`apportion`. The
+            criterion value of the rounded design as a fraction of the
+            continuous one, for the criteria that have a standard relative
+            efficiency (D, Ds, A, E). ``None`` when the active criterion has no
+            such definition, or when the efficiency was not computed because
+            ``compute_actual_efficiency`` left it off at ``verbose=0``. A value
+            above 1.0 is not possible for a rounding of the optimum; if you see
+            one, investigate rather than report it.
+
     """
+
+    # Attribute names that were superseded by the 0.2.0 refactor and are no
+    # longer read anywhere. Assigning to one of these used to be accepted in
+    # silence and simply discarded, so a user's labels never appeared and
+    # nothing said why. Rejected BY NAME, for the same reason
+    # design_experiment() rejects withdrawn keywords: a typo or an out-of-date
+    # attribute must fail loudly rather than change nothing.
+    _RENAMED_ATTRIBUTES = {
+        "model_parameters_names": "model_parameter_names",
+        "measurable_responses_names": "response_names",
+        "responses_names": "response_names",
+    }
+
+    def __setattr__(self, name, value):
+        """Set an attribute, refusing names that were renamed by the refactor.
+
+        Only the handful of names in :attr:`_RENAMED_ATTRIBUTES` are refused;
+        every other attribute is set normally, so this does not restrict adding
+        your own attributes to a Designer.
+
+        Raises:
+            AttributeError: If ``name`` is a superseded attribute name, naming
+                the attribute to use instead.
+        """
+        replacement = type(self)._RENAMED_ATTRIBUTES.get(name)
+        if replacement is not None:
+            raise AttributeError(
+                f"'{name}' is not an attribute of Designer; it was renamed to "
+                f"'{replacement}'. Assigning to '{name}' would have had no "
+                f"effect, so it is refused rather than silently ignored. "
+                f"Use: designer.{replacement} = ..."
+            )
+        object.__setattr__(self, name, value)
+
     def __init__(self):
         """
         Pydex' main class to instantiate an experimental designer. The designer
@@ -1006,10 +1076,8 @@ class Designer:
 
         """ Labelling """
         self.candidate_names = None  # plotting names
-        self.measurable_responses_names = None
         self.ti_controls_names = None
         self.tv_controls_names = None
-        self.model_parameters_names = None
         self.model_parameter_unit_names = None
         self.response_unit_names = None
         self.time_unit_name = None
@@ -4680,9 +4748,26 @@ class Designer:
             n_exp (int): Number of experimental runs to allocate.
             method (str): Divisor method for the proportional case.
             trimmed (bool): Drop zero-effort candidates before apportioning.
-            compute_actual_efficiency (bool): Also evaluate the criterion at the
-                rounded design and report it as a percentage of the continuous
-                one.
+                Applies whatever the verbosity; it is not a reporting-only flag.
+            compute_actual_efficiency (bool or None): TRI-STATE, not a plain
+                bool. ``None`` (the default) means "evaluate the rounded
+                criterion only if it is going to be reported", so at
+                ``verbose=0`` the two extra criterion evaluations are skipped.
+                ``True`` forces them even when nothing is printed. The result is
+                left on :attr:`rounding_efficiency`.
+
+        Returns:
+            numpy.ndarray: Integer run counts, and the SHAPE DEPENDS ON THE
+            DESIGN. When every supported candidate carries effort at the same
+            number of sampling times, this is a plain 2-D array. When the
+            support is RAGGED — candidates carrying effort at different numbers
+            of sampling times — it is a 1-D object array whose entries are
+            per-candidate integer arrays of differing length.
+
+            Total it with ``int(np.nansum(a)) for a in app``. Do NOT call
+            ``astype(int)`` on the whole thing: that raises on the ragged form,
+            and on any array still carrying non-finite padding it would cast
+            silently to a nonsense integer.
 
         Note:
             Read the reported efficiency, not just the run counts. A rounded

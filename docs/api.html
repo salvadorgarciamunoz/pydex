@@ -6,14 +6,14 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>API Reference &mdash; pydex 0.7.3 documentation</title>
+  <title>API Reference &mdash; pydex 0.7.4 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
 
   
       <script src="_static/jquery.js?v=5d32c60e"></script>
       <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="_static/documentation_options.js?v=c98573da"></script>
+      <script src="_static/documentation_options.js?v=020ce317"></script>
       <script src="_static/doctools.js?v=9bcbadda"></script>
       <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="_static/js/theme.js"></script>
@@ -47,6 +47,7 @@
 <li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">API Reference</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#pydex.core.designer.Designer"><code class="docutils literal notranslate"><span class="pre">Designer</span></code></a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.rounding_efficiency"><code class="docutils literal notranslate"><span class="pre">Designer.rounding_efficiency</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.__init__"><code class="docutils literal notranslate"><span class="pre">Designer.__init__()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.bayesian_pe_samples"><code class="docutils literal notranslate"><span class="pre">Designer.bayesian_pe_samples</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.error_fim"><code class="docutils literal notranslate"><span class="pre">Designer.error_fim</span></code></a></li>
@@ -776,6 +777,47 @@ Regularisation
                            attribute directly is silently discarded.
 </pre></div>
 </div>
+</section>
+<section id="labelling">
+<h2>Labelling<a class="headerlink" href="#labelling" title="Link to this heading"></a></h2>
+<p>Optional lists of names, used for report columns, plot axes and the
+estimability ranking. Set any of them before <a class="reference internal" href="#pydex.core.designer.Designer.initialize" title="pydex.core.designer.Designer.initialize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">initialize()</span></code></a>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>model_parameter_names       one per model parameter
+response_names              one per response
+ti_controls_names           one per time-invariant control
+tv_controls_names           one per time-varying control
+candidate_names             one per candidate experiment
+model_parameter_unit_names  units, for axis labels
+response_unit_names         units, for axis labels
+time_unit_name              units, for axis labels
+</pre></div>
+</div>
+<p><cite>model_parameter_names</cite> is the only one that is more than cosmetic:
+<cite>interest_parameters</cite> is matched against it by exact string equality, so
+Ds-optimal design needs it (see <cite>interest_parameters</cite>).</p>
+<p>Note the SINGULAR “parameter” in <cite>model_parameter_names</cite>. The plural
+<cite>model_parameters_names</cite>, and <cite>measurable_responses_names</cite>, were earlier
+names for two of these; they are refused with an error naming the attribute
+to use instead, rather than accepted and ignored. See
+<code class="xref py py-attr docutils literal notranslate"><span class="pre">_RENAMED_ATTRIBUTES</span></code>.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="pydex.core.designer.Designer.rounding_efficiency">
+<span class="sig-name descname"><span class="pre">rounding_efficiency</span></span><a class="headerlink" href="#pydex.core.designer.Designer.rounding_efficiency" title="Link to this definition"></a></dt>
+<dd><p>Set by <a class="reference internal" href="#pydex.core.designer.Designer.apportion" title="pydex.core.designer.Designer.apportion"><code class="xref py py-meth docutils literal notranslate"><span class="pre">apportion()</span></code></a>. The
+criterion value of the rounded design as a fraction of the
+continuous one, for the criteria that have a standard relative
+efficiency (D, Ds, A, E). <code class="docutils literal notranslate"><span class="pre">None</span></code> when the active criterion has no
+such definition, or when the efficiency was not computed because
+<code class="docutils literal notranslate"><span class="pre">compute_actual_efficiency</span></code> left it off at <code class="docutils literal notranslate"><span class="pre">verbose=0</span></code>. A value
+above 1.0 is not possible for a rounding of the optimum; if you see
+one, investigate rather than report it.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)">float</a> or None</p>
+</dd>
+</dl>
+</dd></dl>
+
 <dl class="py method">
 <dt class="sig sig-object py" id="pydex.core.designer.Designer.__init__">
 <span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.__init__"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.__init__" title="Link to this definition"></a></dt>
@@ -1459,11 +1501,31 @@ is shared proportionally (Adams divisor method); when it does not, the
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>n_exp</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Number of experimental runs to allocate.</p></li>
 <li><p><strong>method</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Divisor method for the proportional case.</p></li>
-<li><p><strong>trimmed</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Drop zero-effort candidates before apportioning.</p></li>
-<li><p><strong>compute_actual_efficiency</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Also evaluate the criterion at the
-rounded design and report it as a percentage of the continuous
-one.</p></li>
+<li><p><strong>trimmed</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Drop zero-effort candidates before apportioning.
+Applies whatever the verbosity; it is not a reporting-only flag.</p></li>
+<li><p><strong>compute_actual_efficiency</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em> or </em><em>None</em>) – TRI-STATE, not a plain
+bool. <code class="docutils literal notranslate"><span class="pre">None</span></code> (the default) means “evaluate the rounded
+criterion only if it is going to be reported”, so at
+<code class="docutils literal notranslate"><span class="pre">verbose=0</span></code> the two extra criterion evaluations are skipped.
+<code class="docutils literal notranslate"><span class="pre">True</span></code> forces them even when nothing is printed. The result is
+left on <a class="reference internal" href="#pydex.core.designer.Designer.rounding_efficiency" title="pydex.core.designer.Designer.rounding_efficiency"><code class="xref py py-attr docutils literal notranslate"><span class="pre">rounding_efficiency</span></code></a>.</p></li>
 </ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><p>Integer run counts, and the SHAPE DEPENDS ON THE
+DESIGN. When every supported candidate carries effort at the same
+number of sampling times, this is a plain 2-D array. When the
+support is RAGGED — candidates carrying effort at different numbers
+of sampling times — it is a 1-D object array whose entries are
+per-candidate integer arrays of differing length.</p>
+<p>Total it with <code class="docutils literal notranslate"><span class="pre">int(np.nansum(a))</span> <span class="pre">for</span> <span class="pre">a</span> <span class="pre">in</span> <span class="pre">app</span></code>. Do NOT call
+<code class="docutils literal notranslate"><span class="pre">astype(int)</span></code> on the whole thing: that raises on the ragged form,
+and on any array still carrying non-finite padding it would cast
+silently to a nonsense integer.</p>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html#numpy.ndarray" title="(in NumPy v2.5)">numpy.ndarray</a></p>
 </dd>
 </dl>
 <div class="admonition note">

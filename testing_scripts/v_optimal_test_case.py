@@ -1019,7 +1019,7 @@ if __name__ == "__main__":
     designer.sampling_times_candidates = spt_candidates
     # diagonal error covariance: sigma^2 on each of the 4 responses
     designer.error_cov = np.diag([SIGMA_RESPONSES**2] * 4)
-    designer.model_parameters_names    = PARAM_NAMES
+    designer.model_parameter_names    = PARAM_NAMES
     designer.ti_controls_names         = ["T0_C", "Tjacket_C", "catalyst_load"]
     designer.response_names            = ["CA", "CB", "CI", "CD"]
     designer.initialize(verbose=1)

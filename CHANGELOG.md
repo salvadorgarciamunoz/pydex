@@ -5,6 +5,60 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-08-28
+
+### Fixed
+
+- **Assigning to a superseded name attribute was accepted and silently
+  discarded.** `Designer.__init__` declared `model_parameters_names` and
+  `measurable_responses_names` alongside the attributes that replaced them,
+  `model_parameter_names` and `response_names`. Nothing read the former pair,
+  so labelling parameters through an older name had no effect and produced no
+  error, warning or clue. Because `interest_parameters` is matched against
+  `model_parameter_names` by exact string equality, the same confusion could
+  also make Ds-optimal design appear not to work.
+
+  The two dead declarations are removed, and `Designer` now refuses the
+  superseded names with an error naming the attribute to use instead:
+
+      AttributeError: 'model_parameters_names' is not an attribute of
+      Designer; it was renamed to 'model_parameter_names'. ...
+
+  Only the fixed list in `Designer._RENAMED_ATTRIBUTES` is refused, so
+  attaching your own attributes to a Designer is unaffected. This follows the
+  precedent of `design_experiment()` refusing keywords it does not define: an
+  out-of-date name must fail loudly rather than change nothing.
+
+  The plural forms were upstream names that this fork's refactor superseded
+  without deleting. Four call sites in this repository were assigning them and
+  are corrected, so their labels now appear on plot axes where previously they
+  did not: `examples/ode/case_2_no_ift_no_collocation.py`,
+  `testing_scripts/pydex_full_capability_test.py`,
+  `testing_scripts/v_optimal_test_case.py`,
+  `testing_scripts/v_optimal_test_case_pyomo.py`.
+
+  No design, criterion value or reference number changes. Capability suite
+  301/301 across 60 sections with absorbed noise 865 + 1 unchanged, and every
+  printed drift value held: sequential D-optimal 32.8910, section 17 MINLP
+  23.7240, static multi-response 12.01978119, section 53 5.258e-13, section 54
+  1.802e-12 / 3.526e-09, and section 55's three b_opt designs.
+
+### Documentation
+
+- **`apportion()`'s docstring was wrong in three places and had no `Returns:`
+  section.** `compute_actual_efficiency` is documented as the tri-state it is
+  rather than a bool; `trimmed` now states that it applies whatever the
+  verbosity; and the return value is documented for the first time, including
+  that it is a ragged object array when the support is ragged and must be
+  totalled with `int(np.nansum(a)) for a in app` rather than `astype(int)`.
+
+- **`Designer.rounding_efficiency` is documented**, including that a value
+  above 1.0 is not possible for a rounding of the optimum.
+
+- **The class docstring now lists the labelling attributes**, notes that
+  `model_parameter_names` is the only one that is more than cosmetic, and
+  points at the renamed-attribute guard.
+
 ## [0.7.3] - 2026-08-27
 
 ### Documentation

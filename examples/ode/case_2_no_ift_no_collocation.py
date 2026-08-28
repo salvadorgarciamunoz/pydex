@@ -262,7 +262,7 @@ designer_1.ti_controls_candidates    = tic_candidates
 designer_1.sampling_times_candidates = spt_candidates
 designer_1.error_cov = np.diag([0.1, 0.1])   # measurement noise: σ²=0.1 for CA, CB
 
-designer_1.model_parameters_names = ["θ₀", "θ₁", "α", "ν"]
+designer_1.model_parameter_names = ["θ₀", "θ₁", "α", "ν"]
 designer_1.ti_controls_names      = ["CA0 (mol/L)", "T (K)"]
 designer_1.response_names         = ["CA", "CB"]
 
