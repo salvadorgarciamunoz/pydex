@@ -2,7 +2,41 @@ from pydex.core.designer import Designer
 from case_1_model import simulate, build_pyomo_model
 import numpy as np
 
-""" computing experiment with a scipy's integrator """
+"""
+case_1.py
+=========
+D-optimal design for the first-order reaction dCA/dt = -k*CA, with exact
+sensitivities from the Implicit Function Theorem (pyomo_model_fn assigned).
+One parameter, one control, one response -- the smallest useful dynamic
+example.
+
+SAMPLING TIMES
+--------------
+n_spt is omitted, so sampling times are OPTIMIZED: effort is allocated per
+(candidate, sampling time) cell and the optimiser chooses which of the 101
+listed times to measure. The other two cases are n_spt=k (exactly k samples
+per run, optimiser picks which k) and n_spt=<number of listed times> (fixed
+grid, every listed time measured on every run, effort per experiment). n_spt
+is the only control; there is no flag that switches optimisation on or off.
+
+MEASURED RESULT
+---------------
+The design collapses onto a single point: candidate 5 (CA0 = 5) sampled at
+t = 4.00, carrying 100% of the effort. D-optimal criterion values across the
+three sensitivity paths of this family:
+
+    case_1.py                        (colloc+IFT)   1.2188793   <- here
+    case_1_no_ift.py                 (colloc+FD)    1.2188792
+    case_1_no_ift_no_collocation.py  (scipy+FD)     1.2188777
+
+Because the continuous design already sits on a single support point, every
+apportionment is exact: apportion() reports the rounded design as 100.00% as
+informative as the continuous one for each of 2, 3, 4, 5 and 6 runs.
+
+This model has n_mp == 1, so the criterion is a 1x1 FIM case. d_opt returns
+-log(det(FIM)) there, on the same formula the matrix case uses -- worth knowing
+if you compare against a hand-computed value.
+"""
 designer_1 = Designer()
 designer_1.simulate = simulate
 designer_1.pyomo_model_fn = build_pyomo_model  # IFT sensitivities via Pyomo

@@ -38,8 +38,9 @@ with nine figures numbered in the order below.
         * n_spt=<all listed>  -- the grid is FIXED: one schedule per candidate
                                  holding every listed time, so effort is spent
                                  per EXPERIMENT and all of them are measured.
-      (This example claimed the fixed-grid behaviour while requesting the
-      optimized one until pydex 0.6.0.)
+
+      n_spt is the ONLY control over sampling times. There is no flag that
+      switches optimisation on or off.
       -> Figures 1-3: optimal efforts, predicted responses, sensitivities
       -> apportion(2): the continuous design rounded to 2 physical runs
 
@@ -57,12 +58,11 @@ with nine figures numbered in the order below.
       -> apportion(12)
 
   Note the  designer_1.atomic_fims = None  line before round 3. It clears the
-  cached atomic FIMs so they are rebuilt for the new 2-sample layout. The
-  original comment on that line claimed an IndexError without it; that is no
-  longer reproducible -- round 3 gives the same 10.610118 either way, on both
-  the IFT and the finite-difference paths. The reset is harmless and kept as a
-  precaution when changing n_spt between rounds, but do not expect a crash if
-  you omit it.
+  cached atomic FIMs so they are rebuilt for the new 2-sample layout. It is not
+  required: round 3 returns 13.429393 bit-identically with or without it, on
+  both the IFT and the finite-difference paths. Kept as a cheap precaution when
+  changing n_spt between rounds -- the cache is keyed on the sampling-time
+  layout, so a stale entry would be a wrong answer rather than an error.
 
 
 READING THE PREDICTED-RESPONSE FIGURES
@@ -156,10 +156,10 @@ tic = designer_1.enumerate_candidates(
 designer_1.ti_controls_candidates = tic
 
 # NOTE the first sampling time. 0.001 with a 200-minute horizon normalises to
-# 5e-6, which sits a hair off the collocation node at 0 and used to produce a
-# machine-epsilon finite element that silently corrupted the solve. The model
-# file guards against it now and warns when it engages; see the PITFALL section
-# in case_2_model.py for the full story.
+# 5e-6, which sits a hair off the collocation node at 0. Embedding both would
+# create a machine-epsilon finite element and silently corrupt the solve, so the
+# model file snaps such times to the nearest node and warns when it does; see
+# the PITFALL section in case_2_model.py for the full story.
 designer_1.sampling_times_candidates = np.array([
     np.linspace(0.001, 200, 11)   # avoid t=0 with normalised time convention
     for _ in tic
@@ -210,11 +210,9 @@ designer_1.apportion(12)
 
 # ── D-optimal design (exactly 2 sampling times) ───────────────────────────────
 # Clear the cached atomic FIMs so they are rebuilt for the new n_spt=2 layout.
-# This was previously documented as necessary to avoid an IndexError from
-# reusing the (n_c*11, 4, 4) array with the (n_c*2) layout. That failure is no
-# longer reproducible on either sensitivity path -- round 3 returns the same
-# value with or without the reset -- so treat this as a cheap precaution when
-# changing n_spt between rounds rather than a requirement.
+# Not required -- round 3 returns 13.429393 with or without this line, on both
+# sensitivity paths -- but a cheap precaution when changing n_spt between
+# rounds, since a stale cache would be a wrong answer rather than an error.
 designer_1.atomic_fims = None
 designer_1.design_experiment(
     designer_1.d_opt_criterion,

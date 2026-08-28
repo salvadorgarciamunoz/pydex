@@ -13,6 +13,21 @@ is a thin wrapper around build_pyomo_model(), so pydex's finite differences
 perturb k and evaluate the full collocation solve each time.
 
 Compare with case_1.py where IFT provides exact sensitivities via PyomoNLP.
+
+SAMPLING TIMES
+--------------
+n_spt is omitted, so sampling times are OPTIMIZED: effort is allocated per
+(candidate, sampling time) cell and the optimiser chooses which of the 101
+listed times to measure. The alternatives are n_spt=k (exactly k samples per
+run) and n_spt=<number of listed times> (fixed grid, effort per experiment).
+n_spt is the only control over sampling times.
+
+MEASURED RESULT
+---------------
+D-optimal criterion 1.2188792, on candidate 5 (CA0 = 5) sampled at t = 4.00
+with 100% of the effort -- the same support and sampling time the IFT path
+selects. apportion() reports 100.00% rounding efficiency at every budget,
+since the continuous design already sits on one support point.
 """
 
 designer_1 = Designer()

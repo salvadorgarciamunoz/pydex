@@ -5,6 +5,59 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-08-27
+
+### Documentation
+
+- **Examples and documentation swept for historical references and stale
+  numbers.** Example docstrings described how behaviour differed in earlier
+  releases rather than what the code does now: "until pydex 0.6.0", "SUPERSEDED
+  IN 0.6.0 -- re-measure before quoting", "previously documented as necessary",
+  and a cross-file note calling another example's comment stale. All removed in
+  favour of present-tense statements of the current contract.
+
+- **Re-measured the `case_2_no_ift*.py` round-1 criterion values.** Their
+  docstrings recorded numbers from before 0.6.0, computed when round 1
+  requested optimized sampling times while claiming a fixed grid, so they
+  described a one-sample-per-run design rather than the eleven-sample design
+  the heading claimed. Measured on the current release, all three rounds and
+  all three sensitivity paths:
+
+  |                                     | round 1   | round 2   | round 3   |
+  |-------------------------------------|-----------|-----------|-----------|
+  | `case_2.py` (colloc+IFT)            | 19.489976 | 10.657395 | 13.429393 |
+  | `case_2_no_ift.py` (colloc+FD)      | 19.489962 | 10.657397 | 13.429394 |
+  | `case_2_no_ift_no_collocation.py`   | 19.489976 | 10.657395 | 13.429393 |
+
+  Support is candidates 21 and 25 in every round for all three paths, with
+  efforts identical to two decimal places.
+
+  **The previously documented "IFT sits ~0.6% away" gap does not exist.** It
+  was an artifact of comparing FD runs labelled round 1 -- which were in fact
+  the round-2 problem -- against genuine round-2 IFT values. The three paths
+  agree to roughly seven significant figures in every round.
+
+- **Documented the `n_spt` sampling-time contract** in `README.md`,
+  `examples/README.md` and `docs/source/examples.rst`, none of which mentioned
+  it. Each now states the three cases (omit `n_spt`, `n_spt=k`,
+  `n_spt=<number of listed times>`), that no flag switches optimisation on or
+  off, the keywords `design_experiment()` now rejects, that criterion values
+  are not comparable across `n_spt` settings, and that ragged candidate grids
+  raise at `initialize()` while `set_prior_experiments()` remains exempt.
+
+- **`case_1.py` gained a module docstring**; the other two `case_1` examples
+  gained sampling-time and measured-result sections. All three print 100.00%
+  rounding efficiency following the 0.7.0 criterion-scale fix.
+
+- **Corrected the capability-suite size in `README.md`** from 55 sections /
+  261 assertions to 60 / 301.
+
+- Added a missing section heading above the ASL-elimination entries in
+  `examples/README.md`.
+
+No engine change: `pydex/core/designer.py` is untouched and no design,
+criterion value or reference number moves as a result of this release.
+
 ## [0.7.2] - 2026-08-27
 
 ### Fixed

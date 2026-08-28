@@ -62,37 +62,38 @@ Three design rounds are performed:
 
 Expected results
 ----------------
-Measured D-optimal criterion, round 1 (FIXED sampling grid, all 11 times):
+Measured D-optimal criterion, all three variants and all three rounds:
 
-    SUPERSEDED IN 0.6.0 -- re-measure before quoting. The values below were
-    recorded when round 1 requested OPTIMIZED sampling times rather than a
-    fixed grid: effort stayed free per (condition, time) cell, so those
-    numbers describe a ONE-SAMPLE-per-run design, not the eleven-sample design
-    the heading claims. Round 1 now passes n_spt = the full grid.
+                                     round 1     round 2     round 3
+                                     (FIXED)     (1 spt)     (2 spt)
+    case_2.py           (colloc+IFT) 19.489976   10.657395   13.429393
+    case_2_no_ift.py    (colloc+FD)  19.489962   10.657397   13.429394
+    this file           (scipy+FD)   19.489976   10.657395   13.429393
 
-    For reference, case_2.py under the corrected round 1 reports 19.489976,
-    and its round 2 (free per-cell effort) reports 10.657395 -- which is
-    exactly the old round-1 figure below, confirming the two rounds were the
-    same problem.
+The three sensitivity paths agree to roughly seven significant figures in
+every round, which is the strong statement here: exact IFT derivatives and
+Richardson-extrapolated finite differences reach the same criterion, and FD
+reaches it through two completely different forward solvers (an IPOPT
+collocation solve and a scipy Radau integration).
 
-    old, mislabelled values:
-    case_2.py                        (collocation + IFT)   10.657395
-    case_2_no_ift.py                 (collocation + FD)    10.724136
-    case_2_no_ift_no_collocation.py  (scipy + FD)          10.724134   <- here
+Agreement on the DESIGN is closer still. All three variants select the same
+support -- candidates 21 and 25 -- in all three rounds, with efforts
+identical to two decimal places:
 
-The two FD paths agree to seven significant figures despite using completely
-different forward solvers, which is the strong statement: Richardson-
-extrapolated FD is reproducible across integrators.
+    round 1   42.99% / 57.01%
+    round 2   51.10% / 48.90%
+    round 3   49.20% / 50.80%
 
-IFT sits ~0.6% away, and that gap is real rather than error.  pydex's causal
-IFT rebuild solves the model once per sampling time, so tau = t and each
-measurement lands at normalised 1.0; the FD paths use a single solve with
-tau = max(spt).  Different collocation grids, different truncation error.  IFT
-is the more accurate of the two -- against a closed-form model it agrees to
-1e-07 where FD sits near 1e-03.
+Round 2 is posed differently across the three files and lands in the same
+place: this file passes n_spt=1 while case_2.py and case_2_no_ift.py omit
+n_spt. With one sample per run the two parameterisations are isomorphic --
+there are exactly as many one-point schedules as there are (candidate, time)
+cells -- so the criterion and the efforts coincide.
 
-All three select the same support (candidates 21 and 25) and, in round 3, the
-same sampling-time variants to two decimal places.
+Round 1 is the round that is NOT comparable across the n_spt cases: a fixed
+grid rescales the FIM by 1/n_spt relative to the per-measurement form, which
+shifts a log-det criterion by n_mp*ln(n_spt). Compare designs across n_spt
+settings, not criterion values.
 
 Sensitivity path
 ----------------
@@ -119,8 +120,9 @@ differing only in how much freedom the optimiser has over WHEN to sample.
         * n_spt=<all listed>  -- the grid is FIXED: one schedule per candidate
                                  holding every listed time, so effort is spent
                                  per EXPERIMENT and all of them are measured.
-      (This example claimed the fixed-grid behaviour while requesting the
-      optimized one until pydex 0.6.0.)
+
+      n_spt is the ONLY control over sampling times. There is no flag that
+      switches optimisation on or off.
       -> Figure 1: optimal efforts
       -> apportion(2)
 
@@ -129,25 +131,25 @@ differing only in how much freedom the optimiser has over WHEN to sample.
       does NOT constrain a candidate to a single sampling time: the same
       (CA0, T) condition may be run several times over, each run sampled at a
       different instant. Those alternatives appear as separate sampling
-      schedules under one candidate. A typical result here is
+      schedules under one candidate. The measured result is
 
-          [Candidate 21]  (CA0 = 5, T = 273.15)
-            Schedule 1 ~ [ 60.00]:   9.72% of experiments
-            Schedule 2 ~ [ 80.00]:  14.65% of experiments
-            Schedule 3 ~ [200.00]:  25.50% of experiments
-          [Candidate 25]  (CA0 = 5, T = 323.15)
-            Schedule 1 ~ [ 60.00]:  26.40% of experiments
-            Schedule 2 ~ [160.00]:  23.73% of experiments
+          [Candidate 21]  (CA0 = 5, T = 273.15)   51.10% total
+            Schedule 1 ~ [ 60.00]:  15.45% of experiments
+            Schedule 2 ~ [ 80.00]:   8.70% of experiments
+            Schedule 3 ~ [200.00]:  26.94% of experiments
+          [Candidate 25]  (CA0 = 5, T = 323.15)   48.90% total
+            Schedule 1 ~ [ 60.00]:  26.34% of experiments
+            Schedule 2 ~ [160.00]:  22.56% of experiments
 
       i.e. five single-sample experiments in total, three of them at the same
       conditions but at different times. apportion(12) then rounds those shares
-      to whole runs while tracking the proportions -- 9.72/14.65/25.50 becomes
-      1/6, 2/6, 3/6 for candidate 21 -- so uneven efforts are preserved rather
+      to whole runs while tracking the proportions -- 15.45/8.70/26.94 becomes
+      2/6, 1/6, 3/6 for candidate 21 -- so uneven efforts are preserved rather
       than flattened.
 
-      (case_2.py and case_2_no_ift.py leave n_spt unset in their round 2, which
-      behaves identically: both also return three schedules for candidate 21 and
-      two for candidate 25.)
+      (case_2.py and case_2_no_ift.py omit n_spt in their round 2 and land on
+      the same design; see "Expected results" above for why the two
+      parameterisations coincide at one sample per run.)
       -> Figure 2: optimal efforts
       -> apportion(12)
 
@@ -186,22 +188,12 @@ carry different information. Read the times off the marker positions; exact
 values are in the printed report.
 
 
-MEASURED RESULTS, ALL THREE VARIANTS
-------------------------------------
-Round 1 D-optimal criterion:
-
-    case_2.py                        (collocation + IFT)   10.657395
-    case_2_no_ift.py                 (collocation + FD)    10.724136
-    case_2_no_ift_no_collocation.py  (scipy + FD)          10.724134   <- here
-
-The two FD paths agree to seven significant figures despite completely
-different forward solvers, which is the strong statement here: Richardson-
-extrapolated FD is reproducible across integrators. IFT sits ~0.6% away and
-that gap is discretisation, not error -- see the note in case_2_no_ift.py.
-
-All three select the same support (candidates 21 and 25) and, in round 3, the
-same sampling schedules to two decimal places. This variant runs the fastest
-and is the only one that emits no infeasible-solve warnings at all.
+RUNTIME AND ROBUSTNESS
+----------------------
+This variant is the fastest of the three and the only one that emits no
+infeasible-solve warnings at all: sensitivity analysis takes about 54 CPU
+seconds here, and each of the three optimisations well under a second.
+Criterion and design values are tabulated under "Expected results" above.
 
 """
 

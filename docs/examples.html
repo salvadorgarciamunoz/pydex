@@ -6,14 +6,14 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Examples &mdash; pydex 0.7.2 documentation</title>
+  <title>Examples &mdash; pydex 0.7.3 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
 
   
       <script src="_static/jquery.js?v=5d32c60e"></script>
       <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="_static/documentation_options.js?v=6dfdf7c3"></script>
+      <script src="_static/documentation_options.js?v=c98573da"></script>
       <script src="_static/doctools.js?v=9bcbadda"></script>
       <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="_static/js/theme.js"></script>
@@ -47,6 +47,7 @@
 <li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Examples</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#naming-scheme">Naming scheme</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#sampling-times-n-spt-is-the-only-control">Sampling times — <code class="docutils literal notranslate"><span class="pre">n_spt</span></code> is the only control</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#ode-examples">ODE examples</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#case-1-first-order-reaction-one-parameter">Case 1 — first-order reaction, one parameter</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#case-2-ab-with-arrhenius-kinetics-four-parameters">Case 2 — A→B with Arrhenius kinetics, four parameters</a></li>
@@ -141,6 +142,65 @@ The three paths should agree on the design, and the capability suite asserts
 this: section 52 compares nine criteria across both paths and requires
 agreement within 5%, typically achieving about 0.01%.</p>
 </section>
+<section id="sampling-times-n-spt-is-the-only-control">
+<h2>Sampling times — <code class="docutils literal notranslate"><span class="pre">n_spt</span></code> is the only control<a class="headerlink" href="#sampling-times-n-spt-is-the-only-control" title="Link to this heading"></a></h2>
+<p>Every dynamic example makes a choice here, so it is worth reading once. A
+design spends a fixed budget of effort; <code class="docutils literal notranslate"><span class="pre">n_spt</span></code> decides what one unit of that
+effort buys.</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 38.0%" />
+<col style="width: 30.0%" />
+<col style="width: 32.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>what you want</p></th>
+<th class="head"><p>how to ask</p></th>
+<th class="head"><p>effort allocated per</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>choose the conditions <strong>and</strong> which times to measure</p></td>
+<td><p>omit <code class="docutils literal notranslate"><span class="pre">n_spt</span></code> (the default)</p></td>
+<td><p>measurement: one (candidate, time) cell</p></td>
+</tr>
+<tr class="row-odd"><td><p>exactly <code class="docutils literal notranslate"><span class="pre">k</span></code> samples per run, optimiser picks which <code class="docutils literal notranslate"><span class="pre">k</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">n_spt=k</span></code></p></td>
+<td><p>run of <code class="docutils literal notranslate"><span class="pre">k</span></code> samples: one (candidate, schedule)</p></td>
+</tr>
+<tr class="row-even"><td><p>measure every listed time on every run</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">n_spt=&lt;number</span> <span class="pre">of</span> <span class="pre">listed</span> <span class="pre">times&gt;</span></code></p></td>
+<td><p>one whole experiment</p></td>
+</tr>
+</tbody>
+</table>
+<p>The first and third are genuinely different design problems. With sampling
+times optimised an uninformative time costs nothing, because it receives zero
+effort; on a fixed grid you pay for it regardless.</p>
+<p>There is <strong>no flag</strong> that switches sampling-time optimisation on or off.
+<code class="docutils literal notranslate"><span class="pre">optimize_sampling_times</span></code> and <code class="docutils literal notranslate"><span class="pre">fixed_sampling_grid</span></code> no longer exist and
+raise if passed, as does any other unrecognised keyword to
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.design_experiment" title="pydex.core.designer.Designer.design_experiment"><code class="xref py py-meth docutils literal notranslate"><span class="pre">design_experiment()</span></code></a> — including
+<code class="docutils literal notranslate"><span class="pre">verbose</span></code>, which has never been a parameter of that method.
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.initialize" title="pydex.core.designer.Designer.initialize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">initialize()</span></code></a> does take <code class="docutils literal notranslate"><span class="pre">verbose</span></code>.</p>
+<p>Two consequences worth knowing before comparing runs:</p>
+<ul class="simple">
+<li><p><strong>Criterion values are not comparable across</strong> <code class="docutils literal notranslate"><span class="pre">n_spt</span></code> <strong>settings.</strong> A
+fixed grid rescales the FIM by <code class="docutils literal notranslate"><span class="pre">1/n_spt</span></code>, shifting a log-det criterion by
+exactly <code class="docutils literal notranslate"><span class="pre">n_mp*ln(n_spt)</span></code>. Compare designs, not criterion values. The same
+trap applies to rescaling <code class="docutils literal notranslate"><span class="pre">error_cov</span></code>.</p></li>
+<li><p><strong>Candidate sampling grids must be common to every candidate.</strong> A ragged
+grid raises at <a class="reference internal" href="api.html#pydex.core.designer.Designer.initialize" title="pydex.core.designer.Designer.initialize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">initialize()</span></code></a>. Use a union
+grid with sampling times optimised, since an uninformative time receives
+zero effort. Prior experiments are exempt:
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.set_prior_experiments" title="pydex.core.designer.Designer.set_prior_experiments"><code class="xref py py-meth docutils literal notranslate"><span class="pre">set_prior_experiments()</span></code></a> accepts ragged
+NaN-padded schedules, because experiments already run have whatever
+schedules they had.</p></li>
+</ul>
+<p>The report states which case is in force rather than printing a boolean, for
+example <code class="docutils literal notranslate"><span class="pre">FIXED</span> <span class="pre">--</span> <span class="pre">all</span> <span class="pre">11</span> <span class="pre">listed</span> <span class="pre">time(s)</span> <span class="pre">measured</span> <span class="pre">on</span> <span class="pre">every</span> <span class="pre">run;</span> <span class="pre">effort</span>
+<span class="pre">allocated</span> <span class="pre">per</span> <span class="pre">experiment</span></code>.</p>
+</section>
 <section id="ode-examples">
 <h2>ODE examples<a class="headerlink" href="#ode-examples" title="Link to this heading"></a></h2>
 <section id="case-1-first-order-reaction-one-parameter">
@@ -172,13 +232,15 @@ for Ds.</p></li>
 </ul>
 <div class="admonition warning">
 <p class="admonition-title">Warning</p>
-<p>The collocation grid in this family previously admitted a sampling time a
-hair off an existing collocation node, producing a machine-epsilon finite
-element. IPOPT reported “Optimal Solution Found” while returning
-<code class="docutils literal notranslate"><span class="pre">CA</span> <span class="pre">=</span> <span class="pre">31</span> <span class="pre">mol/L</span></code> from <code class="docutils literal notranslate"><span class="pre">CA0</span> <span class="pre">=</span> <span class="pre">5</span></code>. If you adapt this example and see a
-physically impossible result reported as optimal, check that every sampling
-time lands exactly on a collocation node — refining <code class="docutils literal notranslate"><span class="pre">nfe</span></code> will not help,
-because this is a formulation problem rather than truncation error.</p>
+<p>The collocation grid in this family is sensitive to a sampling time that
+sits a hair off an existing collocation node: embedding one produces a
+machine-epsilon finite element, and IPOPT then reports “Optimal Solution
+Found” while returning <code class="docutils literal notranslate"><span class="pre">CA</span> <span class="pre">=</span> <span class="pre">31</span> <span class="pre">mol/L</span></code> from <code class="docutils literal notranslate"><span class="pre">CA0</span> <span class="pre">=</span> <span class="pre">5</span></code>. The model files
+snap such times to the nearest node and warn when they do. If you adapt
+this example and see a physically impossible result reported as optimal,
+check that every sampling time lands exactly on a collocation node —
+refining <code class="docutils literal notranslate"><span class="pre">nfe</span></code> will not help, because this is a formulation problem
+rather than truncation error.</p>
 </div>
 </section>
 <section id="case-3-michaelis-menten-style-network-nine-parameters">

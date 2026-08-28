@@ -29,6 +29,44 @@ effect of the sensitivity method alone — same model, same grid, same
 criterion. The three paths should agree on the design; the capability suite
 asserts this (see §24 and §28).
 
+## Sampling times — `n_spt` is the only control
+
+Every dynamic example makes a choice here, so it is worth reading once. A
+design spends a fixed budget of effort; `n_spt` decides what one unit of that
+effort buys.
+
+| what you want | how to ask | effort allocated per |
+|---|---|---|
+| choose the conditions **and** which times to measure | omit `n_spt` (the default) | measurement: one (candidate, time) cell |
+| exactly `k` samples per run, optimiser picks which `k` | `n_spt=k` | run of `k` samples: one (candidate, schedule) |
+| measure every listed time on every run | `n_spt=<number of listed times>` | one whole experiment |
+
+The first and third are genuinely different design problems. With sampling
+times optimised, an uninformative time costs nothing because it receives zero
+effort; on a fixed grid you pay for it regardless.
+
+There is **no flag** that switches sampling-time optimisation on or off.
+`optimize_sampling_times` and `fixed_sampling_grid` no longer exist and raise
+if passed, as does any other unrecognised keyword to `design_experiment()` —
+including `verbose`, which has never been a parameter of that method
+(`initialize(verbose=...)` is a different method and is fine).
+
+Two consequences worth knowing before comparing runs:
+
+- **Criterion values are not comparable across `n_spt` settings.** A fixed
+  grid rescales the FIM by `1/n_spt`, which shifts a log-det criterion by
+  exactly `n_mp*ln(n_spt)`. Compare designs, not criterion values. The same
+  trap applies to changing `error_cov` scaling.
+- **Candidate sampling grids must be common to every candidate.** A ragged
+  grid raises at `initialize()`. Use a union grid with sampling times
+  optimised — an uninformative time receives zero effort. (Prior experiments
+  are exempt: `set_prior_experiments()` accepts ragged NaN-padded schedules,
+  since experiments already run have whatever schedules they had.)
+
+The report states which case is in force rather than printing a boolean, e.g.
+`FIXED -- all 11 listed time(s) measured on every run; effort allocated per
+experiment`.
+
 ## ODE examples — `examples/ode/`
 
 ### Case 1 — first-order reaction, one parameter
@@ -55,13 +93,14 @@ Four parameters `[θ₀, θ₁, α, ν]`, two controls `[CA0, T]`, two responses
   model's FIM is healthy: it shows designing for a *subset* of parameters
   while marginalising the rest, which is the usual reason to reach for Ds.
 
-> **Note.** The collocation grid in this family previously admitted a
-> sampling time a hair off an existing collocation node, producing a
-> machine-epsilon finite element. IPOPT reported "Optimal Solution Found"
-> while returning `CA = 31 mol/L` from `CA0 = 5`. If you adapt this example
-> and see a physically impossible result reported as optimal, check that
-> every sampling time lands exactly on a collocation node — refining `nfe`
-> will not help.
+> **Note.** The collocation grid in this family is sensitive to sampling
+> times that sit a hair off an existing collocation node: embedding one
+> produces a machine-epsilon finite element, and IPOPT then reports "Optimal
+> Solution Found" while returning `CA = 31 mol/L` from `CA0 = 5`. The model
+> files snap such times to the nearest node and warn when they do. If you
+> adapt this example and see a physically impossible result reported as
+> optimal, check that every sampling time lands exactly on a collocation
+> node — refining `nfe` will not help.
 
 ### Case 3 — Michaelis–Menten-style network, nine parameters
 
@@ -260,6 +299,8 @@ MINLP. Its record on these instances is perfect — four independent
 brute-force cross-checks agreeing exactly — but that is empirical evidence
 for these problems, not a proof.
 
+
+## ASL elimination — `examples/ASL Elimination/`
 
 - `asl_elimination_demo.py` — demonstrates the diagnostic in
   `pydex.utils.diagnose_asl_elimination`, which checks that every parameter

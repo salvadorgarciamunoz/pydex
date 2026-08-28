@@ -549,8 +549,8 @@ designer.design_experiment(
     # n_spt = the number of listed times gives ONE schedule per candidate
     # containing every time, so effort is allocated per EXPERIMENT and all 11
     # points really are measured on every run -- which is what the banner
-    # above claims. Until pydex 0.6.0 this example requested optimized
-    # sampling times instead, so the design actually used ONE time per run.
+    # above claims. Omitting n_spt would instead optimise the sampling times,
+    # spending effort per (candidate, time) cell.  n_spt is the only control.
     n_spt=designer.n_spt,
     solver="ipopt",
     solver_options={"linear_solver": "ma57"},

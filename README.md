@@ -53,7 +53,7 @@ by Kennedy Putra Kusumo et al., originally described in:
   rank-deficient FIM by default and names the parameters responsible,
   rather than returning a plausible number from a floored Cholesky
   factor. Override with `allow_singular_fim=True`; Ds-optimality is exempt
-- **Comprehensive test suite**: 55 sections / 261 assertions covering all
+- **Comprehensive test suite**: 60 sections / 301 assertions covering all
   design criteria, both sensitivity paths (FD and IFT), parallel
   correctness, prior FIM, save/load, visualisation, and more
 - **Per-parameter finite-difference step**: the FD step is sized from each
@@ -196,6 +196,50 @@ instead of a single vector, and pass `pseudo_bayesian_type=0` (average
 information, cheaper, native Pyomo solve) or `=1` (average criterion, more
 faithful for non-linear criteria, falls back to SLSQP) to
 `design_experiment()`. Applies to D, Ds, A, and E.
+
+---
+
+## Sampling Times — `n_spt` is the only control
+
+For a dynamic model, `n_spt` decides what one unit of the effort budget buys.
+There is no flag that switches sampling-time optimisation on or off.
+
+| What you want | How to ask | Effort allocated per |
+|---|---|---|
+| Choose conditions **and** which times to measure | omit `n_spt` (default) | measurement: one (candidate, time) cell |
+| Exactly `k` samples per run, optimiser chooses which `k` | `n_spt=k` | run of `k` samples: one (candidate, schedule) |
+| Measure every listed time on every run | `n_spt=<number of listed times>` | one whole experiment |
+
+```python
+designer.design_experiment(designer.d_opt_criterion, solver="ipopt")
+# optimised: the design picks which of the listed times to measure
+
+designer.design_experiment(designer.d_opt_criterion, n_spt=2, solver="ipopt")
+# exactly two samples per run; the optimiser picks the best pair
+
+designer.design_experiment(designer.d_opt_criterion, n_spt=designer.n_spt,
+                           solver="ipopt")
+# fixed grid: every listed time measured on every run
+```
+
+The first and third are different design problems. With sampling times
+optimised an uninformative time costs nothing, since it receives zero effort;
+on a fixed grid you pay for it regardless.
+
+- **Criterion values are not comparable across `n_spt` settings.** A fixed
+  grid rescales the FIM by `1/n_spt`, shifting a log-det criterion by exactly
+  `n_mp*ln(n_spt)`. Compare designs, not criterion values.
+- **Unknown keywords to `design_experiment()` raise.** Rejected by name:
+  `optimize_sampling_times`, `fixed_sampling_grid`, `package`, `optimizer`.
+  Note `design_experiment()` has never had a `verbose` parameter, though
+  `initialize(verbose=...)` does.
+- **Candidate sampling grids must be common to every candidate**; a ragged
+  grid raises at `initialize()`. Prior experiments are exempt —
+  `set_prior_experiments()` accepts ragged NaN-padded schedules.
+
+The report states the case in force rather than printing a boolean, e.g.
+`FIXED -- all 11 listed time(s) measured on every run; effort allocated per
+experiment`.
 
 ---
 
@@ -506,7 +550,7 @@ name, the A-optimality singular-FIM fix, Ds succeeding where D-optimal
 cannot, and the `regularize_fim` path.
 
 - **`pydex_full_capability_test.py`** — the comprehensive capability
-  suite: 55 sections and 261 assertions built on the three-reaction batch model
+  suite: 60 sections and 301 assertions built on the three-reaction batch model
   (A→B desired, A→I impurity, A→D decomposition), run in sequence and
   gated by a single pass/fail check. Coverage includes: setup and
   initialisation; candidate-grid helpers; sensitivity analysis,

@@ -20,6 +20,22 @@ any IFT computation is attempted.
 
 The optimal design should match case_1_no_ift.py — same FD path,
 same model, different solver backend (Simulator vs collocation+IPOPT).
+
+SAMPLING TIMES
+--------------
+n_spt is omitted, so sampling times are OPTIMIZED: effort is allocated per
+(candidate, sampling time) cell and the optimiser chooses which of the 101
+listed times to measure. The alternatives are n_spt=k (exactly k samples per
+run) and n_spt=<number of listed times> (fixed grid, effort per experiment).
+n_spt is the only control over sampling times.
+
+MEASURED RESULT
+---------------
+D-optimal criterion 1.2188777, on candidate 5 (CA0 = 5) sampled at t = 4.00
+with 100% of the effort -- the same design the other two paths select, as
+intended. apportion() reports 100.00% rounding efficiency at each of the five
+budgets it is called with: the continuous design already sits on a single
+support point, so rounding it loses nothing.
 """
 
 designer_1 = Designer()

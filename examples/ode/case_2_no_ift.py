@@ -68,8 +68,9 @@ ends with nine figures numbered in the order below.
         * n_spt=<all listed>  -- the grid is FIXED: one schedule per candidate
                                  holding every listed time, so effort is spent
                                  per EXPERIMENT and all of them are measured.
-      (This example claimed the fixed-grid behaviour while requesting the
-      optimized one until pydex 0.6.0.)
+
+      n_spt is the ONLY control over sampling times. There is no flag that
+      switches optimisation on or off.
       -> Figures 1-3: optimal efforts, predicted responses, sensitivities
       -> apportion(2)
 
@@ -85,9 +86,9 @@ ends with nine figures numbered in the order below.
       -> Figures 7-9
       -> apportion(12)
 
-Unlike case_2.py this script does not clear designer_1.atomic_fims before
-round 3. It does not need to -- round 3 returns 10.671126 with or without the
-reset -- and neither does case_2.py, whose comment to the contrary is stale.
+This script does not clear designer_1.atomic_fims between rounds and does not
+need to: round 3 returns 13.429394 with or without the reset. The cache is
+keyed on the sampling-time layout and rebuilt when n_spt changes.
 
 
 READING THE PREDICTED-RESPONSE FIGURES
@@ -106,17 +107,23 @@ the times off the marker positions; exact values are in the printed report.
 
 HOW THIS COMPARES WITH THE OTHER TWO VARIANTS
 ---------------------------------------------
-Round 1 D-optimal criterion, all three sensitivity paths:
+D-optimal criterion, all three sensitivity paths, all three rounds:
 
-    case_2.py                        (collocation + IFT)   10.657395
-    case_2_no_ift.py                 (collocation + FD)    10.724136   <- here
-    case_2_no_ift_no_collocation.py  (scipy + FD)          10.724134
+                                     round 1     round 2     round 3
+                                     (FIXED)     (1 spt)     (2 spt)
+    case_2.py           (colloc+IFT) 19.489976   10.657395   13.429393
+    this file           (colloc+FD)  19.489962   10.657397   13.429394
+    case_2_no_ift_no_..  (scipy+FD)  19.489976   10.657395   13.429393
 
-The two FD paths agree to seven significant figures despite using different
-forward solvers. IFT sits ~0.6% away, and that gap is discretisation rather
-than error: pydex's causal IFT rebuild solves the model once per sampling time
-(tau = t) while the FD paths use one solve with tau = max(spt). IFT is the more
-accurate of the two against a closed-form reference.
+The three paths agree to roughly seven significant figures in every round, and
+the designs agree more closely still: the same support (candidates 21 and 25)
+in every round, with efforts identical to two decimal places (42.99/57.01 in
+round 1, 51.10/48.90 in round 2, 49.20/50.80 in round 3).
+
+Criterion values are comparable ACROSS sensitivity paths, as above, but not
+across n_spt cases: a fixed grid rescales the FIM by 1/n_spt, shifting a
+log-det criterion by n_mp*ln(n_spt). Compare designs, not criterion values,
+when you change n_spt.
 
 This variant is the slowest of the three -- it solves a ~285-variable NLP for
 every finite-difference perturbation -- and it will emit "Converged to a locally
@@ -151,10 +158,10 @@ tic = designer_1.enumerate_candidates(
 designer_1.ti_controls_candidates = tic
 
 # NOTE the first sampling time. 0.001 with a 200-minute horizon normalises to
-# 5e-6, which sits a hair off the collocation node at 0 and used to produce a
-# machine-epsilon finite element that silently corrupted the solve. The model
-# file guards against it now and warns when it engages; see the PITFALL section
-# in case_2_no_ift_model.py for the full story.
+# 5e-6, which sits a hair off the collocation node at 0. Embedding both would
+# create a machine-epsilon finite element and silently corrupt the solve, so the
+# model file snaps such times to the nearest node and warns when it does; see
+# the PITFALL section in case_2_no_ift_model.py for the full story.
 designer_1.sampling_times_candidates = np.array([
     np.linspace(0.001, 200, 11)
     for _ in tic
