@@ -41,6 +41,67 @@ def dens_dry_air_kg_m3(T_K):
     return dda
 # Ideal gas Law
 
+def dewpoint_for_inlet_RH(T_in_C, RH_in_pct, P_Pa=101325):
+    """Dew point (degC) giving `RH_in_pct` relative humidity at `T_in_C`.
+
+    The inlet air state can be specified two ways and they are NOT equivalent:
+
+      * a fixed DEW POINT -- absolute humidity is constant, so relative
+        humidity falls as the inlet is heated;
+      * a fixed RELATIVE humidity -- absolute humidity rises steeply with
+        inlet temperature, because saturation pressure does.
+
+    Chen et al. (2018) use the second form (`Rel_Humid_in = 15` in
+    bilevel.dat.gms). Use this helper to reproduce their inlet state.
+    """
+    from scipy.optimize import brentq
+    target = (RH_in_pct / 100.0) * psat_Pa(T_in_C + 273.15)
+    return brentq(lambda td: psat_Pa(td + 273.15) - target, -60.0, T_in_C)
+
+
+def saturation_operating_limit(T_in_C, Fair_in_CFM, SolnFR_in_gpm,
+                               x_w=0.8, RH_in_pct=15.0, approach=0.6,
+                               P_amb_bar=1.01325, T_out_C=None, **kwargs):
+    """Chen et al.'s operating feasibility test, in the paper's own algebra.
+
+    The paper does not merely require the exhaust to be physically possible
+    (RH <= 100%). It requires the water ADDED by the coating solution to be at
+    most `approach` of the water the inlet air could still absorb:
+
+        Saturation_op_lim ..  m_w_out =l= m_w_out_max
+        m_w_out_max = (Pvap_out/P_amb * m_air_in * 18.02/29 - m_w_in)*0.6 + m_w_in
+
+    That is an OPERATING limit with a 40% margin, not a physical one: a coater
+    run at saturation does not dry tablets. Transcribed from bilevel.eqn.gms
+    (m_air_in_Defn, m_w_in_Defn, m_w_out_Defn, m_w_out_max_Defn,
+    Saturation_op_lim) so the feasible region matches the paper's.
+
+    Returns m_w_out / m_w_out_max; feasible when <= 1.0.
+    """
+    if T_out_C is None:
+        T_dp = dewpoint_for_inlet_RH(T_in_C, RH_in_pct)
+        T_out_C, _, _, _ = pred_exhaust(
+            T_dp_in_C=T_dp, T_in_C=T_in_C, Fair_in_CFM=Fair_in_CFM,
+            SolnFR_in_gpm=SolnFR_in_gpm,
+            Solids_in_soln_pcnt=100.0 * (1.0 - x_w),
+            HLF=0.0, **kwargs)
+
+    # m_air_in in g/min, exactly as m_air_in_Defn (am Ende 2005)
+    m_air_in = Fair_in_CFM * (273.0 / (273.0 + T_in_C)) * (28.3 * 29.0 / 22.4)
+
+    Pvap_in = psat_Pa(T_in_C + 273.15) / 1e5          # bar
+    Pvap_out = psat_Pa(T_out_C + 273.15) / 1e5        # bar
+
+    m_w_in = m_air_in * (RH_in_pct * Pvap_in / (100.0 * P_amb_bar)) * (18.02 / 29.0)
+    m_w_out = m_w_in + x_w * SolnFR_in_gpm            # g/min of water
+    m_w_sat = Pvap_out / P_amb_bar * m_air_in * (18.02 / 29.0)
+    m_w_out_max = (m_w_sat - m_w_in) * approach + m_w_in
+
+    if m_w_out_max <= 0:
+        return np.inf
+    return m_w_out / m_w_out_max
+
+
 def pred_exhaust(*,T_dp_in_C= 11.2,T_in_C= 60,Fair_in_CFM= 1700,
                  SolnFR_in_gpm= 450 ,Solids_in_soln_pcnt= 12,T_room_C= 20,HLF= 5.63078536 *.75,P_Pa= 101325):
     '''
@@ -346,3 +407,50 @@ def calc_rh_ex(*,T_exh_C=39.21,T_dp_in_C= 11.2,T_in_C= 60,Fair_in_CFM= 1700,
 
     Y_abs_humidity_out  = 0.622*vap_press_out/(P_Pa-vap_press_out) #kg water / kg dry air
     return RH_exh,pct_used_drying_capacity,Y_abs_humidity_out
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Validation against Chen, Paulavicius, Adjiman & Garcia-Munoz (2018),
+# AIChE J. 64:3944-3957, Table 3 (the five-experiment compromise design).
+#
+# Run this file directly to check the model still reproduces the paper.
+# ─────────────────────────────────────────────────────────────────────────────
+PAPER_TABLE_3 = [
+    # T_in [C], M_coat [g/min], Q_air [ft3/min], T_out [C], %RH_out
+    (20.0, 10.5, 150.0, 16.3, 33.7),
+    (20.0, 10.0, 450.0, 18.8, 20.1),
+    (23.7, 80.0, 450.0, 14.2, 71.0),
+    (85.0, 10.0, 450.0, 83.4, 16.2),
+    (85.0, 80.0, 157.6, 50.2, 87.4),
+]
+
+
+def validate_against_paper(verbose=True):
+    """Compare this model with the paper's Table 3 under the paper's own
+    assumptions: 15% inlet RH at the inlet temperature, x_w = 0.8, HLF = 0.
+
+    Returns (max_T_error_C, max_RH_error_pct).
+    """
+    dT, dRH = [], []
+    if verbose:
+        print(f"{'T_in':>6}{'M':>7}{'Q':>7} | {'T_out':>15} | {'%RH_out':>15}")
+        print(f"{'':>20} | {'paper':>7}{'model':>8} | {'paper':>7}{'model':>8}")
+    for T_in, M, Q, T_p, RH_p in PAPER_TABLE_3:
+        T_dp = dewpoint_for_inlet_RH(T_in, 15.0)
+        T_m, RH_m, _, _ = pred_exhaust(
+            T_dp_in_C=T_dp, T_in_C=T_in, Fair_in_CFM=Q, SolnFR_in_gpm=M,
+            Solids_in_soln_pcnt=20.0, HLF=0.0)
+        dT.append(abs(T_m - T_p))
+        dRH.append(abs(RH_m - RH_p))
+        if verbose:
+            print(f"{T_in:6.1f}{M:7.1f}{Q:7.1f} | {T_p:7.1f}{T_m:8.1f} | "
+                  f"{RH_p:7.1f}{RH_m:8.1f}")
+    if verbose:
+        print(f"\n  max |dT| = {max(dT):.1f} C     max |dRH| = {max(dRH):.1f} %")
+        print("  Residuals come from the latent-heat and heat-capacity models:")
+        print("  the paper uses constant Hvap = 540 cal/g and Cp values in")
+        print("  imperial units; this model uses a temperature-dependent Hvap.")
+    return max(dT), max(dRH)
+
+
+if __name__ == "__main__":
+    validate_against_paper()

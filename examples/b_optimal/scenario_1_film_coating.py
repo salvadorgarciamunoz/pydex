@@ -44,7 +44,8 @@ _script_dir = os.path.dirname(os.path.abspath(__file__))
 if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
-from film_coating_model import pred_exhaust
+from film_coating_model import (pred_exhaust, dewpoint_for_inlet_RH,
+                                saturation_operating_limit)
 from pydex.core.designer import Designer
 
 # Figures are written to the WORKING directory, so the destination is the
@@ -53,11 +54,27 @@ from pydex.core.designer import Designer
 OUT_DIR = "."
 
 
+# Inlet and solution assumptions taken from Chen et al. (2018), bilevel.dat.gms:
+#   Rel_Humid_in = 15   (relative humidity AT the inlet temperature, not a
+#                        fixed dew point -- absolute humidity therefore rises
+#                        steeply as the inlet is heated)
+#   x_w          = 0.8  (water fraction of the coating solution -> 20% solids)
+#   HLF          = 0    (no heat loss)
+# With these, this model reproduces the paper's Table 3 to about 1 degC and a
+# few % RH; see the validation block at the foot of film_coating_model.py.
+PAPER_RH_IN_PCT = 15.0
+PAPER_SOLIDS_PCT = 20.0
+PAPER_HLF = 0.0
+
+
 def simulate(ti_controls, model_parameters):
     """designer.simulate() contract. model_parameters is unused -- the
     coater is a fixed deterministic model, not something being fitted."""
     T_in, M_coat, Q_air = ti_controls
-    T_exh, RH_exh, _, _ = pred_exhaust(T_in_C=T_in, Fair_in_CFM=Q_air, SolnFR_in_gpm=M_coat)
+    T_dp = dewpoint_for_inlet_RH(T_in, PAPER_RH_IN_PCT)
+    T_exh, RH_exh, _, _ = pred_exhaust(
+        T_dp_in_C=T_dp, T_in_C=T_in, Fair_in_CFM=Q_air, SolnFR_in_gpm=M_coat,
+        Solids_in_soln_pcnt=PAPER_SOLIDS_PCT, HLF=PAPER_HLF)
     return np.array([T_exh, RH_exh])
 
 
@@ -70,8 +87,16 @@ def build_candidate_grid(n_cand, seed):
     M_coat = rng.uniform(10, 80, n_cand)
     Q_air = rng.uniform(150, 450, n_cand)
     TIC = np.column_stack([T_in, M_coat, Q_air])
-    feas = np.array([pred_exhaust(T_in_C=r[0], Fair_in_CFM=r[2], SolnFR_in_gpm=r[1])[1] <= 100.0
-                      for r in TIC])
+    # The paper's Saturation_op_lim, not merely RH <= 100. It keeps the water
+    # added by the solution to 60% of what the inlet air could still absorb --
+    # an OPERATING limit, since a coater run at saturation does not dry
+    # tablets. Filtering on RH <= 100 alone admits conditions the paper
+    # excludes and gives a visibly different feasible output region.
+    feas = np.array([
+        saturation_operating_limit(r[0], r[2], r[1],
+                                   x_w=1.0 - PAPER_SOLIDS_PCT / 100.0,
+                                   RH_in_pct=PAPER_RH_IN_PCT) <= 1.0
+        for r in TIC])
     return TIC[feas]
 
 
