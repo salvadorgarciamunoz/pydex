@@ -166,7 +166,7 @@ print("=" * 70)
 
 weights = np.round(np.arange(0.0, 1.0001, 0.2), 2)   # coarser: 6 points instead of 11
 fig, ax = plt.subplots(figsize=(7, 5.5))
-for n_exp in [6, 8]:   # dropped n_exp=7 given per-solve cost at this candidate-pool size
+for n_exp in [6, 7, 8]:
     fin_max_n, _ = true_fin_fout(TIC, Y, design_b_opt(d, n_exp, 0.0))
     idx_out_only_n = design_b_opt(d, n_exp, 1.0)
     vol_max_n = convex_hull_volume_3d(Y[idx_out_only_n])
