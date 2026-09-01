@@ -5,6 +5,100 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.5] - 2026-09-01
+
+### Added
+
+- **`run_estimability()` returns the figures it draws.** The result dict gains
+  a `figures` key: the list of figures when `plot=True`, and `None` when it is
+  False. Four figures when `error_cov` was supplied (abs info, E, E-UD,
+  correlation) and three otherwise.
+
+  `_plot_estimability()` already returned its figures and the caller discarded
+  them. Interactively that cost nothing — the figures are created and left
+  open, so `show_plots()` finds them in pyplot's registry — but under a
+  non-interactive backend a caller who wanted to save them had no handle and
+  had to diff `plt.get_fignums()` around the call. Every other plotter on
+  `Designer` returns its figures and the capability suite relies on it, so this
+  one method was breaking an existing convention.
+
+  Additive: a new key on an existing dict cannot affect any current caller.
+  `plot=False` gives `None` rather than an empty list, so "plotting was not
+  attempted" stays distinguishable from "plotting produced nothing".
+
+### Removed
+
+- **`Designer._get_apportioned_candidates()`**, 31 lines, unreferenced
+  anywhere in `pydex/`, `tests/`, `testing_scripts/` or `examples/`.
+
+  It was introduced on 2022-07-25 for an emcee-based in-silico Bayesian
+  inference feature that no longer exists in this fork — `emcee` has no
+  references left in the repository. It had also never worked on a dynamic
+  design: its `int(app)` raised `TypeError` on anything but a scalar
+  apportionment, which 0.7.0 corrected purely to keep dead code correct rather
+  than leave a landmine. That correction is the tax being removed here: every
+  change to the apportionment representation obliged an update to a method with
+  no caller.
+
+  Private, so no supported API changes. `apportionments` remains public, and
+  `get_optimal_candidates_table()` answers the "what do I actually run"
+  question in a better form.
+
+### Fixed
+
+- **The published documentation could report a stale version.**
+  `docs/source/conf.py` read the version from the *installed* package metadata,
+  which `pip install -e .` writes once at install time and never refreshes. The
+  code stays live through the editable install's meta-path finder; the version
+  does not. Bumping `pyproject.toml` and rebuilding docs therefore embedded the
+  old number — which is how the published site reported 0.2.1 across the 0.3.0,
+  0.4.0 and 0.4.1 releases.
+
+  `conf.py` now reads the version from `pyproject.toml`, the file that declares
+  it, falling back to installed metadata only when `pyproject.toml` is absent
+  (a docs build from an unpacked sdist). Both the `tomllib` path and the
+  regex fallback for Python 3.9/3.10 were verified against a deliberate
+  divergence between the two sources.
+
+  This removes the failure mode rather than guarding it: the documented
+  `pip install -e . --no-deps` step before building docs is no longer
+  load-bearing for the version.
+
+- **`examples/b_optimal/scenario_2_cstr.py` silently dropped `n_exp=7`.** The
+  Figure 9 header and the module docstring both said "n_exp = 6, 7, 8" while
+  the loop ran `[6, 8]`, with a comment attributing the omission to per-solve
+  cost. Measured on the current 70-candidate pool, `n_exp=7` averages 4.7 s per
+  bonmin solve against 6.7 s for `n_exp=6` — the cheapest of the three, not the
+  most expensive. The loop is restored to `[6, 7, 8]`.
+
+### Changed
+
+- **CI actions bumped off the deprecated Node 20 runtime**:
+  `actions/checkout` v4 → v7, `actions/setup-python` v5 → v7,
+  `actions/upload-artifact` v4 → v7. No input or behaviour changes affect this
+  workflow. Note that `upload-artifact@v5` is still Node 20, so the
+  single-major bump would not have resolved the deprecation.
+
+### Documentation
+
+- **`examples/jupyter/pydex_quickstart.ipynb`**: two markdown cells described a
+  pre-0.2.0 API the notebook's code cells no longer use — solver selection via
+  `package=`/`optimizer=`, defaulting to cvxpy and SCS. They now describe the
+  single `solver=` argument, note `"pounce"` as an alternative that needs no
+  downloaded solver binaries, correct "three optional arguments" to two, and
+  quote the timings from the run stored in the notebook rather than timings
+  from no run at all. Prose only; the code cells were already correct.
+
+### Verification
+
+No design, criterion value or reference number changes. Capability suite
+301/301 across 60 sections with absorbed noise 865 + 1 unchanged; `tests/`
+169 → 175.
+
+The new `tests/test_estimability_returns_figures.py` was run against the
+pre-change `designer.py`: 5 of its 6 tests fail and the one that passes is the
+assertion that the rest of the returned payload is untouched — which was
+already true and is required to stay true.
 ## [0.7.4] - 2026-08-28
 
 ### Fixed

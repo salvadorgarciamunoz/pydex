@@ -2228,37 +2228,6 @@ class Designer:
         if self._verbose >= 1:
             print("[clear_prior] Prior FIM cleared.")
 
-    def _get_apportioned_candidates(self):
-        """
-        Expand the apportionment into one entry per experimental RUN.
-
-        Unreferenced anywhere in the repository (PROJECT_NOTES Open Item 21)
-        and kept only because it imports cleanly. Updated here rather than left
-        alone because it reads self.apportionments, whose per-candidate entries
-        are now vectors over that candidate's own support times when sampling
-        times are optimised: the previous `int(app)` raised TypeError on
-        anything but a scalar, so it was silently broken for every dynamic
-        design already and would have broken differently now.
-        """
-        app_tic_candidates = []
-        app_tvc_candidates = []
-        app_spt_candidates = []
-        for i, app in enumerate(self.apportionments):
-            tic = self.optimal_candidates[i][1]
-            tvc = self.optimal_candidates[i][2]
-            spt = self.optimal_candidates[i][3]
-            # total runs on this candidate, whether app is a scalar (sampling
-            # times not optimised) or a per-support-time vector
-            n_runs = int(np.nansum(np.asarray(app, dtype=float)))
-            for _ in range(n_runs):
-                app_tic_candidates.append(tic)
-                app_tvc_candidates.append(tvc)
-                app_spt_candidates.append(spt)
-        app_tic_candidates = np.array(app_tic_candidates)
-        app_tvc_candidates = np.array(app_tvc_candidates)
-        app_spt_candidates = np.array(app_spt_candidates)
-        return app_tic_candidates, app_tvc_candidates, app_spt_candidates
-
     def solve_cvar_problem(self, criterion, beta, n_spt=None, n_exp=None,
                            solver="ipopt",
                            solver_options=None, e0=None, write=False,
@@ -8094,6 +8063,12 @@ class Designer:
             * ``corr_names``, ``abs_info``, ``e_index``, ``e_index_ud``,
               ``flagged``, ``order``, ``n_rows``, ``weighted`` — supporting
               detail in plain Python types.
+            * ``figures`` (*list of matplotlib.figure.Figure*, or *None*) — the
+              figures drawn when ``plot`` is True, and ``None`` when it is
+              False. Four of them when ``error_cov`` was supplied (abs info, E,
+              E-UD, correlation) and three otherwise. Returned so that a caller
+              under a non-interactive backend can save them; interactively
+              :meth:`show_plots` finds them anyway.
 
         Raises:
             SyntaxError: If :attr:`model_parameters` has not been set.
@@ -8341,8 +8316,13 @@ class Designer:
         if report:
             self._report_estimability(out, names, theta_note, tol_src,
                                       n_c, n_spt, n_mr)
-        if plot:
-            self._plot_estimability(out, tol)
+        # Hand the figure handles back. _plot_estimability() already returns
+        # them and every other plotter in this class does the same; discarding
+        # them here was the odd one out. Interactively it made no difference
+        # (show_plots() picks the figures up from pyplot's registry), but under
+        # a non-interactive backend a caller who wants to SAVE them had no
+        # handle and had to diff plt.get_fignums() around the call.
+        out["figures"] = self._plot_estimability(out, tol) if plot else None
         return out
 
     def _report_estimability(self, out, names, theta_note, tol_src,

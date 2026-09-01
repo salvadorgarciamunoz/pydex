@@ -17,15 +17,55 @@ author = "Kennedy Putra Kusumo, Salvador Garcia-Munoz, and contributors"
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
-# Read the version from the INSTALLED package metadata rather than hardcoding
-# it. pydex does not define pydex.__version__, so the previous
-# getattr(pydex, "__version__", "0.1.0") always fell through to its default and
-# the docs kept reporting 0.1.0 no matter what pyproject.toml said. Taking it
-# from the metadata means pyproject.toml is the single source of truth.
-try:
-    release = _pkg_version("pydex")
-except PackageNotFoundError:            # docs built without installing pydex
-    release = "0.0.0+unknown"
+# Read the version from pyproject.toml -- the file that actually declares it --
+# rather than from the INSTALLED package metadata.
+#
+# Metadata was the previous source, and it is a trap with an editable install:
+# `pip install -e .` writes the version ONCE, at install time, and nothing
+# refreshes it when pyproject.toml is bumped. The code stays live (the .pth
+# MetaPathFinder resolves imports to the repo) but the version does not, so
+# bumping the version and rebuilding docs embedded the OLD number. That is how
+# the published site said "pydex 0.2.1 documentation" across 0.3.0, 0.4.0 and
+# 0.4.1. The documented workaround was to remember `pip install -e . --no-deps`
+# before every docs build; reading the declaring file makes the mistake
+# unrepresentable instead of relying on a checklist step (PROJECT_NOTES Open
+# Item 22).
+#
+# Installed metadata remains the fallback for the case pyproject.toml is
+# genuinely absent, e.g. a docs build from an unpacked sdist.
+def _read_version():
+    pyproject = os.path.join(os.path.dirname(__file__), "..", "..",
+                             "pyproject.toml")
+    pyproject = os.path.abspath(pyproject)
+    if os.path.isfile(pyproject):
+        try:
+            import tomllib                       # py3.11+
+        except ModuleNotFoundError:
+            tomllib = None
+        if tomllib is not None:
+            with open(pyproject, "rb") as fh:
+                found = tomllib.load(fh).get("project", {}).get("version")
+            if found:
+                return found
+        else:                                    # py3.9/3.10: no tomllib
+            import re
+            with open(pyproject, "r", encoding="utf-8") as fh:
+                src = fh.read()
+            # first `version = "..."` inside the [project] table
+            block = re.split(r"^\[", src, flags=re.M)
+            for chunk in block:
+                if chunk.startswith("project]"):
+                    m = re.search(r'^\s*version\s*=\s*"([^"]+)"', chunk,
+                                  flags=re.M)
+                    if m:
+                        return m.group(1)
+    try:
+        return _pkg_version("pydex")
+    except PackageNotFoundError:        # docs built without installing pydex
+        return "0.0.0+unknown"
+
+
+release = _read_version()
 version = release
 
 # -- General configuration ----------------------------------------------------

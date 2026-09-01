@@ -5,14 +5,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>pydex.core.designer &mdash; pydex 0.7.4 documentation</title>
+  <title>pydex.core.designer &mdash; pydex 0.7.5 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
 
   
       <script src="../../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="../../../_static/documentation_options.js?v=020ce317"></script>
+      <script src="../../../_static/documentation_options.js?v=a674670e"></script>
       <script src="../../../_static/doctools.js?v=9bcbadda"></script>
       <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../../../_static/js/theme.js"></script>
@@ -2329,37 +2329,6 @@
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
             <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;[clear_prior] Prior FIM cleared.&quot;</span><span class="p">)</span></div>
 
-
-    <span class="k">def</span><span class="w"> </span><span class="nf">_get_apportioned_candidates</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
-<span class="sd">        Expand the apportionment into one entry per experimental RUN.</span>
-
-<span class="sd">        Unreferenced anywhere in the repository (PROJECT_NOTES Open Item 21)</span>
-<span class="sd">        and kept only because it imports cleanly. Updated here rather than left</span>
-<span class="sd">        alone because it reads self.apportionments, whose per-candidate entries</span>
-<span class="sd">        are now vectors over that candidate&#39;s own support times when sampling</span>
-<span class="sd">        times are optimised: the previous `int(app)` raised TypeError on</span>
-<span class="sd">        anything but a scalar, so it was silently broken for every dynamic</span>
-<span class="sd">        design already and would have broken differently now.</span>
-<span class="sd">        &quot;&quot;&quot;</span>
-        <span class="n">app_tic_candidates</span> <span class="o">=</span> <span class="p">[]</span>
-        <span class="n">app_tvc_candidates</span> <span class="o">=</span> <span class="p">[]</span>
-        <span class="n">app_spt_candidates</span> <span class="o">=</span> <span class="p">[]</span>
-        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">app</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">apportionments</span><span class="p">):</span>
-            <span class="n">tic</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">optimal_candidates</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="mi">1</span><span class="p">]</span>
-            <span class="n">tvc</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">optimal_candidates</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="mi">2</span><span class="p">]</span>
-            <span class="n">spt</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">optimal_candidates</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="mi">3</span><span class="p">]</span>
-            <span class="c1"># total runs on this candidate, whether app is a scalar (sampling</span>
-            <span class="c1"># times not optimised) or a per-support-time vector</span>
-            <span class="n">n_runs</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">nansum</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">app</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)))</span>
-            <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_runs</span><span class="p">):</span>
-                <span class="n">app_tic_candidates</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">tic</span><span class="p">)</span>
-                <span class="n">app_tvc_candidates</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">tvc</span><span class="p">)</span>
-                <span class="n">app_spt_candidates</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">spt</span><span class="p">)</span>
-        <span class="n">app_tic_candidates</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">app_tic_candidates</span><span class="p">)</span>
-        <span class="n">app_tvc_candidates</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">app_tvc_candidates</span><span class="p">)</span>
-        <span class="n">app_spt_candidates</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">app_spt_candidates</span><span class="p">)</span>
-        <span class="k">return</span> <span class="n">app_tic_candidates</span><span class="p">,</span> <span class="n">app_tvc_candidates</span><span class="p">,</span> <span class="n">app_spt_candidates</span>
 
 <div class="viewcode-block" id="Designer.solve_cvar_problem">
 <a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.solve_cvar_problem">[docs]</a>
@@ -8348,6 +8317,12 @@
 <span class="sd">            * ``corr_names``, ``abs_info``, ``e_index``, ``e_index_ud``,</span>
 <span class="sd">              ``flagged``, ``order``, ``n_rows``, ``weighted`` — supporting</span>
 <span class="sd">              detail in plain Python types.</span>
+<span class="sd">            * ``figures`` (*list of matplotlib.figure.Figure*, or *None*) — the</span>
+<span class="sd">              figures drawn when ``plot`` is True, and ``None`` when it is</span>
+<span class="sd">              False. Four of them when ``error_cov`` was supplied (abs info, E,</span>
+<span class="sd">              E-UD, correlation) and three otherwise. Returned so that a caller</span>
+<span class="sd">              under a non-interactive backend can save them; interactively</span>
+<span class="sd">              :meth:`show_plots` finds them anyway.</span>
 
 <span class="sd">        Raises:</span>
 <span class="sd">            SyntaxError: If :attr:`model_parameters` has not been set.</span>
@@ -8595,8 +8570,13 @@
         <span class="k">if</span> <span class="n">report</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_report_estimability</span><span class="p">(</span><span class="n">out</span><span class="p">,</span> <span class="n">names</span><span class="p">,</span> <span class="n">theta_note</span><span class="p">,</span> <span class="n">tol_src</span><span class="p">,</span>
                                       <span class="n">n_c</span><span class="p">,</span> <span class="n">n_spt</span><span class="p">,</span> <span class="n">n_mr</span><span class="p">)</span>
-        <span class="k">if</span> <span class="n">plot</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_plot_estimability</span><span class="p">(</span><span class="n">out</span><span class="p">,</span> <span class="n">tol</span><span class="p">)</span>
+        <span class="c1"># Hand the figure handles back. _plot_estimability() already returns</span>
+        <span class="c1"># them and every other plotter in this class does the same; discarding</span>
+        <span class="c1"># them here was the odd one out. Interactively it made no difference</span>
+        <span class="c1"># (show_plots() picks the figures up from pyplot&#39;s registry), but under</span>
+        <span class="c1"># a non-interactive backend a caller who wants to SAVE them had no</span>
+        <span class="c1"># handle and had to diff plt.get_fignums() around the call.</span>
+        <span class="n">out</span><span class="p">[</span><span class="s2">&quot;figures&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_plot_estimability</span><span class="p">(</span><span class="n">out</span><span class="p">,</span> <span class="n">tol</span><span class="p">)</span> <span class="k">if</span> <span class="n">plot</span> <span class="k">else</span> <span class="kc">None</span>
         <span class="k">return</span> <span class="n">out</span></div>
 
 
