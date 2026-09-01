@@ -285,6 +285,43 @@ values, with r_hat typically landing around 1.01-1.04 — inside PyMC's own
 The draw/tune/chain/core counts are constants at the top of that section
 if tighter diagnostics are needed, at the cost of runtime.
 
+Sequential design
+-----------------
+
+Extending a campaign that has already been run. A Suzuki--Miyaura coupling with
+six kinetic parameters, and the workflow a process chemist actually faces: some
+experiments exist, the model has been fitted to them, and the question is what
+to run next.
+
+* ``examples/sequential/suzuki_kinetics.py`` -- the model. Three competing
+  reactions, each rate centred on a reference temperature rather than written
+  as ``(A, Ea)``. Integrated with a plain Runge--Kutta loop, which also
+  demonstrates that pydex does not care how the model is solved.
+* ``examples/sequential/suzuki_sequential.py`` -- the runner: fit, audit,
+  design, refit, compare.
+* ``examples/sequential/noise_and_estimability.py`` -- the same exercise across
+  twelve sets of measurements.
+
+The workflow is: experiments exist, fit them, audit with
+:meth:`~pydex.core.designer.Designer.run_estimability` pointed at *those
+conditions*, fix whatever the data cannot support, register the completed runs
+with
+:meth:`~pydex.core.designer.Designer.set_prior_experiments`, design more, then
+refit and compare.
+
+The audit step is the one worth noting. Estimability is usually run over a
+candidate grid before designing; pointing it at the experiments already
+executed audits the data in hand instead. On the default seed it flags ``Ea3``
+with an ``abs info`` of 0.069, two orders below anything else.
+
+After the second round the 95% confidence region for the protodeboronation pair
+shrinks 7.5x in area, while the coupling parameters barely move. Repeated over
+twelve noise realisations the region shrinks every time (3.4x to 12.8x, median
+7.2x), though which parameter gets flagged varies -- which is what
+``noise_and_estimability.py`` is for.
+
+Needs an NLP solver only. Nothing is written to disk.
+
 Bracketing-optimal design
 -------------------------
 

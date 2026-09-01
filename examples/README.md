@@ -249,6 +249,54 @@ fine, more draws would help" range rather than fully converged. The
 draw/tune/chain/core counts are constants at the top of that section if you
 want tighter diagnostics at the cost of runtime.
 
+## Sequential design — `examples/sequential/`
+
+Extending an experimental campaign that has already been run. A Suzuki–Miyaura
+coupling with six kinetic parameters, and the workflow a process chemist
+actually faces: some experiments exist, the model has been fitted to them, and
+the question is what to run next.
+
+- `suzuki_kinetics.py` — the model. Three competing reactions (coupling,
+  protodeboronation, homocoupling), each rate centred on a reference
+  temperature rather than written as `(A, Ea)`. Integrated with a plain
+  Runge–Kutta loop, so it also demonstrates that pydex does not care how you
+  solve your model.
+- `suzuki_sequential.py` — the runner. Four experiments exist; fit, audit,
+  design six more, refit, compare.
+- `noise_and_estimability.py` — the same exercise repeated over twelve sets of
+  measurements, to see which conclusions survive.
+
+**The workflow, in the order it has to happen:**
+
+1. experiments exist — whatever was already run
+2. fit, to have somewhere to stand
+3. **audit** — `run_estimability()` pointed at *those conditions*, not at a
+   candidate grid
+4. fix what the data cannot support — the method chooses, not you
+5. `set_prior_experiments()` — hand pydex the completed runs
+6. design — it targets what is still loose
+7. run, refit, compare standard errors
+
+Step 3 is the one worth dwelling on: estimability is usually run over a
+candidate grid *before* designing, but pointing it at the experiments already
+executed audits the data in hand. Here it flags `Ea3` with an `abs info` of
+0.069, two orders below anything else — the homocoupling rate is visible in the
+impurity measurement, its temperature dependence is not.
+
+Measured on the default seed: the 95% confidence region for the
+protodeboronation pair shrinks **7.5× in area** after the second round, while
+the coupling parameters barely move.
+
+`noise_and_estimability.py` then asks how much of that was the method and how
+much the noise. Across twelve seeds the region shrank **every time** (3.4× to
+12.8×, median 7.2×), but *which* parameter gets flagged varies, and so does the
+number of distinct conditions the design uses. The practical reading: given a
+quantified total measurement error you can run the same resampling check on
+your own campaign, and it yields options rather than a single verdict to trust.
+
+Needs an NLP solver only — `solver="pounce"` works with nothing beyond pip.
+Nothing is written to disk; both scripts show their figures.
+
 ## Bracketing-optimal design — `examples/b_optimal/`
 
 Worked scenarios for `b_opt_criterion`, which implements the
@@ -324,6 +372,36 @@ Scenarios:
   the anti-clustering control; Part D exercises the guards. The kinetics
   are representative of a realistic system rather than fitted to a
   substrate.
+- `b_opt_pareto_sweep.py` — not a scenario but a **sweep utility** over the
+  film-coater and CSTR models. It writes two figures per model:
+  `b_opt_fig1_<model>.png`, the chosen runs in input space and output space
+  across five `output_weight` values, and `b_opt_fig2_<model>.png`, the Pareto
+  front with one curve per `n_exp`. It also prints an `f_in` / `f_out` summary
+  table.
+
+  ```
+  cd examples/b_optimal
+  python b_opt_pareto_sweep.py --model both
+  ```
+
+  **The sampling defaults are per model, and that matters.** The coater keeps
+  most of what it samples, so 36 candidates is plenty. The CSTR's three quality
+  constraints (`xC2 <= 0.002`, `xA2 <= 0.02`, `T2 <= 85 degC`) admit only about
+  **0.5%** of the sampled box, so it defaults to 15000 — sampling 36 there
+  yields a single feasible candidate and draws nothing. Override with
+  `--n-candidates`; `--fig 1` or `--fig 2` gives a quicker first look.
+
+  Two things worth knowing before reading the output. Importing a scenario
+  module runs that scenario's own demo, because those scripts have no
+  `if __name__ == "__main__":` guard — the sweep suppresses the printing, but
+  you still pay the solve time on first import. And with six controls the
+  CSTR's input panel plots only the first two; edit the column indices in
+  `figure_1()` if a different pair tells the story better.
+
+  Measured trade-off at `n_exp = 6`, weight 0 to 1: the coater moves `f_in`
+  56.25 → 15.35 and `f_out` 1.32 → 3.95, while the CSTR moves `f_in` 5.82 →
+  0.024 and `f_out` 0.297 → 10.0. Six inputs and three outputs make the
+  objectives genuinely conflict; three and two only make them bend.
 
 ### Running these
 

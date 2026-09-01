@@ -57,6 +57,7 @@
 <li class="toctree-l3"><a class="reference internal" href="#bayesian-inference-in-case-4-py-via-pymc-not-pydex">Bayesian inference in <code class="docutils literal notranslate"><span class="pre">case_4.py</span></code> – via PyMC, not pydex</a></li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="#sequential-design">Sequential design</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#bracketing-optimal-design">Bracketing-optimal design</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#running-them">Running them</a></li>
 </ul>
@@ -380,6 +381,39 @@ values, with r_hat typically landing around 1.01-1.04 — inside PyMC’s own
 The draw/tune/chain/core counts are constants at the top of that section
 if tighter diagnostics are needed, at the cost of runtime.</p>
 </section>
+</section>
+<section id="sequential-design">
+<h2>Sequential design<a class="headerlink" href="#sequential-design" title="Link to this heading"></a></h2>
+<p>Extending a campaign that has already been run. A Suzuki–Miyaura coupling with
+six kinetic parameters, and the workflow a process chemist actually faces: some
+experiments exist, the model has been fitted to them, and the question is what
+to run next.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/sequential/suzuki_kinetics.py</span></code> – the model. Three competing
+reactions, each rate centred on a reference temperature rather than written
+as <code class="docutils literal notranslate"><span class="pre">(A,</span> <span class="pre">Ea)</span></code>. Integrated with a plain Runge–Kutta loop, which also
+demonstrates that pydex does not care how the model is solved.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/sequential/suzuki_sequential.py</span></code> – the runner: fit, audit,
+design, refit, compare.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/sequential/noise_and_estimability.py</span></code> – the same exercise across
+twelve sets of measurements.</p></li>
+</ul>
+<p>The workflow is: experiments exist, fit them, audit with
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.run_estimability" title="pydex.core.designer.Designer.run_estimability"><code class="xref py py-meth docutils literal notranslate"><span class="pre">run_estimability()</span></code></a> pointed at <em>those
+conditions</em>, fix whatever the data cannot support, register the completed runs
+with
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.set_prior_experiments" title="pydex.core.designer.Designer.set_prior_experiments"><code class="xref py py-meth docutils literal notranslate"><span class="pre">set_prior_experiments()</span></code></a>, design more, then
+refit and compare.</p>
+<p>The audit step is the one worth noting. Estimability is usually run over a
+candidate grid before designing; pointing it at the experiments already
+executed audits the data in hand instead. On the default seed it flags <code class="docutils literal notranslate"><span class="pre">Ea3</span></code>
+with an <code class="docutils literal notranslate"><span class="pre">abs</span> <span class="pre">info</span></code> of 0.069, two orders below anything else.</p>
+<p>After the second round the 95% confidence region for the protodeboronation pair
+shrinks 7.5x in area, while the coupling parameters barely move. Repeated over
+twelve noise realisations the region shrinks every time (3.4x to 12.8x, median
+7.2x), though which parameter gets flagged varies – which is what
+<code class="docutils literal notranslate"><span class="pre">noise_and_estimability.py</span></code> is for.</p>
+<p>Needs an NLP solver only. Nothing is written to disk.</p>
 </section>
 <section id="bracketing-optimal-design">
 <h2>Bracketing-optimal design<a class="headerlink" href="#bracketing-optimal-design" title="Link to this heading"></a></h2>
