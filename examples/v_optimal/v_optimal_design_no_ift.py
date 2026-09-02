@@ -1,6 +1,6 @@
 """
-v_optimal_test_case_pyomo.py
-============================
+v_optimal_design_no_ift.py
+==========================
 Example of V-optimal Model-Based Design of Experiments (MBDoE) using pydex.
 
 Overview
@@ -90,81 +90,24 @@ Signature type 2: simulate(ti_controls, sampling_times, model_parameters)
     model_parameters : [k_ref, Ea, k_ref_imp, Ea_imp, k_ref_dec, Ea_dec]
     returns          : np.ndarray shape (n_spt, 4) — [CA, CB, CI, CD]
 
-Pyomo IFT sensitivity
----------------------
-This version uses exact parametric sensitivities via the Implicit-Function
-Theorem (IFT) computed from a Pyomo DAE model, replacing pydex's default
-finite-difference approach.
-
-The Pyomo model encodes the same 5-state ODE system using Lagrange-Radau
-orthogonal collocation (nfe=10, ncp=3), following the standard Pyomo.DAE
-parameter-estimation idiom: measurement/sampling times are seeded into the
-ContinuousSet and become exact finite-element boundaries; the discretiser
-adds collocation points between them.
-
-Key advantages:
-  - No finite-difference perturbations — exact sensitivities for the
-    discretised model, consistent with simulate()
-  - Parallel sensitivity computation via joblib threads (set designer.n_jobs)
-  - Same model used for simulation and sensitivity — no consistency issues
-
-Two-solver architecture
------------------------
-This script intentionally uses two solvers for different purposes:
-
-  build_pyomo_model / simulate()  — used exclusively for all DoE-critical
-      computations: pydex responses, IFT Jacobians, FIM, and criterion.
-      Exact symbolic derivatives, fully consistent with the collocation model.
-
-  _solve (scipy Radau)  — used for fast non-DoE evaluations: Stage 1 process
-      optimisation (SLSQP calls _solve ~500 times per start), constraint
-      landscape visualisation (~3600 grid evaluations), and trajectory plots.
-      Pyomo would be ~100x slower for these many cheap evaluations.
-
-The DoE results (support candidates, J_V, effort allocation) depend only on
-the Pyomo path. The scipy path only affects Stage 1 operating point finding
-and plotting — never the sensitivity analysis or criterion optimisation.
-
-Parallel computation
---------------------
-Set designer.n_jobs = -1 to use all available CPU cores for sensitivity
-computation. Each candidate is solved independently (160 parallel IPOPT
-calls), giving ~2-3× speedup on an 8-core machine.
-
-    designer.n_jobs = -1   # all cores
-    designer.n_jobs = 4    # explicit core count
-    designer.n_jobs = 1    # sequential (default)
-
 Dependencies
 ------------
     numpy, scipy, matplotlib
-    pyomo, pyomo.dae
-    pydex >= 0.0.9 with V-optimal and Pyomo IFT extensions:
+    pydex >= 0.0.9 with V-optimal extensions:
         Designer.find_optimal_operating_point()
         Designer.design_v_optimal()
         Designer.v_opt_criterion()
         Designer._eval_W_matrix()
-        Designer._eval_sensitivities_pyomo_ift()
-        Designer.n_jobs
 
 Solver
 ------
-    IPOPT is used for Stage 1, sensitivity computation, and Stage 2.
-    The default linear solver is "ma57" (HSL). If HSL is not available,
-    change LINEAR_SOLVER = "mumps" near the top of this file.
-
-Typical runtimes (Mac M-series, n_jobs=-1)
-------------------------------------------
-    Stage 1 (process optimisation):    ~30s
-    Sensitivity computation (parallel): ~28s
-    Stage 2 V-optimal IPOPT:           ~270s
-    Stage 2 A-optimal IPOPT:           ~250s
-    Stage 2 D-optimal IPOPT:             ~1s
-    Total:                             ~10 min
+    IPOPT is used for both Stage 1 and Stage 2 via Pyomo. The default
+    linear solver is "ma57" (HSL). If HSL is not available, change
+    LINEAR_SOLVER = "mumps" near the top of this file.
 
 Usage
 -----
-    Run directly:   python v_optimal_test_case_pyomo.py
+    Run directly:   python v_optimal_design_no_ift.py
     In Spyder:      F5  (or Run > Run File)
 
     The script produces four sets of figures:
@@ -174,29 +117,16 @@ Usage
       4. Design comparison: V-optimal vs A-optimal vs D-optimal
          - Bubble chart of effort allocation in (T0, Tjacket) space
          - Concentration trajectories at selected candidates
-         - Summary table of J_V for each design
-
-Expected results
-----------------
-    V-optimal   J_V ≈ 0.000962  (best by construction)
-    A-optimal   J_V ≈ 0.001354  → ~1.41× worse prediction variance
-    D-optimal   J_V ≈ 0.001547  → ~1.61× worse prediction variance
-
-    V-optimal concentrates ~78% of effort on candidate 65
-    (T0=50°C, Tjacket=75°C, catalyst=1.5), sampling at t=1hr (end of batch).
+         - Bar chart of J_V for each design
 """
 
 # =============================================================================
 # Imports
 # =============================================================================
-
-
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
-import pyomo.environ as pyo
-import pyomo.dae as dae
 from pydex.core.designer import Designer
 
 
@@ -214,31 +144,6 @@ SIGMA_RESPONSES = 0.01   # std dev ~1% of CA0 for all four species
 # Quality and safety constraints (mol/L at t = T_FINAL)
 CI_MAX = 0.05   # maximum allowable impurity concentration
 CD_MAX = 0.05   # maximum allowable decomposition product concentration
-
-# Sampling time mode for Stage 2 V-optimal design.
-# The Pyomo IFT path may distribute effort uniformly across all sampling
-# time candidates when the system is genuinely indifferent to when samples
-# are taken (i.e. IFT sensitivities are nearly equal at all times).
-#
-# Minimum effort threshold for sampling time sparsity enforcement.
-# When pydex may distribute effort equally
-# across all sampling time candidates if the IFT sensitivities are nearly
-# identical at all times (the system is genuinely indifferent to when
-# samples are taken — this is mathematically correct, not a bug).
-#
-# Setting SPT_MIN_EFFORT > 0 adds binary variables to the sampling time
-# dimension (same mechanism as for candidates) and forces the optimizer
-# to concentrate effort at a single sampling time per experiment,
-# revealing the single most informative time point.
-#
-# IMPORTANT: sparsity enforcement requires a MINLP solver — BARON via GAMS
-# is used automatically when SPT_MIN_EFFORT > 0. GAMS/BARON must be available
-# in your environment. With IPOPT the binary variables are relaxed to
-# continuous and min_effort has no effect.
-#
-#   SPT_MIN_EFFORT = 0.0   → IPOPT, uniform spread (default, mathematically correct)
-#   SPT_MIN_EFFORT = 0.1   → BARON/GAMS, concentrated at the most informative time
-SPT_MIN_EFFORT = 0.1
 
 
 # =============================================================================
@@ -373,23 +278,11 @@ def _odes(t, y, Tjacket_K, cat, k_ref, Ea, k_ref_imp, Ea_imp, k_ref_dec, Ea_dec)
 
 def _solve(T0, Tjacket, catalyst_load, mp, t_eval):
     """
-    Fast scipy ODE solver for non-DoE uses: Stage 1 process optimisation,
-    constraint landscape visualisation, and trajectory plotting.
+    Integrate the ODE system from t=0 to t=t_eval[-1].
 
-    This function is intentionally kept separate from build_pyomo_model.
-    The DoE-critical path (sensitivities, FIM, criterion) uses build_pyomo_model
-    exclusively via designer.simulate() and the Pyomo IFT machinery — ensuring
-    exact symbolic Jacobians and full consistency between simulated responses
-    and computed sensitivities.
-
-    _solve is used wherever fast approximate evaluations are sufficient:
-      - process_objective / process_constraints (Stage 1 SLSQP — called
-        hundreds of times per start; Pyomo would be ~100x slower)
-      - plot_constraint_landscape (60×60 grid, ~3600 evaluations)
-      - plot_case / plot_design_comparison (trajectory visualisation)
-
-    Uses Radau (implicit Runge-Kutta, order 5), suited for the moderately
-    stiff dynamics that arise at high temperatures.
+    Uses Radau (implicit Runge-Kutta, order 5), which is well-suited for
+    the moderately stiff dynamics that arise at high temperatures when the
+    decomposition reaction activates sharply.
 
     Parameters
     ----------
@@ -398,7 +291,11 @@ def _solve(T0, Tjacket, catalyst_load, mp, t_eval):
     catalyst_load  : float        catalyst load (dimensionless)
     mp             : array-like   model parameters [k_ref, Ea, k_ref_imp,
                                   Ea_imp, k_ref_dec, Ea_dec]
-    t_eval         : np.ndarray   time points at which to store solution (hr)
+    t_eval         : np.ndarray   time points at which to store solution (hr).
+                                  When only the endpoint is needed (e.g. in
+                                  the process optimisation), pass
+                                  np.array([T_FINAL]) to avoid storing the
+                                  full trajectory.
 
     Returns
     -------
@@ -417,210 +314,6 @@ def _solve(T0, Tjacket, catalyst_load, mp, t_eval):
         atol=1e-10,
     )
     return sol
-
-
-# =============================================================================
-# Pyomo DAE model builder  — for IFT sensitivity computation
-# =============================================================================
-
-def build_pyomo_model(ti_controls, model_parameters, sampling_times=None, nfe=10, ncp=3):
-    """
-    Build and solve a Pyomo.DAE model for the three-reaction batch system
-    using Lagrange-Radau orthogonal collocation (nfe=10, ncp=3 by default).
-
-    This replaces the scipy Radau solver for sensitivity computation only.
-    The model is solved with IPOPT; PyomoNLP then provides the exact sparse
-    Jacobian dc/d[params, states] via the ASL interface, enabling IFT
-    sensitivities without finite-difference perturbations.
-
-    State variables (5):  CA, CB, CI, CD, T_K (reactor temperature in K)
-    Parameters (6, fixed Var): k_ref, Ea, k_ref_imp, Ea_imp, k_ref_dec, Ea_dec
-
-    Parameters are declared as fixed Var (not Param) so they appear in the
-    NLP primal vector — PyomoNLP includes them once temporarily unfixed,
-    giving the parameter Jacobian columns needed for the IFT.
-
-    The standard Pyomo.DAE pattern for parameter estimation is used:
-    measurement/sampling times are passed as the initialisation set of the
-    ContinuousSet.  The discretiser then adds ncp Radau collocation points
-    inside each of the nfe intervals, guaranteeing that every measurement
-    time is an exact finite-element boundary — no manual grid merging needed.
-
-    Parameters
-    ----------
-    ti_controls      : [T0_C, Tjacket_C, catalyst_load]
-    model_parameters : [k_ref, Ea, k_ref_imp, Ea_imp, k_ref_dec, Ea_dec]
-    sampling_times   : list/array of measurement times (hr); when None
-                       defaults to [T_FINAL] (endpoint only)
-    nfe              : number of finite elements (intervals between breakpoints)
-    ncp              : collocation points per element (Radau order)
-
-    Returns
-    -------
-    m           : solved ConcreteModel
-    all_vars    : [k_ref, Ea, k_ref_imp, Ea_imp, k_ref_dec, Ea_dec,
-                   CA[t0..tn], CB[t0..tn], CI[t0..tn], CD[t0..tn], T_K[t0..tn],
-                   dCAdt[..], dCBdt[..], dCIdt[..], dCDdt[..], dTdt[..]]
-    all_bodies  : equality constraint body expressions
-    t_sorted    : measurement times snapped to nearest collocation points
-    """
-    T0_C, Tjacket_C, cat = ti_controls
-    Tjacket_K_val = Tjacket_C + 273.15
-    T0_K_val      = T0_C    + 273.15
-
-    # Unpack parameters
-    k_ref_v, Ea_v, k_ref_imp_v, Ea_imp_v, k_ref_dec_v, Ea_dec_v = model_parameters
-
-    if sampling_times is None:
-        sampling_times = [T_FINAL]
-
-    # ── Determine integration horizon ─────────────────────────────────────────
-    # For causal (sequential) sensitivities, the model must integrate only up
-    # to the requested measurement time — not always to T_FINAL.
-    # When designer._eval_sensitivities_pyomo_ift calls build_pyomo_model with
-    # a single sampling time t_s, we build the DAE from 0 to t_s.  This gives
-    # dCB(t_s)/dθ that reflects only the history up to t_s, exactly matching
-    # the FD sensitivity.  Building to T_FINAL and extracting the t_s row gives
-    # the wrong simultaneous (non-causal) sensitivity from the full collocation.
-    t_horizon = max(float(t) for t in sampling_times)
-    if t_horizon <= 0.0:
-        t_horizon = T_FINAL
-
-    # ── Standard Pyomo.DAE parameter-estimation pattern ───────────────────────
-    # Seed the ContinuousSet with the measurement times (plus 0 and t_horizon
-    # as domain boundaries).  The discretiser adds ncp Radau collocation points
-    # inside each of the nfe intervals between these breakpoints, so every
-    # measurement time is guaranteed to be an exact finite-element boundary.
-    meas_pts = sorted(set(
-        [0.0, t_horizon] + [float(t) for t in sampling_times
-                             if 0.0 < float(t) < t_horizon]
-    ))
-
-    m = pyo.ConcreteModel()
-    m.t = dae.ContinuousSet(bounds=(0.0, t_horizon), initialize=meas_pts)
-
-    # ── Parameters as fixed Vars ───────────────────────────────────────────────
-    m.k_ref     = pyo.Var(initialize=k_ref_v);     m.k_ref.fix(k_ref_v)
-    m.Ea        = pyo.Var(initialize=Ea_v);         m.Ea.fix(Ea_v)
-    m.k_ref_imp = pyo.Var(initialize=k_ref_imp_v); m.k_ref_imp.fix(k_ref_imp_v)
-    m.Ea_imp    = pyo.Var(initialize=Ea_imp_v);     m.Ea_imp.fix(Ea_imp_v)
-    m.k_ref_dec = pyo.Var(initialize=k_ref_dec_v); m.k_ref_dec.fix(k_ref_dec_v)
-    m.Ea_dec    = pyo.Var(initialize=Ea_dec_v);     m.Ea_dec.fix(Ea_dec_v)
-
-    # ── State variables ────────────────────────────────────────────────────────
-    m.CA  = pyo.Var(m.t, initialize=CA0_fixed, bounds=(0, None))
-    m.CB  = pyo.Var(m.t, initialize=0.0,       bounds=(0, None))
-    m.CI  = pyo.Var(m.t, initialize=0.0,       bounds=(0, None))
-    m.CD  = pyo.Var(m.t, initialize=0.0,       bounds=(0, None))
-    m.T_K = pyo.Var(m.t, initialize=T0_K_val,  bounds=(200, 600))
-
-    m.dCAdt = dae.DerivativeVar(m.CA,  withrespectto=m.t)
-    m.dCBdt = dae.DerivativeVar(m.CB,  withrespectto=m.t)
-    m.dCIdt = dae.DerivativeVar(m.CI,  withrespectto=m.t)
-    m.dCDdt = dae.DerivativeVar(m.CD,  withrespectto=m.t)
-    m.dTdt  = dae.DerivativeVar(m.T_K, withrespectto=m.t)
-
-    # ── ODE constraints ────────────────────────────────────────────────────────
-    # Arrhenius: k(T) = k_ref * cat * exp(-Ea/R * (1/T - 1/T_ref))
-    # Using pyo.exp() for symbolic differentiation support in PyomoNLP
-    @m.Constraint(m.t)
-    def ode_CA(m, t):
-        k_main = m.k_ref     * cat * pyo.exp(-m.Ea     / R * (1/m.T_K[t] - 1/T_ref_K))
-        k_imp  = m.k_ref_imp * cat * pyo.exp(-m.Ea_imp / R * (1/m.T_K[t] - 1/T_ref_K))
-        k_dec  = m.k_ref_dec * cat * pyo.exp(-m.Ea_dec / R * (1/m.T_K[t] - 1/T_ref_dec_K))
-        return m.dCAdt[t] == -(k_main + k_imp + k_dec) * m.CA[t]
-
-    @m.Constraint(m.t)
-    def ode_CB(m, t):
-        k_main = m.k_ref * cat * pyo.exp(-m.Ea / R * (1/m.T_K[t] - 1/T_ref_K))
-        return m.dCBdt[t] == k_main * m.CA[t]
-
-    @m.Constraint(m.t)
-    def ode_CI(m, t):
-        k_imp = m.k_ref_imp * cat * pyo.exp(-m.Ea_imp / R * (1/m.T_K[t] - 1/T_ref_K))
-        return m.dCIdt[t] == k_imp * m.CA[t]
-
-    @m.Constraint(m.t)
-    def ode_CD(m, t):
-        k_dec = m.k_ref_dec * cat * pyo.exp(-m.Ea_dec / R * (1/m.T_K[t] - 1/T_ref_dec_K))
-        return m.dCDdt[t] == k_dec * m.CA[t]
-
-    @m.Constraint(m.t)
-    def ode_T(m, t):
-        k_main = m.k_ref     * cat * pyo.exp(-m.Ea     / R * (1/m.T_K[t] - 1/T_ref_K))
-        k_imp  = m.k_ref_imp * cat * pyo.exp(-m.Ea_imp / R * (1/m.T_K[t] - 1/T_ref_K))
-        k_dec  = m.k_ref_dec * cat * pyo.exp(-m.Ea_dec / R * (1/m.T_K[t] - 1/T_ref_dec_K))
-        r_main = k_main * m.CA[t]
-        r_imp  = k_imp  * m.CA[t]
-        r_dec  = k_dec  * m.CA[t]
-        Q = U * A_area * (Tjacket_K_val - m.T_K[t])
-        return m.dTdt[t] == (Q - Hr_main*r_main - Hr_imp*r_imp - Hr_dec*r_dec) / (mass * Cp)
-
-    # ── Initial conditions ─────────────────────────────────────────────────────
-    m.ic_CA  = pyo.Constraint(expr=m.CA[0.0]  == CA0_fixed)
-    m.ic_CB  = pyo.Constraint(expr=m.CB[0.0]  == 0.0)
-    m.ic_CI  = pyo.Constraint(expr=m.CI[0.0]  == 0.0)
-    m.ic_CD  = pyo.Constraint(expr=m.CD[0.0]  == 0.0)
-    m.ic_T   = pyo.Constraint(expr=m.T_K[0.0] == T0_K_val)
-
-    # Dummy objective required by PyomoNLP — square feasibility problem,
-    # not an optimisation. The zero objective has no effect on the solution.
-    m.obj = pyo.Objective(expr=0.0)
-
-    # ── Discretise with Lagrange-Radau collocation ─────────────────────────────
-    # The ContinuousSet already contains the measurement times as breakpoints.
-    # apply_to() adds ncp Radau collocation points inside each of the nfe
-    # intervals, preserving the measurement times exactly.
-    disc = pyo.TransformationFactory('dae.collocation')
-    disc.apply_to(m, nfe=nfe, ncp=ncp, scheme='LAGRANGE-RADAU')
-
-    # ── Solve with IPOPT ───────────────────────────────────────────────────────
-    # Variable values must be at the true collocation solution for the
-    # PyomoNLP Jacobian to give correct IFT sensitivities.
-    solver = pyo.SolverFactory('ipopt')
-    solver.options['print_level'] = 0
-    solver.options['tol'] = 1e-10
-    result = solver.solve(m, tee=False)
-    if result.solver.termination_condition != pyo.TerminationCondition.optimal:
-        raise RuntimeError(
-            f"IPOPT did not converge: {result.solver.termination_condition}"
-        )
-
-    t_sorted_full = sorted(m.t)
-
-    # Measurement times are exact finite-element boundaries — snap each to the
-    # nearest point in the discretised grid (difference should be ~machine eps).
-    t_sorted = sorted(set(
-        min(t_sorted_full, key=lambda tt: abs(tt - float(t)))
-        for t in sampling_times
-    ))
-
-    # ── Assemble all_vars: parameters FIRST, then states ──────────────────────
-    # Designer uses the first n_mp=6 entries as parameter columns when
-    # splitting the Jacobian into J_p and J_z.
-    all_vars = (
-        [m.k_ref, m.Ea, m.k_ref_imp, m.Ea_imp, m.k_ref_dec, m.Ea_dec]
-        + [m.CA[t]  for t in t_sorted_full]
-        + [m.CB[t]  for t in t_sorted_full]
-        + [m.CI[t]  for t in t_sorted_full]
-        + [m.CD[t]  for t in t_sorted_full]
-        + [m.T_K[t] for t in t_sorted_full]
-        + [m.dCAdt[t] for t in t_sorted_full]
-        + [m.dCBdt[t] for t in t_sorted_full]
-        + [m.dCIdt[t] for t in t_sorted_full]
-        + [m.dCDdt[t] for t in t_sorted_full]
-        + [m.dTdt[t]  for t in t_sorted_full]
-    )
-
-    # ── Collect all active equality constraint bodies ──────────────────────────
-    all_bodies = []
-    for con in m.component_objects(pyo.Constraint, active=True):
-        for idx in con:
-            c = con[idx]
-            if c.equality:
-                all_bodies.append(c.body - c.upper)
-
-    return m, all_vars, all_bodies, t_sorted
 
 
 # =============================================================================
@@ -656,21 +349,9 @@ def simulate(ti_controls, sampling_times, model_parameters):
         Temperature (state index 4) is not returned as it is not directly
         measured, but it drives the ODE dynamics through the energy balance.
     """
-    # Call build_pyomo_model to guarantee exact consistency between simulate()
-    # and the IFT sensitivity model — both use the same collocation solve.
     T0, Tjacket, cat = ti_controls
-    m, all_vars, all_bodies, t_sorted = build_pyomo_model(
-        ti_controls, model_parameters, sampling_times=sampling_times
-    )
-    # Sampling times are exact grid points — read directly, no snapping error
-    responses = np.zeros((len(sampling_times), 4))
-    for i, t_req in enumerate(sampling_times):
-        t_key = min(t_sorted, key=lambda tt: abs(tt - float(t_req)))
-        responses[i, 0] = pyo.value(m.CA[t_key])
-        responses[i, 1] = pyo.value(m.CB[t_key])
-        responses[i, 2] = pyo.value(m.CI[t_key])
-        responses[i, 3] = pyo.value(m.CD[t_key])
-    return responses
+    sol = _solve(T0, Tjacket, cat, model_parameters, sampling_times)
+    return np.column_stack([sol.y[0], sol.y[1], sol.y[2], sol.y[3]])
 
 
 # =============================================================================
@@ -778,8 +459,8 @@ tic_candidates = np.array([
 # Sampling time candidates: 20 uniformly spaced points over [0.05, 1.0] hr.
 # When pydex allocates effort over these
 # times as additional decision variables alongside the candidate selection.
-spt_grid       = np.linspace(0.05, 1.0, 10)                          # (hr)
-spt_candidates = np.tile(spt_grid, (len(tic_candidates), 1))          # (n_c, 10)
+spt_grid       = np.linspace(0.05, 1.0, 20)                          # (hr)
+spt_candidates = np.tile(spt_grid, (len(tic_candidates), 1))          # (n_c, 20)
 
 
 # =============================================================================
@@ -809,8 +490,7 @@ def plot_case(T0, Tjacket, catalyst_load, title, mp=THETA_TRUE):
     CD = sol.y[3]; T  = sol.y[4] - 273.15
 
     converted = CB + CI + CD
-    with np.errstate(invalid='ignore', divide='ignore'):
-        SB = np.where(converted > 1e-6, CB / converted * 100, 100.0)
+    SB = np.where(converted > 1e-6, CB / converted * 100, 100.0)
 
     fig, axes = plt.subplots(1, 4, figsize=(18, 4))
     fig.suptitle(title, fontsize=11)
@@ -1171,7 +851,6 @@ def plot_design_comparison(efforts_dict, tic_candidates, dw_tic,
                              figsize=(14, 4.5 * len(designs)))
     fig.suptitle(
         'Design comparison  |  Bubble size = effort weight  |  '
-        'Design comparison  |  Bubble size = effort weight  |  '
         'Star = process optimum',
         fontsize=11
     )
@@ -1343,26 +1022,6 @@ if __name__ == "__main__":
     designer.model_parameter_names    = PARAM_NAMES
     designer.ti_controls_names         = ["T0_C", "Tjacket_C", "catalyst_load"]
     designer.response_names            = ["CA", "CB", "CI", "CD"]
-    # ── Pyomo IFT exact sensitivity ───────────────────────────────────────────
-    # Replace finite-difference sensitivity computation with exact IFT
-    # Jacobian from PyomoNLP (ASL path).
-    #
-    # build_pyomo_model is wrapped in a closure that captures the current
-    # sampling times from the designer so the collocation grid always
-    # includes the exact requested sampling time points — no snapping,
-    # no interpolation error, perfect consistency with simulate().
-    def pyomo_model_fn_with_spt(tic, theta, sampling_times=None):
-        # sampling_times is injected by the parallel worker for each candidate.
-        # In the sequential path, designer._current_spt is used instead.
-        spt = sampling_times if sampling_times is not None else designer._current_spt
-        if spt is None or len(spt) == 0:
-            spt = [T_FINAL]
-        return build_pyomo_model(tic, theta, sampling_times=spt)
-
-    designer.use_pyomo_ift         = True
-    designer.pyomo_model_fn        = pyomo_model_fn_with_spt
-    designer.pyomo_output_var_name = ["CA", "CB", "CI", "CD"]
-    # ─────────────────────────────────────────────────────────────────────────
     designer.initialize(verbose=1)
     print(f"  Candidate experiments: {len(tic_candidates)}")
     print(f"  Sampling time candidates per experiment: {len(spt_grid)}")
@@ -1418,16 +1077,11 @@ if __name__ == "__main__":
         print(f"         CB={CB_f:.4f}  CI={CI_f:.4f} ({ci_status})"
               f"  CD={CD_f:.4f} ({cd_status})")
 
-    # Select the single best operating point (highest objective value).
-    # Multi-start may find multiple local optima — we pass only the best
-    # to Stage 2 so the W matrix encodes a single prediction target,
-    # which gives a cleaner, more interpretable V-optimal design.
-    best_idx = np.argmax(designer._dw_obj_vals)
-    dw_tic   = dw_tic[[best_idx]]
-    designer.dw_tic = dw_tic
-    T0_opt, Tj_opt, cat_opt = dw_tic[0]
-    print(f"\n  Best operating point selected (index {best_idx+1}):")
-    print(f"  T0={T0_opt:.2f} C  Tjacket={Tj_opt:.2f} C  catalyst={cat_opt:.3f}")
+    # Deduplicate — multiple starts may converge to the same point
+    _, uid = np.unique(np.round(dw_tic, 3), axis=0, return_index=True)
+    dw_tic = dw_tic[uid]
+    designer.dw_tic = dw_tic   # update designer with deduplicated result
+    print(f"\n  {len(dw_tic)} unique operating point(s) retained.")
 
     # Visualise the constraint landscape and the optimal point
     print("\nPlotting constraint landscape...")
@@ -1435,7 +1089,7 @@ if __name__ == "__main__":
     best = dw_tic[0]
     plot_case(
         best[0], best[1], best[2],
-        f"Optimal dw: T0={best[0]:.1f} C  Tjacket={best[1]:.1f} C  "
+        f"Optimal Condition: T0={best[0]:.1f} C  Tjacket={best[1]:.1f} C  "
         f"catalyst={best[2]:.2f}  (on constraint boundary)",
         mp=THETA_GUESS,
     )
@@ -1455,58 +1109,15 @@ if __name__ == "__main__":
 
     designer.dw_spt = np.array([T_FINAL])   # care about predictions at t=1 hr
 
-    # Note: with the Pyomo IFT path, pydex may distribute effort equally across
-    # all sampling time candidates when the system is genuinely indifferent to
-    # sampling time (i.e. IFT sensitivities are nearly equal at all times).
-    # This is mathematically correct — set SPT_MIN_EFFORT > 0 in CONFIG to
-    # enforce sparsity and reveal the single most informative sampling time.
-    #
-    # Sparsity requires a MINLP solver — Bonmin is used automatically when
-    # SPT_MIN_EFFORT > 0. IPOPT relaxes the binary variables to continuous,
-    # so min_effort has no effect with IPOPT.
-    if SPT_MIN_EFFORT > 0.0:
-        v_solver         = "gams"
-        v_solver_options = {"solver": "baron"}
-        v_min_effort     = SPT_MIN_EFFORT
-    else:
-        v_solver         = "ipopt"
-        v_solver_options = {"linear_solver": LINEAR_SOLVER, "tol": 1e-8, "max_iter": 1000}
-        v_min_effort     = None
-
     designer.design_v_optimal(
-        solver                  = v_solver,
-        solver_options          = v_solver_options,
+        solver                  = "ipopt",
+        solver_options          = {"linear_solver": LINEAR_SOLVER, "tol": 1e-8, "max_iter": 1000},
         regularize_fim          = False,
         # let pydex choose when to sample
-        min_effort              = v_min_effort,
     )
     print(f"\nV-optimal  J_V = {designer._criterion_value:.6f}")
     designer.print_optimal_candidates(tol=1e-3)
     v_opt_efforts = designer.efforts.copy()
-
-    # ── Diagnostic: check if IFT sensitivities truly vary across sampling times ──
-    print("\n" + "="*60)
-    print("DIAGNOSTIC: IFT sensitivity variation across sampling times")
-    print("="*60)
-    sens = designer.sensitivities  # shape (n_c, n_spt, n_mr, n_mp)
-    spts = designer.sampling_times_candidates
-    # Use the dominant support candidate (highest effort)
-    eff_2d = designer.efforts.reshape(designer.n_c, -1)
-    c_diag = int(np.argmax(eff_2d.sum(axis=1)))
-    print(f"\n  Candidate {c_diag+1}: "
-          f"T0={designer.ti_controls_candidates[c_diag, 0]:.0f}°C  "
-          f"Tj={designer.ti_controls_candidates[c_diag, 1]:.0f}°C  "
-          f"cat={designer.ti_controls_candidates[c_diag, 2]:.1f}")
-    print(f"\n  {'t (hr)':>8}  {'tr(FIM_t)':>12}  {'||S_t||_F':>12}  {'effort':>8}")
-    print(f"  {'-'*46}")
-    n_spt_diag = sens.shape[1]
-    for t in range(n_spt_diag):
-        S_t    = sens[c_diag, t]                    # (n_mr, n_mp)
-        fim_t  = S_t.T @ S_t
-        effort = float(eff_2d[c_diag, t])
-        print(f"  {spts[c_diag, t]:>8.2f}  {np.trace(fim_t):>12.4f}  "
-              f"{np.linalg.norm(S_t, 'fro'):>12.4f}  {effort:>8.4f}")
-    print("="*60)
 
     # ── 4. A-optimal design (comparison) ──────────────────────────────────────
     # A-optimal minimises total parameter variance: J_A = trace(FIM^{-1})
@@ -1518,11 +1129,8 @@ if __name__ == "__main__":
 
     designer.design_experiment(
         criterion               = designer.a_opt_criterion,
-        solver                  = v_solver,
-        solver_options          = v_solver_options,
-        regularize_fim          = True,   # stabilises FIM^{-1} when FIM is near-singular
-        e0                      = v_opt_efforts,  # warm-start from V-optimal solution
-        min_effort              = v_min_effort,
+        solver                  = "ipopt",
+        solver_options          = {"linear_solver": LINEAR_SOLVER, "tol": 1e-8, "max_iter": 1000},
     )
     print(f"\nA-optimal  J_A = {designer._criterion_value:.6f}")
     designer.print_optimal_candidates(tol=1e-3)
@@ -1540,11 +1148,8 @@ if __name__ == "__main__":
 
     designer.design_experiment(
         criterion               = designer.d_opt_criterion,
-        solver                  = v_solver,
-        solver_options          = v_solver_options,
-        regularize_fim          = True,
-        e0                      = v_opt_efforts,  # warm-start from V-optimal solution
-        min_effort              = v_min_effort,
+        solver                  = "ipopt",
+        solver_options          = {"linear_solver": LINEAR_SOLVER, "tol": 1e-8, "max_iter": 1000},
     )
     print(f"\nD-optimal  J_D = {designer._criterion_value:.6f}")
     designer.print_optimal_candidates(tol=1e-3)

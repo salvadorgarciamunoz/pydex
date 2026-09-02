@@ -2,7 +2,7 @@
 pydex_full_capability_test.py
 ==============================
 Comprehensive test of all pydex Designer capabilities, derived from the
-three-reaction batch model introduced in v_optimal_test_case.py.
+three-reaction batch model introduced in examples/v_optimal/v_optimal_design_no_ift.py.
 
 Reaction system
 ---------------
@@ -213,6 +213,13 @@ def print_pyomo_noise_summary():
 # =============================================================================
 SHOW_PLOTS    = False          # True → display figures interactively
 LINEAR_SOLVER = "ma57"         # "mumps" if HSL not available
+
+# V-optimal reference values (sections 59 and 60). Measured 2026-09-01 with
+# numdifftools 0.11.0 and Ipopt 3.13.2. Quoted to 8 significant figures per
+# the project convention; digits beyond that drift with the numdifftools
+# version.
+J_V_REFERENCE           = 1.0058881e-03   # 59: three-reaction model at dw
+J_V_1ST_ORDER_REFERENCE = 23.568529       # 60: first-order reaction at dw
 VERBOSE       = 1              # 0=silent, 1=summary, 2=full pydex output
 SEED          = 42
 CRIT_RTOL     = 5e-3           # relative tolerance for criterion value assertions
@@ -5301,6 +5308,351 @@ def needs(value, fn, *args, **kwargs):
     return run(fn, value, *args, **kwargs)
 
 
+
+def test_59_v_optimal_guards():
+    """
+    59 — V-optimal: W accuracy at the DEFAULT FD step, the criterion value,
+    and the claim that V beats A and D in prediction variance at dw.
+
+    WHY THIS SECTION EXISTS
+    -----------------------
+    Section 13 already runs the V-optimal workflow end to end, but its only
+    hard assertion is `d.W.shape == (4, 6)`. The criterion value is PRINTED
+    and never checked, at `:.4f` on a quantity of order 1e-3 -- so it renders
+    as `-0.0010` and could drift by 50% without moving a digit. "301/301
+    passed" therefore says nothing about whether V-optimal computes the right
+    number. This section supplies the three checks that were missing.
+
+    Three things are guarded, in increasing order of what they cover:
+
+    1. W AT THE DEFAULT FD STEP (Open Item 3).  `_eval_W_matrix()` builds W by
+       finite differences and is one of the two paths the 0.3.0 per-parameter
+       step fix touched. Every suite section that reaches the OTHER path
+       passes an explicit `base_step` override (0.01 and 1e-4), so the DEFAULT
+       resolved step has never been verified anywhere. Section 13 reaches
+       `_eval_W_matrix()` with no override -- but asserts only the shape, so
+       it exercises the default without testing it. Here W is compared
+       against an independent central-difference reference converged across
+       several step sizes, in the manner of section 54.
+
+       NOTE the reference must reproduce pydex's own scaling or it is not the
+       same quantity: W_ij = S_ij * s_yi / s_theta_j (McAuley eq. 6), with
+       s_yi = sqrt(error_cov[i,i]) and s_theta_j = |theta_j|. Comparing an
+       unscaled closed form is how a 125% "disagreement" was once reported
+       against code that was correct (see 0.7.2).
+
+    2. THE CRITERION VALUE, at full precision against a recorded reference.
+
+    3. V BEATS A AND D AT dw.  This is the claim the V-optimal example makes
+       and the reason the criterion exists: a design that minimises prediction
+       variance at the operating point should do better THERE than designs
+       that minimise parameter uncertainty globally. Nothing in the suite
+       tested it. The comparison is made by scoring all three designs through
+       the SAME J_V functional, which is the only way the numbers are
+       comparable.
+
+    ORDERING TRAP -- do not reorder the calls below.
+    `print_optimal_candidates(tol)` -> `get_optimal_candidates(tol)` ->
+    `_remove_zero_effort_candidates(tol)`, whose body is
+
+        self.efforts[self.efforts < tol] = 0
+        self.efforts = self.efforts / self.efforts.sum()
+
+    i.e. printing the design MUTATES `self.efforts` in place. Section 13
+    prints between the solve and its `compute_criterion_value()` call, which
+    is why the two numbers it reports differ by 0.78% -- they are evaluated at
+    two different designs, before and after trimming. Both are legitimate;
+    they are not the same quantity. Every criterion value below is therefore
+    captured BEFORE any printing.
+    """
+    section("59 — V-optimal: W accuracy, criterion value, and V vs A vs D")
+
+    d = make_designer()
+    d.process_objective   = process_objective
+    d.process_constraints = process_constraints
+    d.dw_sense            = "maximize"
+    d.dw_bounds_tic       = [(45.0, 70.0), (50.0, 85.0), (0.5, 2.0)]
+    d.dw_bounds_tvc       = []
+
+    dw_tic, _ = d.find_optimal_operating_point(
+        init_guess     = np.array([[55.0, 65.0, 1.0],
+                                   [60.0, 75.0, 0.75]]),
+        solver         = "ipopt",
+        solver_options = {"ftol": 1e-8, "maxiter": 500},
+        n_starts       = 1,
+    )
+    d.dw_tic = dw_tic[[int(np.argmax(d._dw_obj_vals))]]
+    d.dw_spt = np.array([T_FINAL])
+    ok(f"Stage 1 dw: {d.dw_tic[0]}")
+
+    # ── 1. W at the default FD step, against an independent reference ────────
+    # No base_step override, deliberately: the whole point is the default.
+    W = np.asarray(d._eval_W_matrix())
+    assert W.shape == (4, 6), f"W must be (4, 6), got {W.shape}"
+
+    theta   = np.asarray(d.model_parameters, dtype=float)
+    s_y     = np.sqrt(np.diag(np.asarray(d.error_cov)))
+    s_theta = np.abs(theta)
+
+    def predict(mp):
+        """Measurable responses at dw, flattened -- the same map W differentiates."""
+        res = d._simulate_internal(d.dw_tic[0], [], np.asarray(mp, float),
+                                   d.dw_spt)
+        return np.asarray(res)[:, d.measurable_responses].flatten()
+
+    # Central differences at several step sizes, kept only where consecutive
+    # refinements agree: a single step size proves nothing about convergence,
+    # and too small a step is dominated by cancellation.
+    def central_jacobian(frac):
+        cols = []
+        for j in range(len(theta)):
+            h = frac * max(abs(theta[j]), 1.0)
+            tp, tm = theta.copy(), theta.copy()
+            tp[j] += h
+            tm[j] -= h
+            cols.append((predict(tp) - predict(tm)) / (2.0 * h))
+        return np.column_stack(cols)
+
+    S_ref = central_jacobian(1e-4)
+    S_alt = central_jacobian(5e-5)
+    ref_converged = np.max(np.abs(S_ref - S_alt) /
+                           np.maximum(np.abs(S_ref), 1e-30))
+    assert ref_converged < 1e-4, (
+        f"the REFERENCE itself is not converged across step sizes "
+        f"({ref_converged:.3e}); it cannot be used to judge pydex")
+    ok(f"independent reference converged across two step sizes: {ref_converged:.3e}")
+
+    W_ref = S_ref * (s_y[:, None] / s_theta[None, :])
+    w_rel = np.max(np.abs(W - W_ref) / np.maximum(np.abs(W_ref), 1e-30))
+    assert w_rel < 1e-4, (
+        f"W at the DEFAULT FD step disagrees with an independent central-"
+        f"difference reference by {w_rel:.3e}. This is the path Open Item 3 "
+        f"flagged as unverified; a flat pre-0.3.0 base_step fails here.")
+    ok(f"W vs independent central differences (DEFAULT step): {w_rel:.3e}")
+
+    # ── 2. the V-optimal design and its criterion value ──────────────────────
+    solver_opts = {"linear_solver": LINEAR_SOLVER, "tol": 1e-8,
+                   "max_iter": 1000}
+    d.design_v_optimal(solver="ipopt", solver_options=solver_opts,
+                       regularize_fim=False)
+
+    # BEFORE any printing -- see the ordering trap in the docstring.
+    efforts_v = np.array(d.efforts, copy=True)
+    J_V_v     = float(d.compute_criterion_value(d.v_opt_criterion))
+
+    # _criterion_value is the NEGATED Pyomo objective (_solve_pyomo returns
+    # -obj_val for every criterion). For D that yields a natural +log det; for
+    # a minimised-positive criterion like V it yields a negative variance,
+    # which is why the reported number carries a minus sign. Compare
+    # magnitudes.
+    assert J_V_v > 0.0, f"J_V is a prediction variance and must be positive, got {J_V_v}"
+    assert abs(abs(d._criterion_value) - J_V_v) / J_V_v < 1e-3, (
+        f"the Pyomo objective ({abs(d._criterion_value):.8e}) and the numpy "
+        f"criterion ({J_V_v:.8e}) disagree by more than solver tolerance")
+    ok(f"Pyomo objective and numpy J_V agree: {J_V_v:.8e}")
+
+    assert abs(J_V_v - J_V_REFERENCE) / J_V_REFERENCE < 1e-3, (
+        f"V-optimal J_V drifted: {J_V_v:.8e} against a recorded "
+        f"{J_V_REFERENCE:.8e}")
+    ok(f"V-optimal J_V: {J_V_v:.8e}  (reference {J_V_REFERENCE:.8e})")
+
+    # ── 3. V beats A and D in prediction variance AT dw ──────────────────────
+    # All three designs are scored through the SAME J_V functional; comparing
+    # each design's own criterion would compare different quantities.
+    def j_v_of(criterion):
+        dd = make_designer()
+        dd.dw_tic = d.dw_tic
+        dd.dw_spt = d.dw_spt
+        dd.W      = W                      # reuse: _eval_W_matrix costs ~100 s
+        dd.design_experiment(criterion, solver="ipopt",
+                             solver_options=solver_opts, write=False)
+        eff = np.array(dd.efforts, copy=True)
+        return float(dd.compute_criterion_value(dd.v_opt_criterion)), eff
+
+    J_V_a, efforts_a = j_v_of(make_designer().a_opt_criterion)
+    J_V_d, efforts_d = j_v_of(make_designer().d_opt_criterion)
+
+    assert np.isfinite(J_V_a) and np.isfinite(J_V_d)
+    assert J_V_v <= J_V_a, (
+        f"V-optimal must not be worse than A-optimal at dw: "
+        f"{J_V_v:.8e} > {J_V_a:.8e}")
+    assert J_V_v <= J_V_d, (
+        f"V-optimal must not be worse than D-optimal at dw: "
+        f"{J_V_v:.8e} > {J_V_d:.8e}")
+    ok(f"prediction variance at dw -- V {J_V_v:.6e} <= A {J_V_a:.6e}, "
+       f"D {J_V_d:.6e}")
+
+    # A design that merely tied everywhere would satisfy the two assertions
+    # above while proving nothing, so require the V design to be DISTINCT.
+    assert not np.allclose(efforts_v, efforts_d, atol=1e-6), (
+        "the V-optimal and D-optimal designs are identical; this section "
+        "would pass while testing nothing")
+    ok("the V-optimal design differs from the D-optimal design")
+
+
+def test_60_v_optimal_fim_path_agreement():
+    """
+    60 — V-optimal: FIM path agreement (FD vs Pyomo IFT), and W against a
+    closed form at the DEFAULT FD step.
+
+    WHY THIS SECTION EXISTS
+    -----------------------
+    V-optimal appears in this suite in exactly one other place, section 13,
+    and that runs on the FD sensitivity path. NOTHING combined V-optimal with
+    the Pyomo IFT path -- that combination was exercised only by
+    `examples/v_optimal/v_optimal_design.py`, which is an example and is run
+    by neither CI nor this suite. This section takes over that duty.
+
+    WHAT ACTUALLY HAS TWO PATHS, AND WHAT DOES NOT
+    ----------------------------------------------
+    `J_V = trace(W FIM^-1 W^T)` has two ingredients and only one of them has
+    two implementations:
+
+        W    -- sensitivities of the response at dw. `_eval_W_matrix()` builds
+                these with numdifftools on `_simulate_internal`, and has NO
+                IFT branch. It is finite differences even when
+                `pyomo_model_fn` is set.
+        FIM  -- sensitivities over the candidate grid, via
+                `eval_sensitivities()`, which DOES have FD and IFT paths.
+
+    So a V-optimal design on an IFT model today combines an IFT-derived FIM
+    with an FD-derived W. The divergence that can actually occur is in the
+    FIM, and that is what is tested here. This section is deliberately NOT
+    named "sensitivity path agreement", because it does not cross-check W by
+    two paths -- there is only one.
+
+    THE W-IDENTITY ASSERTION IS A CONTRACT, NOT A COINCIDENCE
+    ---------------------------------------------------------
+    W comes out BITWISE identical between the two designers (measured: max
+    abs difference exactly 0.0), because the same FD code runs in both. That
+    is asserted below on purpose. If anyone later adds an IFT branch to
+    `_eval_W_matrix()` -- a reasonable thing to want, since the W pass is the
+    dominant cost of section 59 at ~108 s on one core -- this assertion fires
+    and forces the change to be deliberate rather than silent. Note section
+    59 measures W by FD against an independent central-difference reference at
+    4.827e-08, so such a branch would be a PERFORMANCE and CONSISTENCY change,
+    not a correctness fix. There is no accuracy defect here to go looking for.
+
+    WHY THE CLOSED FORM MATTERS HERE
+    --------------------------------
+    On this model FD is very nearly exact, so "FD agrees with IFT" is a weak
+    claim on its own -- two paths agreeing is weak evidence, as this project
+    has paid to learn (the 0.3.0 FD defect was mis-attributed to IFT for some
+    time because FD and IFT were only ever compared to each other). For
+    dA/dt = -k*A the sensitivities are analytic:
+
+        A       = A0 * exp(-k*t)
+        dA/dk   = -t * A0 * exp(-k*t)
+        dA/dA0  = exp(-k*t)
+
+    and pydex scales them as W_ij = S_ij * s_yi / |theta_j| (McAuley eq. 6),
+    so W has an exact value requiring no numerics at all. That is the third,
+    independent reference, and it is checked at the DEFAULT FD step with no
+    `base_step` override -- unlike section 24, which passes `base_step=0.01`
+    and so cannot speak to the default (Open Item 3).
+    """
+    section("60 — V-optimal: FIM path agreement (FD vs IFT), W vs closed form")
+
+    if not _PYOMO_AVAILABLE:
+        ok("SKIPPED — Pyomo not available")
+        return
+
+    theta   = np.array([0.5, 1.0])          # k, A0
+    t_cands = np.linspace(0.1, 10.0, 11).reshape(-1, 1)
+    dw_tic  = np.array([[3.0]])             # the operating point of interest
+
+    def build(use_ift):
+        d = Designer()
+        d.simulate               = _simulate_1st_order
+        d.model_parameters       = theta
+        d.model_parameter_names  = ["k", "A0"]
+        d.ti_controls_names      = ["t_f"]
+        d.response_names         = ["A"]
+        d.ti_controls_candidates = t_cands
+        d.error_cov              = np.eye(1)
+        if use_ift:
+            d.pyomo_model_fn = _build_pyomo_model_1st_order
+            d.n_jobs         = 1
+        d.initialize(verbose=0)
+        d.dw_tic = dw_tic
+        # Static model: dw_spt is required by design_v_optimal() but carries
+        # no time information here.
+        d.dw_spt = np.array([0.0])
+        return d
+
+    solver_opts = {"linear_solver": LINEAR_SOLVER, "tol": 1e-8,
+                   "max_iter": 1000}
+    results = {}
+    for tag, use_ift in (("FD", False), ("IFT", True)):
+        d = build(use_ift)
+        assert d.use_pyomo_ift is use_ift, \
+            f"{tag}: expected use_pyomo_ift={use_ift}, got {d.use_pyomo_ift}"
+        d.design_v_optimal(solver="ipopt", solver_options=solver_opts,
+                           regularize_fim=False)
+        # Captured BEFORE any printing: print_optimal_candidates() ->
+        # get_optimal_candidates() -> _remove_zero_effort_candidates() mutates
+        # self.efforts in place. See section 59's docstring.
+        results[tag] = (
+            np.asarray(d.W, dtype=float).copy(),
+            np.array(d.efforts, copy=True),
+            float(d.compute_criterion_value(d.v_opt_criterion)),
+        )
+    ok("V-optimal solved on both the FD and the Pyomo IFT designer")
+
+    W_fd,  eff_fd,  J_fd  = results["FD"]
+    W_ift, eff_ift, J_ift = results["IFT"]
+
+    # ── W against the exact closed form, at the default FD step ─────────────
+    t  = float(dw_tic[0, 0])
+    k, A0 = float(theta[0]), float(theta[1])
+    s_y = float(np.sqrt(np.asarray(np.eye(1))[0, 0]))
+    W_exact = np.array([[-t * A0 * np.exp(-k * t) * s_y / abs(k),
+                                 np.exp(-k * t) * s_y / abs(A0)]])
+
+    assert W_fd.shape == W_exact.shape == (1, 2), \
+        f"W must be (1, 2) for one response and two parameters, got {W_fd.shape}"
+    w_rel = float(np.max(np.abs(W_fd - W_exact) / np.abs(W_exact)))
+    assert w_rel < 1e-6, (
+        f"W at the DEFAULT FD step disagrees with the closed form by "
+        f"{w_rel:.3e}; a flat pre-0.3.0 base_step fails here")
+    ok(f"W vs closed form (DEFAULT FD step): {w_rel:.3e}")
+
+    # ── W is FD on BOTH paths -- pinning current behaviour ──────────────────
+    assert np.array_equal(W_fd, W_ift), (
+        "W differs between the FD and IFT designers. _eval_W_matrix() is "
+        "currently finite-difference only and has no IFT branch, so W must be "
+        "bitwise identical. If an IFT branch has been added deliberately, "
+        "update this assertion and section 59's W reference together.")
+    ok("W is bitwise identical on both paths (_eval_W_matrix is FD-only)")
+
+    # ── the FIM path: J_V and the design must agree ─────────────────────────
+    assert J_fd > 0.0 and J_ift > 0.0, \
+        f"J_V is a prediction variance and must be positive: {J_fd}, {J_ift}"
+    j_rel = abs(J_fd - J_ift) / J_fd
+    assert j_rel < 1e-6, (
+        f"V-optimal J_V differs between the FD and IFT FIM paths by "
+        f"{j_rel:.3e}")
+    ok(f"J_V agrees across FIM paths: {j_rel:.3e}  (FD {J_fd:.8f})")
+
+    eff_rel = float(np.max(np.abs(eff_fd - eff_ift)))
+    assert eff_rel < 1e-6, (
+        f"the FD and IFT V-optimal DESIGNS differ by {eff_rel:.3e}; a "
+        f"criterion-value agreement with a different design would be a "
+        f"coincidence, not agreement")
+    ok(f"the two designs agree: max |difference| = {eff_rel:.3e}")
+
+    assert abs(J_fd - J_V_1ST_ORDER_REFERENCE) / J_V_1ST_ORDER_REFERENCE < 1e-6, (
+        f"V-optimal J_V on the first-order model drifted: {J_fd:.8f} against "
+        f"a recorded {J_V_1ST_ORDER_REFERENCE:.8f}")
+    ok(f"J_V vs recorded reference: {J_fd:.8f}")
+
+    # The design must not be uniform, or every assertion above would hold for
+    # a solver that did nothing.
+    assert not np.allclose(eff_fd, eff_fd.mean(), atol=1e-6), \
+        "the V-optimal design is uniform; this section would pass while " \
+        "testing nothing"
+    ok("the design is non-uniform (the solve did something)")
+
 if __name__ == "__main__":
     print("\n" + "\u2588"*70)
     print("  pydex full capability test")
@@ -5395,6 +5747,8 @@ if __name__ == "__main__":
     run(test_56_fixed_grid_vs_static_reformulation)
     run(test_57_apportion_non_d_optimal, d_small)
     run(test_58_static_sampling_times_shape_and_state_roundtrip)
+    run(test_59_v_optimal_guards)
+    run(test_60_v_optimal_fim_path_agreement)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print_pyomo_noise_summary()

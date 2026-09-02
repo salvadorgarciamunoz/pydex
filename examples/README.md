@@ -443,6 +443,37 @@ for these problems, not a proof.
   the same check automatically when the utility is importable.
 - `pydex_ift_asl_guide.docx` — background on the IFT/ASL interaction.
 
+## V-optimal MBDoE — `examples/v_optimal/`
+
+Two-stage V-optimal design on a three-reaction batch reactor, following
+Shahmohammadi & McAuley (2019). Stage 1 finds the operating point that
+maximises yield subject to quality and safety constraints; Stage 2 designs the
+V-optimal experiment and compares it against A- and D-optimal designs to
+quantify the prediction-accuracy benefit **at that operating point**.
+
+- `v_optimal_design.py` — exact IFT sensitivities via Pyomo collocation
+- `v_optimal_design_no_ift.py` — finite-difference sensitivities
+
+The suffix scheme is the same as `examples/ode/`, but note these two scripts
+**deviate from the two-file convention deliberately**: each is self-contained
+rather than split into a `*_model.py` and a runner. They were written as
+standalone test cases and moved here unchanged.
+
+**Why V-optimal rather than D-optimal.** D- and A-optimality minimise
+parameter uncertainty globally; V-optimality minimises prediction variance at
+a *specific* operating point. Measured on the three-reaction model, the
+V-optimal design gives prediction variance `1.0058881e-03` at `dw` against
+`1.4236370e-03` for A-optimal and `1.5798500e-03` for D-optimal — 29% and 36%
+lower respectively.
+
+Guarded by capability-suite sections 59 (the criterion value, the W matrix
+against an independent reference, and the V-beats-A-and-D claim) and 60 (the
+FD and Pyomo IFT FIM paths agreeing).
+
+Note `v_optimal_design_no_ift.py` carries **no recorded criterion value** in
+its docstring, unlike the 0.7.3-swept examples. Its number has never been
+measured against anything.
+
 ## Jupyter — `examples/jupyter/`
 
 - `pydex_quickstart.ipynb` — narrated walkthrough of a first design.

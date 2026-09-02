@@ -64,6 +64,7 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#asl-elimination">ASL elimination</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#jupyter-notebooks">Jupyter notebooks</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#v-optimal-mbdoe">V-optimal MBDoE</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#test-scripts-as-worked-examples">Test scripts as worked examples</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#publication-code">Publication code</a></li>
 </ul>
@@ -564,18 +565,30 @@ jupyter<span class="w"> </span>lab
 </pre></div>
 </div>
 </section>
+<section id="v-optimal-mbdoe">
+<h2>V-optimal MBDoE<a class="headerlink" href="#v-optimal-mbdoe" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">examples/v_optimal/</span></code> — two-stage V-optimal design on the three-reaction
+batch reactor. Stage 1 finds the operating point that maximises yield subject
+to quality and safety constraints; Stage 2 designs the V-optimal experiment
+and compares it against A- and D-optimal designs to quantify the
+prediction-accuracy benefit at that operating point.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">v_optimal_design.py</span></code> — exact IFT sensitivities via Pyomo collocation</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">v_optimal_design_no_ift.py</span></code> — finite-difference sensitivities</p></li>
+</ul>
+<p>Unlike <code class="docutils literal notranslate"><span class="pre">examples/ode/</span></code>, each script is self-contained rather than split into
+a <code class="docutils literal notranslate"><span class="pre">*_model.py</span></code> and a driver. Guarded by capability-suite sections 59 and 60.</p>
+</section>
 <section id="test-scripts-as-worked-examples">
 <h2>Test scripts as worked examples<a class="headerlink" href="#test-scripts-as-worked-examples" title="Link to this heading"></a></h2>
 <p><code class="docutils literal notranslate"><span class="pre">testing_scripts/</span></code> doubles as a set of larger examples. They are standalone
 scripts, run individually — the capability suite does not execute them, though
-it does reuse the three-reaction batch model introduced in
-<code class="docutils literal notranslate"><span class="pre">v_optimal_test_case.py</span></code>:</p>
+it does reuse the three-reaction batch model that now lives in
+<code class="docutils literal notranslate"><span class="pre">examples/v_optimal/</span></code>:</p>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">first_order_reaction.py</span></code> / <code class="docutils literal notranslate"><span class="pre">first_order_reaction_pyomo.py</span></code> — the same
 problem posed twice, once with a plain <code class="docutils literal notranslate"><span class="pre">simulate()</span></code> and once with a Pyomo
 model.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">v_optimal_test_case.py</span></code> / <code class="docutils literal notranslate"><span class="pre">v_optimal_test_case_pyomo.py</span></code> — the two-stage
-V-optimal workflow.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">smoke_test_designer.py</span></code> — the fastest end-to-end check that needs a
 solver: Ds-optimality resolved by name, the A-optimality singular-FIM
 behaviour, Ds succeeding where D-optimal cannot, and the <code class="docutils literal notranslate"><span class="pre">regularize_fim</span></code>

@@ -459,8 +459,8 @@ designer.design_experiment(
 )
 ```
 
-See `testing_scripts/v_optimal_test_case.py` for a complete worked
-example with a three-reaction batch reactor system.
+See `examples/v_optimal/` for a complete worked example with a
+three-reaction batch reactor system.
 
 > Shahmohammadi, A. & McAuley, K.B. (2019). Sequential model-based A- and
 > V-optimal design of experiments for building fundamental models of
@@ -471,7 +471,9 @@ example with a three-reaction batch reactor system.
 
 ## Examples
 
-The `examples/` folder is organised into three subfolders.
+The `examples/` folder is organised by topic; `examples/README.md`
+documents every subfolder, including `vle/`, `b_optimal/` and
+`sequential/`, which are not repeated here.
 
 ### `examples/ode/` — ODE/DAE design scripts
 
@@ -502,6 +504,20 @@ controls `[CA0, T]`, responses `[CA, CB]`): `case_2.py`,
   sensitivity analysis)
 - `case_3_ift.py` — exact IFT sensitivities via collocation + IPOPT
   (~5–15 s; roughly 20–70× faster)
+
+### `examples/v_optimal/` — V-optimal MBDoE
+
+Two-stage V-optimal design on the three-reaction batch reactor: Stage 1
+finds the operating point that maximises yield subject to quality and
+safety constraints; Stage 2 designs the V-optimal experiment and compares
+it against A- and D-optimal designs to quantify the prediction-accuracy
+benefit at that operating point. Unlike `examples/ode/`, each script is
+self-contained rather than split into a `*_model.py` and a driver.
+
+- `v_optimal_design.py` — exact IFT sensitivities via Pyomo collocation
+- `v_optimal_design_no_ift.py` — finite-difference sensitivities
+
+Guarded by capability-suite sections 59 and 60.
 
 ### `examples/jupyter/` — introductory notebooks
 
@@ -573,15 +589,6 @@ cannot, and the `regularize_fim` path.
 
   > The MINLP section requires GAMS/BARON; if those are unavailable that
   > section is the only part that will not run.
-
-- **`v_optimal_test_case.py`** — full two-stage V-optimal MBDoE on the
-  three-reaction batch reactor: Stage 1 finds the operating point that
-  maximises yield subject to quality/safety constraints; Stage 2 designs
-  the V-optimal experiment and compares it against A- and D-optimal
-  designs to quantify the prediction-accuracy benefit.
-
-- **`v_optimal_test_case_pyomo.py`** — the same V-optimal workflow run
-  through the Pyomo IFT sensitivity path.
 
 - **`first_order_reaction.py`** — minimal D-optimal example on the
   first-order reaction `A→B` using the analytic solution and

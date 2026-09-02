@@ -481,19 +481,32 @@ To run them locally:
    cd examples/jupyter
    jupyter lab
 
+V-optimal MBDoE
+---------------
+
+``examples/v_optimal/`` — two-stage V-optimal design on the three-reaction
+batch reactor. Stage 1 finds the operating point that maximises yield subject
+to quality and safety constraints; Stage 2 designs the V-optimal experiment
+and compares it against A- and D-optimal designs to quantify the
+prediction-accuracy benefit at that operating point.
+
+* ``v_optimal_design.py`` — exact IFT sensitivities via Pyomo collocation
+* ``v_optimal_design_no_ift.py`` — finite-difference sensitivities
+
+Unlike ``examples/ode/``, each script is self-contained rather than split into
+a ``*_model.py`` and a driver. Guarded by capability-suite sections 59 and 60.
+
 Test scripts as worked examples
 -------------------------------
 
 ``testing_scripts/`` doubles as a set of larger examples. They are standalone
 scripts, run individually — the capability suite does not execute them, though
-it does reuse the three-reaction batch model introduced in
-``v_optimal_test_case.py``:
+it does reuse the three-reaction batch model that now lives in
+``examples/v_optimal/``:
 
 * ``first_order_reaction.py`` / ``first_order_reaction_pyomo.py`` — the same
   problem posed twice, once with a plain ``simulate()`` and once with a Pyomo
   model.
-* ``v_optimal_test_case.py`` / ``v_optimal_test_case_pyomo.py`` — the two-stage
-  V-optimal workflow.
 * ``smoke_test_designer.py`` — the fastest end-to-end check that needs a
   solver: Ds-optimality resolved by name, the A-optimality singular-FIM
   behaviour, Ds succeeding where D-optimal cannot, and the ``regularize_fim``
