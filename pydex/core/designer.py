@@ -4175,10 +4175,16 @@ class Designer:
             write (bool): Write the result to the result directory.
             save_sensitivities (bool): Cache sensitivities to disk.
             trim_fim (bool): Drop uninformative rows/columns from the FIM.
-            pseudo_bayesian_type (int or str, optional): 0 or ``'avg_inf'`` to
-                average the information matrices, 1 or ``'avg_crit'`` to average
-                the criterion. Required when :attr:`model_parameters` is a
-                scenario array.
+            pseudo_bayesian_type (int or str, optional): 0 or ``'avg_inf'``
+                to average the information matrices, 1 or ``'avg_crit'`` to
+                average the criterion. Applies only when
+                :attr:`model_parameters` is a scenario array. **Defaults to 0**
+                when omitted -- it is not required, despite what earlier
+                versions of this docstring said. NOTE this OVERWRITES
+                ``self._pseudo_bayesian_type`` from the keyword, so setting
+                that attribute directly has no effect; omitting the keyword
+                after :meth:`load_oed_result` restored a type therefore
+                discards it, and warns when it does.
             regularize_fim (bool): Add ``_eps * I`` to the FIM. NOTE this
                 OVERWRITES ``self._regularize_fim`` from the keyword, so setting
                 that attribute directly has no effect.
@@ -4356,6 +4362,30 @@ class Designer:
         """ setting default semi-bayes behaviour """
         if self._pseudo_bayesian:
             if pseudo_bayesian_type is None:
+                # Omitting the argument means "use the default", and it keeps
+                # meaning that: the call stays stateless rather than reusing
+                # whatever the designer happens to be carrying.
+                #
+                # But the reset is not always harmless. load_oed_result()
+                # restores _pseudo_bayesian_type from a saved result, so
+                # loading a type-1 design and re-designing without repeating
+                # the keyword silently switched the aggregation from
+                # average-criterion to average-information -- a different
+                # quantity, no warning, and a report that then truthfully said
+                # type 0. Say so instead of discarding it in silence.
+                _existing = getattr(self, "_pseudo_bayesian_type", None)
+                if _existing is not None and _existing != 0:
+                    warnings.warn(
+                        f"pseudo_bayesian_type was not passed to "
+                        f"design_experiment(), so it defaults to 0 "
+                        f"(average information). This DISCARDS the "
+                        f"designer's current value of {_existing!r}, which "
+                        f"may have come from load_oed_result() or an earlier "
+                        f"design. Pass pseudo_bayesian_type explicitly to "
+                        f"keep it -- setting the attribute is not enough.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
                 self._pseudo_bayesian_type = 0
             else:
                 valid_types = [

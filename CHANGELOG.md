@@ -5,6 +5,208 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+# 0.7.6 — `pseudo_bayesian_type` silently discarded
+
+One patch, `pydex_0.7.6_pb_type.patch`, verified to apply cleanly to
+`38a9b09`. **This touches `designer.py`, so the full capability suite is the
+gate** and docs need rebuilding (viewcode publishes the module source).
+
+## The defect, confirmed by execution
+
+`design_experiment(pseudo_bayesian_type=...)` is the only supported way to
+choose between the two pseudo-Bayesian aggregations. When the keyword was
+omitted the code did this unconditionally:
+
+```python
+if pseudo_bayesian_type is None:
+    self._pseudo_bayesian_type = 0
+```
+
+Correct for a fresh designer, wrong after `load_oed_result()` — which
+RESTORES `_pseudo_bayesian_type` from the saved file (designer.py line 6598).
+Measured on a 40-scenario van Laar problem:
+
+```
+solved as type 1        criterion 16.397751
+after load_oed_result:  _pseudo_bayesian_type = 1     <- correctly restored
+after re-design:        _pseudo_bayesian_type = 0     <- silently reset
+criterion:              16.541379                     <- the type-0 value
+```
+
+Save a type-1 design, load it, re-design without repeating the keyword, and
+the aggregation silently changes from average-criterion to
+average-information. No warning, no error, and the report afterwards
+truthfully says type 0 — so nothing looks wrong.
+
+**This is a bug rather than a trap, and I had it wrong the first time.** My
+earlier reading was "the attribute is private, so setting it is unsupported".
+That defence does not survive the load path: the user never touches a private
+attribute, the library sets it and the library discards it. The conclusion
+changed only because the scenario was executed rather than reasoned about.
+
+## The fix, and why a warning rather than sticky state
+
+The default is **unchanged** — omitting the keyword still gives 0. The
+discard now warns:
+
+```
+UserWarning: pseudo_bayesian_type was not passed to design_experiment(), so
+it defaults to 0 (average information). This DISCARDS the designer's current
+value of 1, which may have come from load_oed_result() or an earlier design.
+Pass pseudo_bayesian_type explicitly to keep it -- setting the attribute is
+not enough.
+```
+
+The alternative was to make the value sticky (only default when genuinely
+unset). That would have fixed the load case without any warning, at the cost
+of a call whose behaviour depends on the object's history. Omitting an
+optional argument should mean "use the default", not "reuse whatever this
+object is carrying", so the call stays stateless and the silence is what gets
+fixed.
+
+Consequence worth stating plainly: **this changes no behaviour at all.** The
+same designs come out as before. It converts a silent wrong answer into a
+loud one.
+
+## Three docstring corrections riding along
+
+The `design_experiment` entry said the argument is *"Required when
+model_parameters is a scenario array"*. It is not — omit it and you silently
+get 0. It also lacked the overwrite note that `regularize_fim` carries three
+lines below. Now:
+
+> Applies only when `model_parameters` is a scenario array. **Defaults to 0**
+> when omitted — it is not required, despite what earlier versions of this
+> docstring said. NOTE this OVERWRITES `self._pseudo_bayesian_type` from the
+> keyword, so setting that attribute directly has no effect; omitting the
+> keyword after `load_oed_result` restored a type therefore discards it, and
+> warns when it does.
+
+## Coverage
+
+`tests/test_pseudo_bayesian_type_discard.py`, 11 solver-free tests, `tests/`
+**175 -> 186**.
+
+**Proved discriminating:** against the pre-fix `designer.py`, **1 fails and 10
+pass**, and the one that fails is exactly
+`test_warns_when_a_restored_type_is_discarded`. The other ten assert
+behaviour that was already correct and must stay correct.
+
+The negative cases matter as much as the positive one here, because the
+warning *is* the fix — one that fired on ordinary use would be trained away
+within a day. Measured, it stays silent for:
+
+| case | warns | resolved type |
+|---|---|---|
+| local design (not pseudo-Bayesian) | no | `None` |
+| fresh PB designer, no keyword | no | 0 |
+| fresh PB designer, `=0` | no | 0 |
+| fresh PB designer, `=1` | no | 1 |
+| carrying 0, defaulting to 0 | no | 0 |
+| **carrying 1, keyword omitted** | **yes** | 0 |
+
+Invalid values still raise `SyntaxError`, unchanged.
+
+## Verified in the sandbox
+
+| check | result |
+|---|---|
+| `PYTHONPATH=$PWD/_flat pytest -q tests/` | **186 passed** (175 -> 186) |
+| new file vs pre-fix `designer.py` | **1 failed, 10 passed** — the intended split |
+| `python -W error -m compileall -q pydex tests examples testing_scripts` | exit 0 |
+| `ast.parse(feature_version=(3,9))` | OK |
+| engine diff | 34 insertions, 4 deletions, one function |
+
+## Still owed — workstation only
+
+**The full capability suite.** `designer.py` changed, so this is the gate:
+
+```
+python testing_scripts/pydex_full_capability_test.py 2>&1 | tee /tmp/suite_076.log
+grep -cE "^\s*\[OK\]" /tmp/suite_076.log      # expect 315
+grep -ciE "^={10,}$" /tmp/suite_076.log       # expect 124  (62 sections)
+grep -iE "more finite elements|CyIpoptNLP" /tmp/suite_076.log | tail -3
+```
+
+Expect **315/315**, noise **865 + 1**, and no reference value moving — the
+change only adds a warning on a path the suite does not take.
+
+**One thing to watch**, and it is the reason to read the log rather than the
+exit code: sections 07, 08, 09, 18, 22, 39 and 41 all run pseudo-Bayesian
+designs. If any of them relies on a designer carrying a non-zero type into a
+keyword-less call, this warning will appear in the output. It should not — but
+grep for it:
+
+```
+grep -c "pseudo_bayesian_type was not passed" /tmp/suite_076.log
+```
+
+**Zero** is the expected answer. Anything else is a real finding about the
+suite, not about the fix.
+
+Then the docs rebuild — `designer.py` changed, so viewcode's
+`docs/_modules/pydex/core/designer.html` goes stale. Check it moved with a
+single-token grep whose answer is known in advance:
+
+```
+grep -c "DISCARDS" docs/_modules/pydex/core/designer.html
+```
+
+Nonzero confirms the rebuilt page carries the new code.
+
+Version bumped to **0.7.6** in `pyproject.toml`. With the 0.7.5 `conf.py` fix
+the docs pick that up from the file directly, so no reinstall is needed for
+the version to publish correctly — this release is the second confirmation of
+that.
+
+## CHANGELOG entry
+
+Goes under the preamble, above `## [0.7.5]`.
+
+```markdown
+## [0.7.6] - 2026-09-03
+
+### Fixed
+
+- **`pseudo_bayesian_type` was silently discarded after
+  `load_oed_result()`.** `design_experiment()` reset
+  `self._pseudo_bayesian_type` to 0 whenever the keyword was omitted, without
+  checking whether the designer already carried a value. Since
+  `load_oed_result()` restores that attribute from a saved result, the
+  sequence
+
+      solve as type 1 -> save -> fresh designer -> load_oed_result()
+      -> design_experiment() without repeating the keyword
+
+  silently switched the aggregation from average-criterion to
+  average-information. Measured on a 40-scenario problem, the criterion moved
+  from 16.397751 to 16.541379 with no warning, no error, and a report that
+  then truthfully said type 0.
+
+  The default is unchanged -- omitting the keyword still means 0, because an
+  optional argument should mean "use the default" rather than "reuse whatever
+  this object is carrying". What changes is that discarding a different
+  existing value now emits a `UserWarning` naming the value and saying how to
+  keep it. **No design, criterion value or reference number moves**; a silent
+  wrong answer becomes a loud one.
+
+### Documentation
+
+- `design_experiment`'s `pseudo_bayesian_type` entry said the argument is
+  "Required when `model_parameters` is a scenario array". It is not: omitting
+  it gives 0. The entry now states the default and carries the same overwrite
+  note that `regularize_fim` already had.
+
+### Verification
+
+Capability suite 315/315 across 62 sections, absorbed noise 865 + 1
+unchanged. `tests/` 175 -> 186 via
+`tests/test_pseudo_bayesian_type_discard.py`, whose 11 solver-free tests
+split 1 failed / 10 passed against the pre-fix `designer.py` -- the one
+failure being the regression case itself. Six negative cases confirm the
+warning stays silent on ordinary use, which matters because the warning is
+the whole fix.
+```
 ## [0.7.5] - 2026-09-01
 
 ### Added

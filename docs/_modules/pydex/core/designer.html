@@ -5,14 +5,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>pydex.core.designer &mdash; pydex 0.7.5 documentation</title>
+  <title>pydex.core.designer &mdash; pydex 0.7.6 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
 
   
       <script src="../../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="../../../_static/documentation_options.js?v=a674670e"></script>
+      <script src="../../../_static/documentation_options.js?v=918ced64"></script>
       <script src="../../../_static/doctools.js?v=9bcbadda"></script>
       <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../../../_static/js/theme.js"></script>
@@ -4288,10 +4288,16 @@
 <span class="sd">            write (bool): Write the result to the result directory.</span>
 <span class="sd">            save_sensitivities (bool): Cache sensitivities to disk.</span>
 <span class="sd">            trim_fim (bool): Drop uninformative rows/columns from the FIM.</span>
-<span class="sd">            pseudo_bayesian_type (int or str, optional): 0 or ``&#39;avg_inf&#39;`` to</span>
-<span class="sd">                average the information matrices, 1 or ``&#39;avg_crit&#39;`` to average</span>
-<span class="sd">                the criterion. Required when :attr:`model_parameters` is a</span>
-<span class="sd">                scenario array.</span>
+<span class="sd">            pseudo_bayesian_type (int or str, optional): 0 or ``&#39;avg_inf&#39;``</span>
+<span class="sd">                to average the information matrices, 1 or ``&#39;avg_crit&#39;`` to</span>
+<span class="sd">                average the criterion. Applies only when</span>
+<span class="sd">                :attr:`model_parameters` is a scenario array. **Defaults to 0**</span>
+<span class="sd">                when omitted -- it is not required, despite what earlier</span>
+<span class="sd">                versions of this docstring said. NOTE this OVERWRITES</span>
+<span class="sd">                ``self._pseudo_bayesian_type`` from the keyword, so setting</span>
+<span class="sd">                that attribute directly has no effect; omitting the keyword</span>
+<span class="sd">                after :meth:`load_oed_result` restored a type therefore</span>
+<span class="sd">                discards it, and warns when it does.</span>
 <span class="sd">            regularize_fim (bool): Add ``_eps * I`` to the FIM. NOTE this</span>
 <span class="sd">                OVERWRITES ``self._regularize_fim`` from the keyword, so setting</span>
 <span class="sd">                that attribute directly has no effect.</span>
@@ -4469,6 +4475,30 @@
 <span class="w">        </span><span class="sd">&quot;&quot;&quot; setting default semi-bayes behaviour &quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_bayesian</span><span class="p">:</span>
             <span class="k">if</span> <span class="n">pseudo_bayesian_type</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="c1"># Omitting the argument means &quot;use the default&quot;, and it keeps</span>
+                <span class="c1"># meaning that: the call stays stateless rather than reusing</span>
+                <span class="c1"># whatever the designer happens to be carrying.</span>
+                <span class="c1">#</span>
+                <span class="c1"># But the reset is not always harmless. load_oed_result()</span>
+                <span class="c1"># restores _pseudo_bayesian_type from a saved result, so</span>
+                <span class="c1"># loading a type-1 design and re-designing without repeating</span>
+                <span class="c1"># the keyword silently switched the aggregation from</span>
+                <span class="c1"># average-criterion to average-information -- a different</span>
+                <span class="c1"># quantity, no warning, and a report that then truthfully said</span>
+                <span class="c1"># type 0. Say so instead of discarding it in silence.</span>
+                <span class="n">_existing</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;_pseudo_bayesian_type&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">_existing</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">_existing</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span>
+                    <span class="n">warnings</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">&quot;pseudo_bayesian_type was not passed to &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;design_experiment(), so it defaults to 0 &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;(average information). This DISCARDS the &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;designer&#39;s current value of </span><span class="si">{</span><span class="n">_existing</span><span class="si">!r}</span><span class="s2">, which &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;may have come from load_oed_result() or an earlier &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;design. Pass pseudo_bayesian_type explicitly to &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;keep it -- setting the attribute is not enough.&quot;</span><span class="p">,</span>
+                        <span class="ne">UserWarning</span><span class="p">,</span>
+                        <span class="n">stacklevel</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+                    <span class="p">)</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_bayesian_type</span> <span class="o">=</span> <span class="mi">0</span>
             <span class="k">else</span><span class="p">:</span>
                 <span class="n">valid_types</span> <span class="o">=</span> <span class="p">[</span>

@@ -6,14 +6,14 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>API Reference &mdash; pydex 0.7.5 documentation</title>
+  <title>API Reference &mdash; pydex 0.7.6 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
 
   
       <script src="_static/jquery.js?v=5d32c60e"></script>
       <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="_static/documentation_options.js?v=a674670e"></script>
+      <script src="_static/documentation_options.js?v=918ced64"></script>
       <script src="_static/doctools.js?v=9bcbadda"></script>
       <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="_static/js/theme.js"></script>
@@ -1380,10 +1380,16 @@ path all but <code class="docutils literal notranslate"><span class="pre">ftol</
 <li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Write the result to the result directory.</p></li>
 <li><p><strong>save_sensitivities</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Cache sensitivities to disk.</p></li>
 <li><p><strong>trim_fim</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Drop uninformative rows/columns from the FIM.</p></li>
-<li><p><strong>pseudo_bayesian_type</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em> or </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><em>optional</em>) – 0 or <code class="docutils literal notranslate"><span class="pre">'avg_inf'</span></code> to
-average the information matrices, 1 or <code class="docutils literal notranslate"><span class="pre">'avg_crit'</span></code> to average
-the criterion. Required when <a class="reference internal" href="#pydex.core.designer.Designer.model_parameters" title="pydex.core.designer.Designer.model_parameters"><code class="xref py py-attr docutils literal notranslate"><span class="pre">model_parameters</span></code></a> is a
-scenario array.</p></li>
+<li><p><strong>pseudo_bayesian_type</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em> or </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><em>optional</em>) – 0 or <code class="docutils literal notranslate"><span class="pre">'avg_inf'</span></code>
+to average the information matrices, 1 or <code class="docutils literal notranslate"><span class="pre">'avg_crit'</span></code> to
+average the criterion. Applies only when
+<a class="reference internal" href="#pydex.core.designer.Designer.model_parameters" title="pydex.core.designer.Designer.model_parameters"><code class="xref py py-attr docutils literal notranslate"><span class="pre">model_parameters</span></code></a> is a scenario array. <strong>Defaults to 0</strong>
+when omitted – it is not required, despite what earlier
+versions of this docstring said. NOTE this OVERWRITES
+<code class="docutils literal notranslate"><span class="pre">self._pseudo_bayesian_type</span></code> from the keyword, so setting
+that attribute directly has no effect; omitting the keyword
+after <a class="reference internal" href="#pydex.core.designer.Designer.load_oed_result" title="pydex.core.designer.Designer.load_oed_result"><code class="xref py py-meth docutils literal notranslate"><span class="pre">load_oed_result()</span></code></a> restored a type therefore
+discards it, and warns when it does.</p></li>
 <li><p><strong>regularize_fim</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Add <code class="docutils literal notranslate"><span class="pre">_eps</span> <span class="pre">*</span> <span class="pre">I</span></code> to the FIM. NOTE this
 OVERWRITES <code class="docutils literal notranslate"><span class="pre">self._regularize_fim</span></code> from the keyword, so setting
 that attribute directly has no effect.</p></li>
