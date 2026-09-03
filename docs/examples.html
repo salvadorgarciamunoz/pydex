@@ -66,7 +66,7 @@
 <li class="toctree-l2"><a class="reference internal" href="#jupyter-notebooks">Jupyter notebooks</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#the-simplest-design-problem">The simplest design problem</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#v-optimal-mbdoe">V-optimal MBDoE</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#test-scripts-as-worked-examples">Test scripts as worked examples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#test-scripts">Test scripts</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#publication-code">Publication code</a></li>
 </ul>
 </li>
@@ -600,18 +600,17 @@ prediction-accuracy benefit at that operating point.</p>
 <p>Unlike <code class="docutils literal notranslate"><span class="pre">examples/ode/</span></code>, each script is self-contained rather than split into
 a <code class="docutils literal notranslate"><span class="pre">*_model.py</span></code> and a driver. Guarded by capability-suite sections 59 and 60.</p>
 </section>
-<section id="test-scripts-as-worked-examples">
-<h2>Test scripts as worked examples<a class="headerlink" href="#test-scripts-as-worked-examples" title="Link to this heading"></a></h2>
-<p><code class="docutils literal notranslate"><span class="pre">testing_scripts/</span></code> doubles as a set of larger examples. They are standalone
-scripts, run individually — the capability suite does not execute them, though
-it does reuse the three-reaction batch model that now lives in
-<code class="docutils literal notranslate"><span class="pre">examples/v_optimal/</span></code>:</p>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">smoke_test_designer.py</span></code> — the fastest end-to-end check that needs a
-solver: Ds-optimality resolved by name, the A-optimality singular-FIM
-behaviour, Ds succeeding where D-optimal cannot, and the <code class="docutils literal notranslate"><span class="pre">regularize_fim</span></code>
-path.</p></li>
-</ul>
+<section id="test-scripts">
+<h2>Test scripts<a class="headerlink" href="#test-scripts" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">testing_scripts/</span></code> holds tests rather than examples: the capability suite,
+<code class="docutils literal notranslate"><span class="pre">coverage_audit.py</span></code>, and <code class="docutils literal notranslate"><span class="pre">smoke_test_designer.py</span></code> – the fastest
+end-to-end check that needs a solver, covering Ds-optimality resolved by name,
+the A-optimality singular-FIM behaviour, Ds succeeding where D-optimal cannot,
+and the <code class="docutils literal notranslate"><span class="pre">regularize_fim</span></code> path. None is run by CI, since they need IPOPT, an
+MINLP solver and PyNumero’s compiled ASL extension.</p>
+<p>This folder used to double as a home for larger worked examples. Everything
+demonstrative now lives under <code class="docutils literal notranslate"><span class="pre">examples/</span></code>; the three-reaction batch model the
+capability suite is built on lives in <code class="docutils literal notranslate"><span class="pre">examples/v_optimal/</span></code>.</p>
 </section>
 <section id="publication-code">
 <h2>Publication code<a class="headerlink" href="#publication-code" title="Link to this heading"></a></h2>

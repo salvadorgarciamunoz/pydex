@@ -53,7 +53,7 @@ by Kennedy Putra Kusumo et al., originally described in:
   rank-deficient FIM by default and names the parameters responsible,
   rather than returning a plausible number from a floored Cholesky
   factor. Override with `allow_singular_fim=True`; Ds-optimality is exempt
-- **Comprehensive test suite**: 60 sections / 301 assertions covering all
+- **Comprehensive test suite**: 62 sections / 315 assertions covering all
   design criteria, both sensitivity paths (FD and IFT), parallel
   correctness, prior FIM, save/load, visualisation, and more
 - **Per-parameter finite-difference step**: the FD step is sized from each
@@ -589,12 +589,14 @@ mkdir -p _flat && cp pydex/core/designer.py _flat/designer.py
 PYTHONPATH="$PWD/_flat" pytest -q tests/
 ```
 
-**`testing_scripts/` — end-to-end scripts that need solvers.** These
-verify and demonstrate the package end-to-end and double as larger worked
-examples. They are deliberately *not* run in CI: they need IPOPT, an MINLP
-solver, and PyNumero's compiled ASL extension, and take far longer than a
-CI budget allows. Run the capability suite locally before tagging a
-release.
+**`testing_scripts/` — end-to-end tests that need solvers.** They are
+deliberately *not* run in CI: they need IPOPT, an MINLP solver, and
+PyNumero's compiled ASL extension, and take far longer than a CI budget
+allows. Run the capability suite locally before tagging a release.
+
+This folder used to double as a home for larger worked examples. It no
+longer does -- everything demonstrative has moved to `examples/`, and what
+remains is the capability suite, the smoke test and `coverage_audit.py`.
 
 `testing_scripts/smoke_test_designer.py` sits between the two tiers: it
 needs only IPOPT, runs in seconds, and checks Ds-optimality resolution by
@@ -602,7 +604,7 @@ name, the A-optimality singular-FIM fix, Ds succeeding where D-optimal
 cannot, and the `regularize_fim` path.
 
 - **`pydex_full_capability_test.py`** — the comprehensive capability
-  suite: 60 sections and 301 assertions built on the three-reaction batch model
+  suite: 62 sections and 315 assertions built on the three-reaction batch model
   (A→B desired, A→I impurity, A→D decomposition), run in sequence and
   gated by a single pass/fail check. Coverage includes: setup and
   initialisation; candidate-grid helpers; sensitivity analysis,

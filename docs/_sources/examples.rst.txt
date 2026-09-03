@@ -517,18 +517,19 @@ prediction-accuracy benefit at that operating point.
 Unlike ``examples/ode/``, each script is self-contained rather than split into
 a ``*_model.py`` and a driver. Guarded by capability-suite sections 59 and 60.
 
-Test scripts as worked examples
--------------------------------
+Test scripts
+------------
 
-``testing_scripts/`` doubles as a set of larger examples. They are standalone
-scripts, run individually — the capability suite does not execute them, though
-it does reuse the three-reaction batch model that now lives in
-``examples/v_optimal/``:
+``testing_scripts/`` holds tests rather than examples: the capability suite,
+``coverage_audit.py``, and ``smoke_test_designer.py`` -- the fastest
+end-to-end check that needs a solver, covering Ds-optimality resolved by name,
+the A-optimality singular-FIM behaviour, Ds succeeding where D-optimal cannot,
+and the ``regularize_fim`` path. None is run by CI, since they need IPOPT, an
+MINLP solver and PyNumero's compiled ASL extension.
 
-* ``smoke_test_designer.py`` — the fastest end-to-end check that needs a
-  solver: Ds-optimality resolved by name, the A-optimality singular-FIM
-  behaviour, Ds succeeding where D-optimal cannot, and the ``regularize_fim``
-  path.
+This folder used to double as a home for larger worked examples. Everything
+demonstrative now lives under ``examples/``; the three-reaction batch model the
+capability suite is built on lives in ``examples/v_optimal/``.
 
 Publication code
 ----------------
