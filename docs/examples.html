@@ -64,6 +64,7 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#asl-elimination">ASL elimination</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#jupyter-notebooks">Jupyter notebooks</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#the-simplest-design-problem">The simplest design problem</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#v-optimal-mbdoe">V-optimal MBDoE</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#test-scripts-as-worked-examples">Test scripts as worked examples</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#publication-code">Publication code</a></li>
@@ -216,6 +217,10 @@ activity coefficients, modified Raoult’s law, and Antoine constants that are
 known rather than fitted.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">examples/vle/van_laar_design.py</span></code> – the runner. D-optimal design over 7
 compositions by 3 temperatures.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/vle/van_laar_criteria.py</span></code> – a second, independent runner on the
+same problem: D- vs A- vs E-optimal, then pseudo-Bayesian D-optimal in both
+aggregation types, ending in a figure of the parameter confidence regions.
+Written as nine numbered sections with every design spelled out in full.</p></li>
 </ul>
 <p>This model has no time axis, so <code class="docutils literal notranslate"><span class="pre">n_spt</span></code> does not apply.</p>
 <p>The design is two support points for two parameters, both at the highest
@@ -565,6 +570,22 @@ jupyter<span class="w"> </span>lab
 </pre></div>
 </div>
 </section>
+<section id="the-simplest-design-problem">
+<h2>The simplest design problem<a class="headerlink" href="#the-simplest-design-problem" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">examples/first_order/</span></code> — the first-order reaction <code class="docutils literal notranslate"><span class="pre">A</span> <span class="pre">-&gt;</span> <span class="pre">B</span></code>, with
+<code class="docutils literal notranslate"><span class="pre">A(t)</span> <span class="pre">=</span> <span class="pre">A0*exp(-k*t)</span></code>. The decision variable is the sampling time and the
+parameters are <code class="docutils literal notranslate"><span class="pre">[k,</span> <span class="pre">A0]</span></code>. Each script runs a local D-optimal design and two
+pseudo-Bayesian designs.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">first_order_design.py</span></code> — exact IFT sensitivities via Pyomo collocation,
+including the minimal <code class="docutils literal notranslate"><span class="pre">build_pyomo_model()</span></code> that path requires</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">first_order_design_no_ift.py</span></code> — finite differences over the analytic
+solution</p></li>
+</ul>
+<p>Start here to see the whole workflow with nothing else going on: for a single
+parameter the D-optimal sampling time is <code class="docutils literal notranslate"><span class="pre">t*</span> <span class="pre">=</span> <span class="pre">1/k</span></code>, so the design can be
+checked by hand.</p>
+</section>
 <section id="v-optimal-mbdoe">
 <h2>V-optimal MBDoE<a class="headerlink" href="#v-optimal-mbdoe" title="Link to this heading"></a></h2>
 <p><code class="docutils literal notranslate"><span class="pre">examples/v_optimal/</span></code> — two-stage V-optimal design on the three-reaction
@@ -586,9 +607,6 @@ scripts, run individually — the capability suite does not execute them, though
 it does reuse the three-reaction batch model that now lives in
 <code class="docutils literal notranslate"><span class="pre">examples/v_optimal/</span></code>:</p>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">first_order_reaction.py</span></code> / <code class="docutils literal notranslate"><span class="pre">first_order_reaction_pyomo.py</span></code> — the same
-problem posed twice, once with a plain <code class="docutils literal notranslate"><span class="pre">simulate()</span></code> and once with a Pyomo
-model.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">smoke_test_designer.py</span></code> — the fastest end-to-end check that needs a
 solver: Ds-optimality resolved by name, the A-optimality singular-FIM
 behaviour, Ds succeeding where D-optimal cannot, and the <code class="docutils literal notranslate"><span class="pre">regularize_fim</span></code>
