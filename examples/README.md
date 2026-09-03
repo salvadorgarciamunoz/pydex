@@ -101,6 +101,9 @@ linear response surface and a dynamic model.
   rather than fitted. Run it directly for a sanity check of the predictions.
 - `van_laar_design.py` — the runner. D-optimal design over 7 compositions × 3
   temperatures.
+- `van_laar_criteria.py` — a second, independent runner on the same problem:
+  D- vs A- vs E-optimal, then pseudo-Bayesian D-optimal in both aggregation
+  types. See below.
 
 No sampling times: this model has no time axis, so `n_spt` does not apply.
 
@@ -442,6 +445,82 @@ for these problems, not a proof.
   precondition pydex's IFT column-matching relies on; `initialize()` runs
   the same check automatically when the utility is importable.
 - `pydex_ift_asl_guide.docx` — background on the IFT/ASL interaction.
+
+## First-order reaction — `examples/first_order/`
+
+The simplest design problem in the repository, and the place to start. A
+first-order reaction `A -> B` with `dA/dt = -k*A`, so `A(t) = A0*exp(-k*t)`.
+The decision variable is the sampling time; the parameters are `[k, A0]`.
+
+- `first_order_design.py` — exact IFT sensitivities via Pyomo collocation.
+  Also the smallest complete illustration of the `build_pyomo_model()` a user
+  must supply for the IFT path: it must SOLVE the model and return
+  `(m, all_vars, all_bodies, t_sorted)`, with the parameter `Var`s first.
+- `first_order_design_no_ift.py` — finite differences over the analytic
+  solution.
+
+Each script runs three designs: local D-optimal at nominal `[k=0.5, A0=1.0]`,
+then pseudo-Bayesian with `k ~ U[0.1, 1.0]`, then with both `k` and
+`A0 ~ U[0.5, 2.0]` uncertain.
+
+**Why start here.** For a single parameter the D-optimal sampling time is
+`t* = 1/k` in closed form, so you can check the answer by hand — which is
+also why the capability suite uses this model more than any other (sections
+19-28, 30, 33, 41-44, 52 and 60). If you change either script, that is where
+to look.
+
+These two are self-contained rather than split into a `*_model.py` and a
+runner, the same deliberate deviation as `v_optimal/`. Note also that they
+use 200 scenarios for the pseudo-Bayesian runs, which is generous for a
+demonstration: the IFT variant's third run is slow on a single core. Reduce
+`N_scr` if you only want to see the workflow.
+
+### Comparing criteria, and designing under uncertainty
+
+`van_laar_criteria.py` answers the two questions `van_laar_design.py` raises:
+what changes if you pick a different criterion, and what should you design
+when you do not trust the nominal parameters?
+
+It is written **deliberately long and repetitive** — nine numbered sections,
+every design built, solved and read out in full, nothing factored into helper
+functions — so that any one section can be read top to bottom or copied
+straight out. Sections 1-3 are near-identical, differing by the single line
+that names the criterion.
+
+D, A and E all chose the **same two experiments** here and differed only in
+how they split effort: 47/53, 44/56 and 42/58. That is an observation about
+this grid, not a rule -- the support of a D-optimal design on `p` parameters
+is at least `p` and at most `p(p+1)/2`, so 2 or 3 points were both available.
+The split is still enough to change the ROUNDED design: E gives 3 runs and 5
+where D and A give 4 and 4. Scored through a common criterion, each local
+design is best on exactly the criterion it was optimised for and worse on the
+other two, by 0.03% to 1.59%. **On this problem the criterion is a refinement,
+not a different experiment** — do not generalise that from two parameters.
+
+The pseudo-Bayesian half takes 40 scenarios drawn about the nominals and runs
+both aggregations: type 0 averages the information (criterion of the mean FIM,
+solved natively) and type 1 averages the criterion (mean of the per-scenario
+values, via SLSQP). Type 0 comes out at or above type 1, as Jensen requires:
+`16.541379` against `16.397751`.
+
+Two things it demonstrates rather than describes, both of which cost real time
+to discover:
+
+- **Criterion values are not comparable between criteria.**
+  `_criterion_value` is the negated Pyomo objective for every criterion, so D
+  reports `16.78`, A reports `-0.000515` for a sum of variances that cannot be
+  negative, and E reports `2651.05`. Compare designs, or score every design
+  through one common criterion.
+- **`pseudo_bayesian_type` is a `design_experiment()` keyword.** Setting
+  `designer._pseudo_bayesian_type` on the instance is silently overwritten and
+  the run reports the wrong type with no error. Omitting the keyword entirely
+  gives type 0.
+
+Ends with a two-panel figure of the parameter confidence regions, displayed
+rather than saved. The ellipses very nearly coincide, which is honest and is
+why the second panel exists: it plots how much worse each design is than the
+best on each criterion, so the crossover is visible where the ellipses hide it.
+Needs matplotlib; nothing else beyond pydex and IPOPT.
 
 ## V-optimal MBDoE — `examples/v_optimal/`
 

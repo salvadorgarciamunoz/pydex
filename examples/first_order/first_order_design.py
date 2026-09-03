@@ -1,6 +1,6 @@
 """
-first_order_reaction_pyomo.py
-==============================
+first_order_design.py
+=====================
 D-optimal design of experiments for a first-order reaction
     A -> B,   dA/dt = -k*A   ->   A(t) = A0*exp(-k*t)
 
@@ -232,7 +232,7 @@ def simulate(ti_controls, model_parameters):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Candidate grid  (same as first_order_reaction_ipopt.py)
+# Candidate grid  (same as first_order_design_no_ift.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
 t_max        = 10.0

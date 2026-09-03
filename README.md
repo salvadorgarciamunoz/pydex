@@ -505,6 +505,42 @@ controls `[CA0, T]`, responses `[CA, CB]`): `case_2.py`,
 - `case_3_ift.py` — exact IFT sensitivities via collocation + IPOPT
   (~5–15 s; roughly 20–70× faster)
 
+### `examples/vle/` — steady-state VLE, and comparing criteria
+
+A binary vapour-liquid equilibrium problem, static and nonlinear in its two
+van Laar parameters.
+
+- `van_laar_model.py` / `van_laar_design.py` — the model and a D-optimal
+  design over 7 compositions x 3 temperatures
+- `van_laar_criteria.py` — D- vs A- vs E-optimal on the same problem, then
+  pseudo-Bayesian D-optimal in both aggregation types, with a figure of the
+  resulting parameter confidence regions
+
+`examples/README.md` documents both runners in full.
+
+### `examples/first_order/` — the simplest possible design problem
+
+First-order reaction `A -> B`, `dA/dt = -k*A`, so `A(t) = A0*exp(-k*t)`. The
+decision variable is the sampling time and the parameters are `[k, A0]`. Each
+script runs a local D-optimal design and two pseudo-Bayesian designs, the
+first with uncertainty in `k` alone and the second in both parameters.
+
+- `first_order_design.py` — exact IFT sensitivities via Pyomo collocation,
+  and the minimal `build_pyomo_model()` a user has to supply for that path
+- `first_order_design_no_ift.py` — finite-difference sensitivities over the
+  analytic solution
+
+This is the right place to start if you want to see the whole workflow with
+nothing else going on: the analytic D-optimal answer for one parameter is
+`t* = 1/k`, so you can check the design by hand. Note both scripts use 200
+scenarios for their pseudo-Bayesian runs, which is generous for a
+demonstration and slow on a single core; drop `N_scr` if you just want to see
+the shape of the thing.
+
+Both scripts are self-contained rather than split into a `*_model.py` and a
+runner. They are also the model the capability suite exercises most heavily,
+so if you change either, check sections 19-28, 30, 33, 41-44, 52 and 60.
+
 ### `examples/v_optimal/` — V-optimal MBDoE
 
 Two-stage V-optimal design on the three-reaction batch reactor: Stage 1
@@ -589,16 +625,6 @@ cannot, and the `regularize_fim` path.
 
   > The MINLP section requires GAMS/BARON; if those are unavailable that
   > section is the only part that will not run.
-
-- **`first_order_reaction.py`** — minimal D-optimal example on the
-  first-order reaction `A→B` using the analytic solution and
-  finite-difference sensitivities. Includes a local D-optimal run and two
-  pseudo-Bayesian runs (uncertainty in `k` only, and in both `k` and
-  `A0`).
-
-- **`first_order_reaction_pyomo.py`** — the same first-order problem
-  solved through the Pyomo IFT path, illustrating the minimal
-  `build_pyomo_model()` a user must supply for IFT sensitivities.
 
 ---
 

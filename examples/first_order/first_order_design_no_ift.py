@@ -1,6 +1,6 @@
 """
-first_order_reaction_ipopt.py
-==============================
+first_order_design_no_ift.py
+============================
 D-optimal design of experiments for a first-order reaction
     A → B,   dA/dt = -k·A   →   A(t) = A₀·exp(-k·t)
 We want to find the best sampling times to estimate the rate constant k

@@ -109,6 +109,10 @@ linear response surface and a dynamic model.
   known rather than fitted.
 * ``examples/vle/van_laar_design.py`` -- the runner. D-optimal design over 7
   compositions by 3 temperatures.
+* ``examples/vle/van_laar_criteria.py`` -- a second, independent runner on the
+  same problem: D- vs A- vs E-optimal, then pseudo-Bayesian D-optimal in both
+  aggregation types, ending in a figure of the parameter confidence regions.
+  Written as nine numbered sections with every design spelled out in full.
 
 This model has no time axis, so ``n_spt`` does not apply.
 
@@ -481,6 +485,23 @@ To run them locally:
    cd examples/jupyter
    jupyter lab
 
+The simplest design problem
+---------------------------
+
+``examples/first_order/`` — the first-order reaction ``A -> B``, with
+``A(t) = A0*exp(-k*t)``. The decision variable is the sampling time and the
+parameters are ``[k, A0]``. Each script runs a local D-optimal design and two
+pseudo-Bayesian designs.
+
+* ``first_order_design.py`` — exact IFT sensitivities via Pyomo collocation,
+  including the minimal ``build_pyomo_model()`` that path requires
+* ``first_order_design_no_ift.py`` — finite differences over the analytic
+  solution
+
+Start here to see the whole workflow with nothing else going on: for a single
+parameter the D-optimal sampling time is ``t* = 1/k``, so the design can be
+checked by hand.
+
 V-optimal MBDoE
 ---------------
 
@@ -504,9 +525,6 @@ scripts, run individually — the capability suite does not execute them, though
 it does reuse the three-reaction batch model that now lives in
 ``examples/v_optimal/``:
 
-* ``first_order_reaction.py`` / ``first_order_reaction_pyomo.py`` — the same
-  problem posed twice, once with a plain ``simulate()`` and once with a Pyomo
-  model.
 * ``smoke_test_designer.py`` — the fastest end-to-end check that needs a
   solver: Ds-optimality resolved by name, the A-optimality singular-FIM
   behaviour, Ds succeeding where D-optimal cannot, and the ``regularize_fim``
