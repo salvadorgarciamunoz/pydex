@@ -471,9 +471,9 @@ three-reaction batch reactor system.
 
 ## Examples
 
-The `examples/` folder is organised by topic; `examples/README.md`
-documents every subfolder, including `vle/`, `b_optimal/` and
-`sequential/`, which are not repeated here.
+The `examples/` folder is organised by topic. `examples/README.md`
+documents every subfolder and is the complete list; the sections below cover
+the ones most people start with.
 
 ### `examples/ode/` — ODE/DAE design scripts
 
@@ -554,6 +554,49 @@ self-contained rather than split into a `*_model.py` and a driver.
 - `v_optimal_design_no_ift.py` — finite-difference sensitivities
 
 Guarded by capability-suite sections 59 and 60.
+
+### `examples/b_optimal/` — bracketing-optimal design
+
+Worked scenarios for `b_opt_criterion`, which asks a different question from
+every other criterion here: not which experiments best determine the
+parameters, but which best bracket the operating space. Not sensitivity-based,
+and it never touches the FIM. Two objectives are combined by weighted sum via
+`output_weight` — input-space D-optimality on the scaled input factors at 0,
+output-space coverage of the predicted responses at 1.
+
+- `scenario_1_film_coating.py` — a tablet film coater, 3 inputs to 2 outputs
+- `scenario_2_cstr.py` — two CSTRs in series, 6 inputs to 3 outputs
+- `scenario_3_suzuki.py` — a Suzuki-Miyaura coupling, 5 inputs to 3 critical
+  quality attributes, with the design cross-checked against exhaustive
+  enumeration
+- `b_opt_pareto_sweep.py` — a sweep utility over the coater and CSTR models
+
+Needs an MINLP solver (`solver="bonmin"`), an exact `n_exp`, and
+`simulate_candidates()` called first — b_opt is the only criterion that reads
+`designer.response`. Both requirements raise rather than failing quietly.
+Figures are written to the working directory, so choose where you run from.
+`examples/README.md` documents the guards, the `n_exp` bound and the
+per-model sampling defaults in full.
+
+### `examples/sequential/` — designing the next round
+
+Extending a campaign that has already been run: a Suzuki-Miyaura coupling
+with six kinetic parameters, four experiments already executed, and the
+question of what to run next. The model is integrated with a plain
+Runge-Kutta loop, which also demonstrates that pydex does not care how you
+solve your model.
+
+- `suzuki_kinetics.py` — the model, three competing reactions
+- `suzuki_sequential.py` — fit, audit, design six more, refit, compare
+- `noise_and_estimability.py` — the same exercise over twelve sets of
+  measurements, to see which conclusions survive the noise
+
+The step worth dwelling on is the audit: `run_estimability()` is usually run
+over a candidate grid *before* designing, but pointing it at the conditions
+already executed audits the data in hand instead. `set_prior_experiments()`
+then hands pydex the completed runs, and the design targets what is still
+loose. Needs an NLP solver only — `solver="pounce"` works with nothing beyond
+pip, and nothing is written to disk.
 
 ### `examples/jupyter/` — introductory notebooks
 
