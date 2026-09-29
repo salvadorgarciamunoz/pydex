@@ -170,7 +170,7 @@ estimability methods documented below.</p>
 <dl class="py class">
 <dt class="sig sig-object py" id="pydex.core.designer.Designer">
 <em class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">pydex.core.designer.</span></span><span class="sig-name descname"><span class="pre">Designer</span></span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer" title="Link to this definition"></a></dt>
-<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#object" title="(in Python v3.14)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
 <p>version = 20260804000000</p>
 <p>An experiment designer with capabilities to do parameter estimation, parameter
 estimability study, and computes both continuous and exact experimental designs.</p>
@@ -813,7 +813,7 @@ above 1.0 is not possible for a rounding of the optimum; if you see
 one, investigate rather than report it.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)">float</a> or None</p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)">float</a> or None</p>
 </dd>
 </dl>
 </dd></dl>
@@ -1023,7 +1023,7 @@ name the routine they came from. Internal utility.</p>
 <dd class="field-odd"><p>Name of the detected sensitivity function.</p>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a></p>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)">str</a></p>
 </dd>
 </dl>
 </dd></dl>
@@ -1051,7 +1051,7 @@ function theorem derivatives instead of finite differences — faster and
 several orders of magnitude more accurate.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Raises<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#SyntaxError" title="(in Python v3.14)"><strong>SyntaxError</strong></a> – If called while still unassigned.</p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/exceptions.html#SyntaxError" title="(in Python v3.14)"><strong>SyntaxError</strong></a> – If called while still unassigned.</p>
 </dd>
 </dl>
 <p class="rubric">Example</p>
@@ -1080,8 +1080,8 @@ compute sensitivities.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>store_predictions</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Keep the responses on the designer.</p></li>
-<li><p><strong>plot_simulation_times</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Plot per-candidate wall-clock time —
+<li><p><strong>store_predictions</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Keep the responses on the designer.</p></li>
+<li><p><strong>plot_simulation_times</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Plot per-candidate wall-clock time —
 useful for spotting candidates where the model struggles.</p></li>
 </ul>
 </dd>
@@ -1295,11 +1295,11 @@ to build the W matrix and target the FIM inversion accordingly.</p>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>init_guess</strong> (<em>array-like</em><em>, </em><em>shape</em><em> (</em><em>n_x</em><em>,</em><em>) or </em><em>(</em><em>r_w</em><em>, </em><em>n_x</em><em>)</em>) – Initial guess(es) for [tic | tvc].  If 2-D, each row is solved
 independently and all solutions are stored.</p></li>
-<li><p><strong>solver</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Pyomo solver name (default <code class="docutils literal notranslate"><span class="pre">&quot;ipopt&quot;</span></code>).  Any solver registered
+<li><p><strong>solver</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Pyomo solver name (default <code class="docutils literal notranslate"><span class="pre">&quot;ipopt&quot;</span></code>).  Any solver registered
 with <code class="docutils literal notranslate"><span class="pre">pyo.SolverFactory</span></code> may be used.</p></li>
-<li><p><strong>solver_options</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>, </em><em>optional</em>) – Options forwarded to the solver.  For IPOPT use keys such as
+<li><p><strong>solver_options</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>, </em><em>optional</em>) – Options forwarded to the solver.  For IPOPT use keys such as
 <code class="docutils literal notranslate"><span class="pre">&quot;tol&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;max_iter&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;linear_solver&quot;</span></code> (e.g. <code class="docutils literal notranslate"><span class="pre">&quot;ma57&quot;</span></code>).</p></li>
-<li><p><strong>n_starts</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Number of random restarts per operating point (default 1).</p></li>
+<li><p><strong>n_starts</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Number of random restarts per operating point (default 1).</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -1349,9 +1349,9 @@ actually runs”.</p>
 <li><p><strong>criterion</strong> (<em>callable</em>) – A bound criterion method such as
 <code class="docutils literal notranslate"><span class="pre">designer.d_opt_criterion</span></code>, or any callable taking the effort
 vector and returning a scalar to MINIMISE.</p></li>
-<li><p><strong>n_spt</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em>, </em><em>optional</em>) – See the fuller description below. Clear
+<li><p><strong>n_spt</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em>, </em><em>optional</em>) – See the fuller description below. Clear
 <code class="xref py py-attr docutils literal notranslate"><span class="pre">atomic_fims</span></code> first if changing it between runs.</p></li>
-<li><p><strong>n_exp</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em>, </em><em>optional</em>) – Solve for a discrete design of this many
+<li><p><strong>n_exp</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em>, </em><em>optional</em>) – Solve for a discrete design of this many
 experiments instead of a continuous one.</p></li>
 <li><p><strong>n_spt</strong> – <p>Number of samples collected per run. This
 is the ONLY control over how sampling times are treated, and
@@ -1372,15 +1372,15 @@ This is the fixed-analytical-schedule case and the only way
 to express it.</p></li>
 </ul>
 </p></li>
-<li><p><strong>solver</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – NLP solver for the native Pyomo path — any
+<li><p><strong>solver</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – NLP solver for the native Pyomo path — any
 AMPL-compatible solver. Ignored on the SLSQP path.</p></li>
-<li><p><strong>solver_options</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>, </em><em>optional</em>) – Passed to the solver. On the SLSQP
+<li><p><strong>solver_options</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>, </em><em>optional</em>) – Passed to the solver. On the SLSQP
 path all but <code class="docutils literal notranslate"><span class="pre">ftol</span></code>/<code class="docutils literal notranslate"><span class="pre">maxiter</span></code>/<code class="docutils literal notranslate"><span class="pre">disp</span></code> are silently dropped.</p></li>
 <li><p><strong>e0</strong> (<a class="reference external" href="https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html#numpy.ndarray" title="(in NumPy v2.5)"><em>numpy.ndarray</em></a><em>, </em><em>optional</em>) – Initial effort vector.</p></li>
-<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Write the result to the result directory.</p></li>
-<li><p><strong>save_sensitivities</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Cache sensitivities to disk.</p></li>
-<li><p><strong>trim_fim</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Drop uninformative rows/columns from the FIM.</p></li>
-<li><p><strong>pseudo_bayesian_type</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em> or </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><em>optional</em>) – 0 or <code class="docutils literal notranslate"><span class="pre">'avg_inf'</span></code>
+<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Write the result to the result directory.</p></li>
+<li><p><strong>save_sensitivities</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Cache sensitivities to disk.</p></li>
+<li><p><strong>trim_fim</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Drop uninformative rows/columns from the FIM.</p></li>
+<li><p><strong>pseudo_bayesian_type</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em> or </em><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><em>optional</em>) – 0 or <code class="docutils literal notranslate"><span class="pre">'avg_inf'</span></code>
 to average the information matrices, 1 or <code class="docutils literal notranslate"><span class="pre">'avg_crit'</span></code> to
 average the criterion. Applies only when
 <a class="reference internal" href="#pydex.core.designer.Designer.model_parameters" title="pydex.core.designer.Designer.model_parameters"><code class="xref py py-attr docutils literal notranslate"><span class="pre">model_parameters</span></code></a> is a scenario array. <strong>Defaults to 0</strong>
@@ -1390,21 +1390,21 @@ versions of this docstring said. NOTE this OVERWRITES
 that attribute directly has no effect; omitting the keyword
 after <a class="reference internal" href="#pydex.core.designer.Designer.load_oed_result" title="pydex.core.designer.Designer.load_oed_result"><code class="xref py py-meth docutils literal notranslate"><span class="pre">load_oed_result()</span></code></a> restored a type therefore
 discards it, and warns when it does.</p></li>
-<li><p><strong>regularize_fim</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Add <code class="docutils literal notranslate"><span class="pre">_eps</span> <span class="pre">*</span> <span class="pre">I</span></code> to the FIM. NOTE this
+<li><p><strong>regularize_fim</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Add <code class="docutils literal notranslate"><span class="pre">_eps</span> <span class="pre">*</span> <span class="pre">I</span></code> to the FIM. NOTE this
 OVERWRITES <code class="docutils literal notranslate"><span class="pre">self._regularize_fim</span></code> from the keyword, so setting
 that attribute directly has no effect.</p></li>
-<li><p><strong>beta</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – CVaR confidence level.</p></li>
-<li><p><strong>min_expected_value</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>, </em><em>optional</em>) – CVaR constraint.</p></li>
+<li><p><strong>beta</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – CVaR confidence level.</p></li>
+<li><p><strong>min_expected_value</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>, </em><em>optional</em>) – CVaR constraint.</p></li>
 <li><p><strong>fix_effort</strong> (<a class="reference external" href="https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html#numpy.ndarray" title="(in NumPy v2.5)"><em>numpy.ndarray</em></a><em>, </em><em>optional</em>) – Fix part of the effort vector.</p></li>
-<li><p><strong>save_atomics</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Cache the atomic FIMs to disk.</p></li>
-<li><p><strong>min_effort</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>, </em><em>optional</em>) – Enforce a minimum non-zero effort,
+<li><p><strong>save_atomics</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Cache the atomic FIMs to disk.</p></li>
+<li><p><strong>min_effort</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>, </em><em>optional</em>) – Enforce a minimum non-zero effort,
 turning the problem into an MINLP and giving a sparser design.</p></li>
-<li><p><strong>allow_singular_fim</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Proceed even when the FIM is
+<li><p><strong>allow_singular_fim</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Proceed even when the FIM is
 structurally singular. By default the solve is refused with a
 diagnosis naming the responsible parameters, because a criterion
 value obtained from a rank-deficient FIM rests on the Cholesky
 floor rather than on information the data contains.</p></li>
-<li><p><strong>output_weight</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – ONLY used by <code class="docutils literal notranslate"><span class="pre">b_opt_criterion</span></code>
+<li><p><strong>output_weight</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – ONLY used by <code class="docutils literal notranslate"><span class="pre">b_opt_criterion</span></code>
 (Bracketing-optimal). Weight in [0, 1] on the output-space
 coverage objective; the input-space bracketing objective gets
 weight <code class="docutils literal notranslate"><span class="pre">1</span> <span class="pre">-</span> <span class="pre">output_weight</span></code>. See Chen, Paulavicius &amp; Adjiman
@@ -1418,7 +1418,7 @@ criterion.</p></li>
 designer: <code class="xref py py-attr docutils literal notranslate"><span class="pre">efforts</span></code>, and <code class="docutils literal notranslate"><span class="pre">_criterion_value</span></code>.</p>
 </dd>
 <dt class="field-odd">Raises<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the FIM is structurally singular and
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the FIM is structurally singular and
     <code class="docutils literal notranslate"><span class="pre">allow_singular_fim</span></code> is False.</p>
 </dd>
 </dl>
@@ -1438,11 +1438,11 @@ prior rather than at a single nominal — what a CVaR design targets.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Save to the result directory.</p></li>
-<li><p><strong>iteration</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em>, </em><em>optional</em>) – Label for a CVaR iteration.</p></li>
-<li><p><strong>dpi</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Resolution when writing.</p></li>
-<li><p><strong>figsize</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a>) – Figure size.</p></li>
-<li><p><strong>annotate</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Annotate the quantiles.</p></li>
+<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Save to the result directory.</p></li>
+<li><p><strong>iteration</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em>, </em><em>optional</em>) – Label for a CVaR iteration.</p></li>
+<li><p><strong>dpi</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Resolution when writing.</p></li>
+<li><p><strong>figsize</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a>) – Figure size.</p></li>
+<li><p><strong>annotate</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Annotate the quantiles.</p></li>
 </ul>
 </dd>
 </dl>
@@ -1456,14 +1456,14 @@ prior rather than at a single nominal — what a CVaR design targets.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>n_bins</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Histogram bins.</p></li>
-<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Save to the result directory.</p></li>
-<li><p><strong>iteration</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em>, </em><em>optional</em>) – Label for a CVaR iteration.</p></li>
-<li><p><strong>dpi</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Resolution when writing.</p></li>
+<li><p><strong>n_bins</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Histogram bins.</p></li>
+<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Save to the result directory.</p></li>
+<li><p><strong>iteration</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em>, </em><em>optional</em>) – Label for a CVaR iteration.</p></li>
+<li><p><strong>dpi</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Resolution when writing.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Raises<span class="colon">:</span></dt>
-<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#SyntaxError" title="(in Python v3.14)"><strong>SyntaxError</strong></a> – For non-pseudo-Bayesian designs.</p>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/builtins/exceptions.html#SyntaxError" title="(in Python v3.14)"><strong>SyntaxError</strong></a> – For non-pseudo-Bayesian designs.</p>
 </dd>
 </dl>
 </dd></dl>
@@ -1478,7 +1478,7 @@ optimised for, or for scoring a hand-specified effort vector.</p>
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>criterion</strong> (<em>callable</em>) – A bound criterion method.</p></li>
-<li><p><strong>decimal_places</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Rounding for the printed value.</p></li>
+<li><p><strong>decimal_places</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Rounding for the printed value.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -1486,7 +1486,7 @@ optimised for, or for scoring a hand-specified effort vector.</p>
 better and <code class="docutils literal notranslate"><span class="pre">+inf</span></code> marks an unusable information matrix.</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)">float</a></p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)">float</a></p>
 </dd>
 </dl>
 </dd></dl>
@@ -1505,11 +1505,11 @@ is shared proportionally (Adams divisor method); when it does not, the
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>n_exp</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Number of experimental runs to allocate.</p></li>
-<li><p><strong>method</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Divisor method for the proportional case.</p></li>
-<li><p><strong>trimmed</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Drop zero-effort candidates before apportioning.
+<li><p><strong>n_exp</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Number of experimental runs to allocate.</p></li>
+<li><p><strong>method</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Divisor method for the proportional case.</p></li>
+<li><p><strong>trimmed</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Drop zero-effort candidates before apportioning.
 Applies whatever the verbosity; it is not a reporting-only flag.</p></li>
-<li><p><strong>compute_actual_efficiency</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em> or </em><em>None</em>) – TRI-STATE, not a plain
+<li><p><strong>compute_actual_efficiency</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em> or </em><em>None</em>) – TRI-STATE, not a plain
 bool. <code class="docutils literal notranslate"><span class="pre">None</span></code> (the default) means “evaluate the rounded
 criterion only if it is going to be reported”, so at
 <code class="docutils literal notranslate"><span class="pre">verbose=0</span></code> the two extra criterion evaluations are skipped.
@@ -1556,10 +1556,10 @@ rounding destroys — check <a class="reference internal" href="#pydex.core.desi
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>bounds</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a>) – <code class="docutils literal notranslate"><span class="pre">[[lo,</span> <span class="pre">hi],</span> <span class="pre">...]</span></code>, one pair per control.</p></li>
-<li><p><strong>levels</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a>) – <code class="docutils literal notranslate"><span class="pre">[n,</span> <span class="pre">...]</span></code>, how many evenly spaced values to take
+<li><p><strong>bounds</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a>) – <code class="docutils literal notranslate"><span class="pre">[[lo,</span> <span class="pre">hi],</span> <span class="pre">...]</span></code>, one pair per control.</p></li>
+<li><p><strong>levels</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a>) – <code class="docutils literal notranslate"><span class="pre">[n,</span> <span class="pre">...]</span></code>, how many evenly spaced values to take
 for each control. The grid has <code class="docutils literal notranslate"><span class="pre">prod(levels)</span></code> rows.</p></li>
-<li><p><strong>switching_times</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>, </em><em>optional</em>) – For time-varying controls, the
+<li><p><strong>switching_times</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>, </em><em>optional</em>) – For time-varying controls, the
 times at which each control may change value.</p></li>
 </ul>
 </dd>
@@ -1588,12 +1588,12 @@ sampling times were optimised, or a heat map on request.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>width</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>, </em><em>optional</em>) – Bar width.</p></li>
-<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Save to the result directory.</p></li>
-<li><p><strong>dpi</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Resolution when writing.</p></li>
-<li><p><strong>force_3d</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Use the 3-D view even for a static design.</p></li>
-<li><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Effort below which a candidate is omitted.</p></li>
-<li><p><strong>heatmap</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Draw a heat map instead of bars.</p></li>
+<li><p><strong>width</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>, </em><em>optional</em>) – Bar width.</p></li>
+<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Save to the result directory.</p></li>
+<li><p><strong>dpi</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Resolution when writing.</p></li>
+<li><p><strong>force_3d</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Use the 3-D view even for a static design.</p></li>
+<li><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Effort below which a candidate is omitted.</p></li>
+<li><p><strong>heatmap</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Draw a heat map instead of bars.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -1611,10 +1611,10 @@ design reads as a region rather than a list of indices.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>alpha</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Opacity of non-selected candidate markers.</p></li>
-<li><p><strong>markersize</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Marker size.</p></li>
-<li><p><strong>non_opt_candidates</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Also show candidates carrying no effort.</p></li>
-<li><p><strong>n_ticks</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Ticks per control axis.</p></li>
+<li><p><strong>alpha</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Opacity of non-selected candidate markers.</p></li>
+<li><p><strong>markersize</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Marker size.</p></li>
+<li><p><strong>non_opt_candidates</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Also show candidates carrying no effort.</p></li>
+<li><p><strong>n_ticks</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Ticks per control axis.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -1631,12 +1631,12 @@ design reads as a region rather than a list of indices.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>figsize</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>, </em><em>optional</em>) – Figure size.</p></li>
-<li><p><strong>label_candidates</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Label each trajectory.</p></li>
+<li><p><strong>figsize</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>, </em><em>optional</em>) – Figure size.</p></li>
+<li><p><strong>label_candidates</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Label each trajectory.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Raises<span class="colon">:</span></dt>
-<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#NotImplementedError" title="(in Python v3.14)"><strong>NotImplementedError</strong></a> – For static models.</p>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/builtins/exceptions.html#NotImplementedError" title="(in Python v3.14)"><strong>NotImplementedError</strong></a> – For static models.</p>
 </dd>
 </dl>
 </dd></dl>
@@ -1651,9 +1651,9 @@ taking.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>absolute</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Plot magnitudes rather than signed values.</p></li>
-<li><p><strong>legend</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em>, </em><em>optional</em>) – Show the legend.</p></li>
-<li><p><strong>figsize</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>, </em><em>optional</em>) – Figure size.</p></li>
+<li><p><strong>absolute</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Plot magnitudes rather than signed values.</p></li>
+<li><p><strong>legend</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em>, </em><em>optional</em>) – Show the legend.</p></li>
+<li><p><strong>figsize</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>, </em><em>optional</em>) – Figure size.</p></li>
 </ul>
 </dd>
 </dl>
@@ -1672,11 +1672,11 @@ sampling at different times.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>legend</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em>, </em><em>optional</em>) – Show the legend.</p></li>
-<li><p><strong>figsize</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>, </em><em>optional</em>) – Figure size.</p></li>
-<li><p><strong>markersize</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Base marker size.</p></li>
-<li><p><strong>fontsize</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Axis label size.</p></li>
-<li><p><strong>legend_size</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Legend font size.</p></li>
+<li><p><strong>legend</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em>, </em><em>optional</em>) – Show the legend.</p></li>
+<li><p><strong>figsize</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>, </em><em>optional</em>) – Figure size.</p></li>
+<li><p><strong>markersize</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Base marker size.</p></li>
+<li><p><strong>fontsize</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Axis label size.</p></li>
+<li><p><strong>legend_size</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Legend font size.</p></li>
 </ul>
 </dd>
 </dl>
@@ -1689,11 +1689,11 @@ sampling at different times.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>figsize</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>, </em><em>optional</em>) – Figure size.</p></li>
-<li><p><strong>markersize</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Marker size.</p></li>
-<li><p><strong>colour_map</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Matplotlib colormap name.</p></li>
-<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Save to the result directory.</p></li>
-<li><p><strong>dpi</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Resolution when writing.</p></li>
+<li><p><strong>figsize</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>, </em><em>optional</em>) – Figure size.</p></li>
+<li><p><strong>markersize</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Marker size.</p></li>
+<li><p><strong>colour_map</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Matplotlib colormap name.</p></li>
+<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Save to the result directory.</p></li>
+<li><p><strong>dpi</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Resolution when writing.</p></li>
 </ul>
 </dd>
 </dl>
@@ -1708,12 +1708,12 @@ confidence levels.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Save to the result directory.</p></li>
-<li><p><strong>dpi</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Resolution when writing.</p></li>
+<li><p><strong>write</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Save to the result directory.</p></li>
+<li><p><strong>dpi</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Resolution when writing.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Raises<span class="colon">:</span></dt>
-<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#SyntaxError" title="(in Python v3.14)"><strong>SyntaxError</strong></a> – If no CVaR problem has been solved.</p>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/builtins/exceptions.html#SyntaxError" title="(in Python v3.14)"><strong>SyntaxError</strong></a> – If no CVaR problem has been solved.</p>
 </dd>
 </dl>
 </dd></dl>
@@ -1729,7 +1729,7 @@ two schedules on the same candidate mean running that condition more
 than once, sampling at different times each time.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Effort below which a candidate is omitted.</p>
+<dd class="field-odd"><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Effort below which a candidate is omitted.</p>
 </dd>
 </dl>
 </dd></dl>
@@ -1762,7 +1762,7 @@ this row.</p></li>
 </ul>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – effort threshold below which a candidate/time is
+<dd class="field-odd"><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – effort threshold below which a candidate/time is
 dropped (same semantics as <a class="reference internal" href="#pydex.core.designer.Designer.get_optimal_candidates" title="pydex.core.designer.Designer.get_optimal_candidates"><code class="xref py py-meth docutils literal notranslate"><span class="pre">get_optimal_candidates()</span></code></a>).</p>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -1816,7 +1816,7 @@ less than or equal to two inputs and outputs.</p>
 <dd><p>Load a design result written by <a class="reference internal" href="#pydex.core.designer.Designer.write_oed_result" title="pydex.core.designer.Designer.write_oed_result"><code class="xref py py-meth docutils literal notranslate"><span class="pre">write_oed_result()</span></code></a>.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><p><strong>result_path</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Path relative to the current working directory.</p>
+<dd class="field-odd"><p><strong>result_path</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Path relative to the current working directory.</p>
 </dd>
 </dl>
 </dd></dl>
@@ -1853,7 +1853,7 @@ loading.</p>
 <dd><p>Restore a designer previously written by <a class="reference internal" href="#pydex.core.designer.Designer.save_state" title="pydex.core.designer.Designer.save_state"><code class="xref py py-meth docutils literal notranslate"><span class="pre">save_state()</span></code></a>.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><p><strong>designer_path</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Path relative to the current working directory.</p>
+<dd class="field-odd"><p><strong>designer_path</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Path relative to the current working directory.</p>
 </dd>
 </dl>
 </dd></dl>
@@ -1879,7 +1879,7 @@ nothing checks this, so loading a mismatched file will silently design
 against the wrong sensitivities.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><p><strong>sens_path</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Path relative to the current working directory.</p>
+<dd class="field-odd"><p><strong>sens_path</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Path relative to the current working directory.</p>
 </dd>
 </dl>
 </dd></dl>
@@ -1892,7 +1892,7 @@ against the wrong sensitivities.</p>
 grid is not checked.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><p><strong>atomic_path</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Path relative to the current working directory.</p>
+<dd class="field-odd"><p><strong>atomic_path</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Path relative to the current working directory.</p>
 </dd>
 </dl>
 </dd></dl>
@@ -2028,7 +2028,7 @@ prove unusable on your model, these are the natural alternatives.</p>
 unusable FIM.</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)">float</a></p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)">float</a></p>
 </dd>
 </dl>
 </dd></dl>
@@ -2054,7 +2054,7 @@ prove unusable on your model, these are the natural alternatives.</p>
 unusable FIM.</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)">float</a></p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)">float</a></p>
 </dd>
 </dl>
 </dd></dl>
@@ -2080,7 +2080,7 @@ prove unusable on your model, these are the natural alternatives.</p>
 unusable FIM.</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)">float</a></p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)">float</a></p>
 </dd>
 </dl>
 </dd></dl>
@@ -2106,7 +2106,7 @@ prove unusable on your model, these are the natural alternatives.</p>
 unusable FIM.</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)">float</a></p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)">float</a></p>
 </dd>
 </dl>
 </dd></dl>
@@ -2136,14 +2136,14 @@ variance at the optimal operating point <code class="docutils literal notranslat
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>n_exp</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em> or </em><em>None</em>) – Number of experiments for a discrete (exact) design.
+<li><p><strong>n_exp</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em> or </em><em>None</em>) – Number of experiments for a discrete (exact) design.
 <code class="docutils literal notranslate"><span class="pre">None</span></code> (default) gives a continuous design (effort fractions).</p></li>
-<li><p><strong>solver</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Pyomo solver name (default <code class="docutils literal notranslate"><span class="pre">&quot;ipopt&quot;</span></code>).</p></li>
-<li><p><strong>solver_options</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>, </em><em>optional</em>) – Options forwarded to the solver
+<li><p><strong>solver</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Pyomo solver name (default <code class="docutils literal notranslate"><span class="pre">&quot;ipopt&quot;</span></code>).</p></li>
+<li><p><strong>solver_options</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>, </em><em>optional</em>) – Options forwarded to the solver
 (e.g. <code class="docutils literal notranslate"><span class="pre">{&quot;tol&quot;:</span> <span class="pre">1e-8,</span> <span class="pre">&quot;linear_solver&quot;:</span> <span class="pre">&quot;ma57&quot;}</span></code>).</p></li>
 <li><p><strong>e0</strong> (<em>array-like</em><em> or </em><em>None</em>) – Initial effort allocation.  <code class="docutils literal notranslate"><span class="pre">None</span></code> uses equal efforts.</p></li>
-<li><p><strong>regularize_fim</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – If <code class="docutils literal notranslate"><span class="pre">True</span></code>, adds <code class="docutils literal notranslate"><span class="pre">eps</span> <span class="pre">*</span> <span class="pre">I</span></code> to the FIM before inversion.</p></li>
-<li><p><strong>recompute_W</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Force recomputation of W even if already cached.</p></li>
+<li><p><strong>regularize_fim</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – If <code class="docutils literal notranslate"><span class="pre">True</span></code>, adds <code class="docutils literal notranslate"><span class="pre">eps</span> <span class="pre">*</span> <span class="pre">I</span></code> to the FIM before inversion.</p></li>
+<li><p><strong>recompute_W</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Force recomputation of W even if already cached.</p></li>
 <li><p><strong>**kwargs</strong> – Forwarded to <code class="docutils literal notranslate"><span class="pre">design_experiment()</span></code>.</p></li>
 </ul>
 </dd>
@@ -2174,10 +2174,10 @@ Without them <a class="reference internal" href="#pydex.core.designer.Designer.e
 unusable PVAR.</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)">float</a></p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)">float</a></p>
 </dd>
 <dt class="field-even">Raises<span class="colon">:</span></dt>
-<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#NotImplementedError" title="(in Python v3.14)"><strong>NotImplementedError</strong></a> – For pseudo-Bayesian designs.</p>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/builtins/exceptions.html#NotImplementedError" title="(in Python v3.14)"><strong>NotImplementedError</strong></a> – For pseudo-Bayesian designs.</p>
 </dd>
 </dl>
 <div class="admonition note">
@@ -2214,7 +2214,7 @@ scoring well here can still leave a parameter combination undetermined.</p>
 <dd class="field-even"><p>The criterion value, to be MINIMISED.</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)">float</a></p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)">float</a></p>
 </dd>
 </dl>
 </dd></dl>
@@ -2238,9 +2238,9 @@ to a user-supplied Pyomo DAE model — no finite-difference perturbations.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>method</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Finite-difference method passed to numdifftools (‘forward’, ‘central’,
+<li><p><strong>method</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Finite-difference method passed to numdifftools (‘forward’, ‘central’,
 etc.).  Ignored when use_pyomo_ift=True.</p></li>
-<li><p><strong>base_step</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>, </em><em>array-like</em><em>, or </em><em>None</em>) – Base step size for numdifftools step generator. <code class="docutils literal notranslate"><span class="pre">None</span></code> (the
+<li><p><strong>base_step</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>, </em><em>array-like</em><em>, or </em><em>None</em>) – Base step size for numdifftools step generator. <code class="docutils literal notranslate"><span class="pre">None</span></code> (the
 default, since 2026-08) means “size it from the parameters
 themselves” — see <code class="docutils literal notranslate"><span class="pre">relative_base_step</span></code>/<code class="docutils literal notranslate"><span class="pre">absolute_step_floor</span></code>
 below. Passing an explicit float or array here reproduces the
@@ -2248,8 +2248,8 @@ OLD unconditional behaviour (pre-fix default was the flat,
 unscaled constant 2.0 for every parameter) and disables the
 per-parameter scaling entirely; only do this if you have a
 specific reason to override the automatic sizing.</p></li>
-<li><p><strong>step_ratio</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Step ratio for numdifftools Richardson extrapolation.</p></li>
-<li><p><strong>relative_base_step</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – <p>Only used when <code class="docutils literal notranslate"><span class="pre">base_step</span> <span class="pre">is</span> <span class="pre">None</span></code>. Each parameter’s FD step
+<li><p><strong>step_ratio</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Step ratio for numdifftools Richardson extrapolation.</p></li>
+<li><p><strong>relative_base_step</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – <p>Only used when <code class="docutils literal notranslate"><span class="pre">base_step</span> <span class="pre">is</span> <span class="pre">None</span></code>. Each parameter’s FD step
 is <code class="docutils literal notranslate"><span class="pre">max(relative_base_step</span> <span class="pre">*</span> <span class="pre">abs(theta_i),</span> <span class="pre">absolute_step_floor)</span></code>
 — i.e. a percentage of that parameter’s OWN nominal magnitude,
 not one flat constant shared across all parameters. Default 1%.</p>
@@ -2268,16 +2268,16 @@ with both the AD Jacobian and the independent ground truth to
 4-5 significant figures. IFT was never the problem; the flat FD
 step was. See CHANGELOG.md for the full writeup and numbers.</p>
 </p></li>
-<li><p><strong>absolute_step_floor</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Only used when <code class="docutils literal notranslate"><span class="pre">base_step</span> <span class="pre">is</span> <span class="pre">None</span></code>. Floor on the per-parameter
+<li><p><strong>absolute_step_floor</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Only used when <code class="docutils literal notranslate"><span class="pre">base_step</span> <span class="pre">is</span> <span class="pre">None</span></code>. Floor on the per-parameter
 step so a parameter with nominal value at or near 0 still gets a
 usable (small, non-zero) step rather than
 <code class="docutils literal notranslate"><span class="pre">relative_base_step</span> <span class="pre">*</span> <span class="pre">0</span> <span class="pre">==</span> <span class="pre">0</span></code>. Default 1e-8.</p></li>
-<li><p><strong>store_predictions</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Whether to cache model predictions alongside sensitivities.</p></li>
-<li><p><strong>plot_analysis_times</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – If True, plot per-candidate sensitivity computation times.</p></li>
-<li><p><strong>save_sensitivities</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em> or </em><em>None</em>) – Override the designer’s save_sensitivities flag for this call.</p></li>
-<li><p><strong>reporting_frequency</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em> or </em><em>None</em>) – How often to print progress (every N candidates).  None uses
+<li><p><strong>store_predictions</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Whether to cache model predictions alongside sensitivities.</p></li>
+<li><p><strong>plot_analysis_times</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – If True, plot per-candidate sensitivity computation times.</p></li>
+<li><p><strong>save_sensitivities</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em> or </em><em>None</em>) – Override the designer’s save_sensitivities flag for this call.</p></li>
+<li><p><strong>reporting_frequency</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em> or </em><em>None</em>) – How often to print progress (every N candidates).  None uses
 the designer default.</p></li>
-<li><p><strong>n_jobs</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – <p>Number of parallel workers for sensitivity computation.
+<li><p><strong>n_jobs</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – <p>Number of parallel workers for sensitivity computation.
 1  — sequential (default, safe for all backends).
 -1 — use all available CPU cores.
 N  — use N cores.</p>
@@ -2373,7 +2373,7 @@ reason.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>, </em><em>optional</em>) – E index below which a parameter is flagged
+<li><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>, </em><em>optional</em>) – E index below which a parameter is flagged
 UNRESOLVABLE. <code class="docutils literal notranslate"><span class="pre">None</span></code> infers it from the accuracy of the
 sensitivity method: about <code class="docutils literal notranslate"><span class="pre">1e-7</span></code> for exact Pyomo IFT
 derivatives, about <code class="docutils literal notranslate"><span class="pre">1e-3</span></code> for finite differences, whose
@@ -2381,7 +2381,7 @@ Richardson extrapolation degrades on strongly curved responses.
 Below that floor the residual is indistinguishable from
 numerical error, so the flag means “this analysis cannot resolve
 the parameter”, NOT “the parameter is inestimable”.</p></li>
-<li><p><strong>corr_tol</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – <code class="docutils literal notranslate"><span class="pre">|correlation|</span></code> above which two parameters join
+<li><p><strong>corr_tol</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – <code class="docutils literal notranslate"><span class="pre">|correlation|</span></code> above which two parameters join
 the same CORRELATION GROUP. Groups are the connected components
 of the graph whose edges exceed <code class="docutils literal notranslate"><span class="pre">corr_tol</span></code>. Within a group the
 data can determine roughly ONE parameter: estimate or fix your
@@ -2394,10 +2394,10 @@ coincide: if <code class="docutils literal notranslate"><span class="pre">corr(A
 <code class="docutils literal notranslate"><span class="pre">corr(A,C)</span> <span class="pre">&gt;=</span> <span class="pre">t^2</span> <span class="pre">-</span> <span class="pre">(1</span> <span class="pre">-</span> <span class="pre">t^2)</span></code>, which is 0.96 at <code class="docutils literal notranslate"><span class="pre">t</span> <span class="pre">=</span> <span class="pre">0.99</span></code>.
 A sweep over several thresholds is printed so the stability of
 the grouping is visible rather than argued about.</p></li>
-<li><p><strong>plot</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Draw the four figures — one bar chart per index and the
+<li><p><strong>plot</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Draw the four figures — one bar chart per index and the
 correlation heat map. Separate figures rather than panels,
 because a fifty-parameter model needs a fifteen-inch bar chart.</p></li>
-<li><p><strong>report</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Print the tables.</p></li>
+<li><p><strong>report</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Print the tables.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -2428,10 +2428,10 @@ under a non-interactive backend can save them; interactively
 </p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a></p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.14)">dict</a></p>
 </dd>
 <dt class="field-even">Raises<span class="colon">:</span></dt>
-<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#SyntaxError" title="(in Python v3.14)"><strong>SyntaxError</strong></a> – If <a class="reference internal" href="#pydex.core.designer.Designer.model_parameters" title="pydex.core.designer.Designer.model_parameters"><code class="xref py py-attr docutils literal notranslate"><span class="pre">model_parameters</span></code></a> has not been set.</p>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/builtins/exceptions.html#SyntaxError" title="(in Python v3.14)"><strong>SyntaxError</strong></a> – If <a class="reference internal" href="#pydex.core.designer.Designer.model_parameters" title="pydex.core.designer.Designer.model_parameters"><code class="xref py py-attr docutils literal notranslate"><span class="pre">model_parameters</span></code></a> has not been set.</p>
 </dd>
 </dl>
 <div class="admonition note">
@@ -2719,7 +2719,7 @@ analysis.</p>
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>mp</strong> (<a class="reference external" href="https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html#numpy.ndarray" title="(in NumPy v2.5)"><em>numpy.ndarray</em></a>) – Parameter values to evaluate at.</p></li>
-<li><p><strong>store_predictions</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Keep the predicted responses.</p></li>
+<li><p><strong>store_predictions</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Keep the predicted responses.</p></li>
 </ul>
 </dd>
 </dl>
@@ -2731,7 +2731,7 @@ analysis.</p>
 <dd><p>Collect the candidates carrying non-negligible effort.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Effort below which a candidate is treated as unused.</p>
+<dd class="field-odd"><p><strong>tol</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Effort below which a candidate is treated as unused.</p>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
 <dd class="field-even"><p>One entry per supported candidate, holding its index, control
@@ -2739,7 +2739,7 @@ values, sampling times, sampling schedules and efforts. Also stored
 on <code class="xref py py-attr docutils literal notranslate"><span class="pre">optimal_candidates</span></code>.</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)">list</a></p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.14)">list</a></p>
 </dd>
 </dl>
 </dd></dl>

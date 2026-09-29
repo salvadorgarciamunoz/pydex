@@ -600,11 +600,14 @@ pip, and nothing is written to disk.
 
 ### `examples/jupyter/` — introductory notebooks
 
-Both notebooks use the current API.
+All three notebooks use the current API.
 
 - `pydex_quickstart.ipynb` — introductory D-optimal design for a
   steady-state system, fitting an order-1 polynomial response-surface
   model in two control variables
+- `pydex_quickstart_with_names.ipynb` — the same design with the labelling
+  attributes set, so the design table and the control plot carry your own
+  names for the controls
 - `pydex_ode_model.ipynb` — D-optimal design for an ODE model: a batch
   reactor with an `A→νB` reaction, integrated via scipy
 

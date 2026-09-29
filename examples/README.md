@@ -556,6 +556,9 @@ measured against anything.
 ## Jupyter — `examples/jupyter/`
 
 - `pydex_quickstart.ipynb` — narrated walkthrough of a first design.
+- `pydex_quickstart_with_names.ipynb` — the same first design with the
+  labelling attributes set, so the design table and the control plot read in
+  your own terms rather than as `Time-invariant Control 0`.
 - `pydex_ode_model.ipynb` — the same for a dynamic model.
 
 ## Publication code

@@ -474,6 +474,9 @@ being run:
 * `pydex_quickstart.ipynb
   <https://github.com/salvadorgarciamunoz/pydex/blob/main/examples/jupyter/pydex_quickstart.ipynb>`_
   — narrated walkthrough of a first design.
+* `pydex_quickstart_with_names.ipynb
+  <https://github.com/salvadorgarciamunoz/pydex/blob/main/examples/jupyter/pydex_quickstart_with_names.ipynb>`_
+  — the same first design with the labelling attributes set.
 * `pydex_ode_model.ipynb
   <https://github.com/salvadorgarciamunoz/pydex/blob/main/examples/jupyter/pydex_ode_model.ipynb>`_
   — the same for a dynamic model.
