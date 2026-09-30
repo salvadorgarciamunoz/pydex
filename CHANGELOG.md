@@ -5,165 +5,90 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-# 0.7.6 — `pseudo_bayesian_type` silently discarded
+## [0.8.0] - 2026-09-30
 
-One patch, `pydex_0.7.6_pb_type.patch`, verified to apply cleanly to
-`38a9b09`. **This touches `designer.py`, so the full capability suite is the
-gate** and docs need rebuilding (viewcode publishes the module source).
+### Removed
 
-## The defect, confirmed by execution
+- **The PyNumero + cyipopt path in `find_optimal_operating_point()` (Stage 1
+  of the V-optimal workflow).** It had never solved anything: its own last
+  statement was `raise NotImplementedError("PyNumero path not fully
+  implemented; using scipy.")`, and a bare `except Exception` in the
+  dispatcher turned that into a silent fall-through to scipy SLSQP. In
+  practice it failed even earlier — `m.x = m.ex.inputs` is refused by Pyomo
+  6.9.5 and 6.10.1 alike, because a component may have only one owning
+  block, and with that corrected the objective and inequality rules fail on
+  uninitialised grey-box variables: they call `pyo.value()` on the decision
+  variables and return a float, so IPOPT would have been handed a constant
+  objective.
 
-`design_experiment(pseudo_bayesian_type=...)` is the only supported way to
-choose between the two pseudo-Bayesian aggregations. When the keyword was
-omitted the code did this unconditionally:
+  The grey box existed solely to feed cyipopt. Nothing else in Pyomo can
+  consume it — the NL writer refuses a grey-box block outright — so no
+  shelled-out solver could ever have seen it. **Every `dw` this project has
+  ever computed came from scipy SLSQP.**
 
-```python
-if pseudo_bayesian_type is None:
-    self._pseudo_bayesian_type = 0
-```
+### Changed
 
-Correct for a fresh designer, wrong after `load_oed_result()` — which
-RESTORES `_pseudo_bayesian_type` from the saved file (designer.py line 6598).
-Measured on a 40-scenario van Laar problem:
+- **`find_optimal_operating_point()` no longer accepts `solver`.** It
+  selected nothing: before the change, `"ipopt"`, `"glpk"` and
+  `"not-a-real-solver-xyz"` all returned bit-identical results. Passing it
+  now raises `SyntaxError` with an explanation, rather than being accepted
+  and ignored — the same treatment as the renamed attributes in 0.7.4 and
+  the discarded `pseudo_bayesian_type` in 0.7.6. **This is the breaking
+  change in this release**; remove the argument from any call.
 
-```
-solved as type 1        criterion 16.397751
-after load_oed_result:  _pseudo_bayesian_type = 1     <- correctly restored
-after re-design:        _pseudo_bayesian_type = 0     <- silently reset
-criterion:              16.541379                     <- the type-0 value
-```
+  `design_experiment(solver=...)` is a separate argument and is unaffected.
 
-Save a type-1 design, load it, re-design without repeating the keyword, and
-the aggregation silently changes from average-criterion to
-average-information. No warning, no error, and the report afterwards
-truthfully says type 0 — so nothing looks wrong.
+- **`solver_options` on Stage 1 is documented against the keys SLSQP
+  actually honours** — `ftol`, `maxiter`, `disp`. The docstring had promised
+  `tol`, `max_iter` and `linear_solver` (e.g. `ma57`), none of which
+  survives the filter; measured, only `maxiter` changes the answer.
 
-**This is a bug rather than a trap, and I had it wrong the first time.** My
-earlier reading was "the attribute is private, so setting it is unsupported".
-That defence does not survive the load path: the user never touches a private
-attribute, the library sets it and the library discards it. The conclusion
-changed only because the scenario was executed rather than reasoned about.
+### Added
 
-## The fix, and why a warning rather than sticky state
+- **`sampling_times_candidates` accepts a 1-D vector**, broadcast across
+  every candidate at `initialize()`. Ragged candidate grids are refused, so
+  every row of the 2-D form is necessarily identical and
+  `np.array([spt for _ in tic])` only restated what the shape already
+  forced. A 2-D array of shape `(n_c, n_spt)` behaves exactly as before.
 
-The default is **unchanged** — omitting the keyword still gives 0. The
-discard now warns:
+  Broadcasting happens in `_get_component_sizes()` rather than in the
+  property setter, because it needs `n_c` and the sampling times and the
+  candidate controls may be assigned in either order. With a 1-D vector and
+  no candidate controls set at all it raises, naming both remedies, rather
+  than guessing a candidate count.
 
-```
-UserWarning: pseudo_bayesian_type was not passed to design_experiment(), so
-it defaults to 0 (average information). This DISCARDS the designer's current
-value of 1, which may have come from load_oed_result() or an earlier design.
-Pass pseudo_bayesian_type explicitly to keep it -- setting the attribute is
-not enough.
-```
+### Documentation
 
-The alternative was to make the value sticky (only default when genuinely
-unset). That would have fixed the load case without any warning, at the cost
-of a call whose behaviour depends on the object's history. Omitting an
-optional argument should mean "use the default", not "reuse whatever this
-object is carrying", so the call stays stateless and the silence is what gets
-fixed.
+- The README described the removed Stage 1 path in detail and said
+  installing `cyipopt` "can speed up the operating-point step". Neither was
+  ever true. Its V-optimal snippet also passed `solver="ipopt"` and
+  `solver_options={"linear_solver": "ma57"}` to Stage 1, so it would now
+  raise if copy-pasted.
+- This file's 0.7.6 entry had been pasted inside a fenced code block as part
+  of an authoring handover, so the live changelog jumped from the preamble to
+  0.7.5. The entry is now a real entry and the handover prose is gone.
 
-Consequence worth stating plainly: **this changes no behaviour at all.** The
-same designs come out as before. It converts a silent wrong answer into a
-loud one.
+### Verification
 
-## Three docstring corrections riding along
+Capability suite **315/315 across 62 sections**, with every recorded
+reference value unchanged: §17 `23.7240`, sequential D-optimal `32.8910`,
+static multi-response `12.01978119`, §53 `5.258e-13`, §54 `1.802e-12` /
+`3.526e-09`, §55's three designs at gap `0.000e+00`, §59 J_V
+`1.00588810e-03` and V/A/D `1.005888e-03` / `1.423637e-03` /
+`1.579850e-03`, §60 `23.56852917` and W `5.861e-13`. **No design, criterion
+value or reference number moves.**
 
-The `design_experiment` entry said the argument is *"Required when
-model_parameters is a scenario array"*. It is not — omit it and you silently
-get 0. It also lacked the overwrite note that `regularize_fim` carries three
-lines below. Now:
+Absorbed Pyomo noise is now **865**, where it was 865 + 1: the extra line
+was a `CyIpoptNLP` deprecation warning emitted by the deleted import.
 
-> Applies only when `model_parameters` is a scenario array. **Defaults to 0**
-> when omitted — it is not required, despite what earlier versions of this
-> docstring said. NOTE this OVERWRITES `self._pseudo_bayesian_type` from the
-> keyword, so setting that attribute directly has no effect; omitting the
-> keyword after `load_oed_result` restored a type therefore discards it, and
-> warns when it does.
+`tests/` **186 passed**, smoke test 4/4, `compileall` clean,
+`ast.parse(feature_version=(3,9))` clean, docs validation build 0 warnings
+and publish build exactly 1.
 
-## Coverage
+The guard found its callers, as guards do: four suite call sites passed
+`solver=` to Stage 1, one of them commented *"passed but SLSQP is used
+internally"* — so the inertness was known where the docstring denied it.
 
-`tests/test_pseudo_bayesian_type_discard.py`, 11 solver-free tests, `tests/`
-**175 -> 186**.
-
-**Proved discriminating:** against the pre-fix `designer.py`, **1 fails and 10
-pass**, and the one that fails is exactly
-`test_warns_when_a_restored_type_is_discarded`. The other ten assert
-behaviour that was already correct and must stay correct.
-
-The negative cases matter as much as the positive one here, because the
-warning *is* the fix — one that fired on ordinary use would be trained away
-within a day. Measured, it stays silent for:
-
-| case | warns | resolved type |
-|---|---|---|
-| local design (not pseudo-Bayesian) | no | `None` |
-| fresh PB designer, no keyword | no | 0 |
-| fresh PB designer, `=0` | no | 0 |
-| fresh PB designer, `=1` | no | 1 |
-| carrying 0, defaulting to 0 | no | 0 |
-| **carrying 1, keyword omitted** | **yes** | 0 |
-
-Invalid values still raise `SyntaxError`, unchanged.
-
-## Verified in the sandbox
-
-| check | result |
-|---|---|
-| `PYTHONPATH=$PWD/_flat pytest -q tests/` | **186 passed** (175 -> 186) |
-| new file vs pre-fix `designer.py` | **1 failed, 10 passed** — the intended split |
-| `python -W error -m compileall -q pydex tests examples testing_scripts` | exit 0 |
-| `ast.parse(feature_version=(3,9))` | OK |
-| engine diff | 34 insertions, 4 deletions, one function |
-
-## Still owed — workstation only
-
-**The full capability suite.** `designer.py` changed, so this is the gate:
-
-```
-python testing_scripts/pydex_full_capability_test.py 2>&1 | tee /tmp/suite_076.log
-grep -cE "^\s*\[OK\]" /tmp/suite_076.log      # expect 315
-grep -ciE "^={10,}$" /tmp/suite_076.log       # expect 124  (62 sections)
-grep -iE "more finite elements|CyIpoptNLP" /tmp/suite_076.log | tail -3
-```
-
-Expect **315/315**, noise **865 + 1**, and no reference value moving — the
-change only adds a warning on a path the suite does not take.
-
-**One thing to watch**, and it is the reason to read the log rather than the
-exit code: sections 07, 08, 09, 18, 22, 39 and 41 all run pseudo-Bayesian
-designs. If any of them relies on a designer carrying a non-zero type into a
-keyword-less call, this warning will appear in the output. It should not — but
-grep for it:
-
-```
-grep -c "pseudo_bayesian_type was not passed" /tmp/suite_076.log
-```
-
-**Zero** is the expected answer. Anything else is a real finding about the
-suite, not about the fix.
-
-Then the docs rebuild — `designer.py` changed, so viewcode's
-`docs/_modules/pydex/core/designer.html` goes stale. Check it moved with a
-single-token grep whose answer is known in advance:
-
-```
-grep -c "DISCARDS" docs/_modules/pydex/core/designer.html
-```
-
-Nonzero confirms the rebuilt page carries the new code.
-
-Version bumped to **0.7.6** in `pyproject.toml`. With the 0.7.5 `conf.py` fix
-the docs pick that up from the file directly, so no reinstall is needed for
-the version to publish correctly — this release is the second confirmation of
-that.
-
-## CHANGELOG entry
-
-Goes under the preamble, above `## [0.7.5]`.
-
-```markdown
 ## [0.7.6] - 2026-09-03
 
 ### Fixed
@@ -206,7 +131,6 @@ split 1 failed / 10 passed against the pre-fix `designer.py` -- the one
 failure being the regression case itself. Six negative cases confirm the
 warning stays silent on ordinary use, which matters because the warning is
 the whole fix.
-```
 ## [0.7.5] - 2026-09-01
 
 ### Added

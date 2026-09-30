@@ -308,11 +308,15 @@ against.
 > changed to `mumps` if HSL is not installed.
 
 **V-optimal operating-point optimisation** (Stage 1 of the V-optimal
-workflow, `find_optimal_operating_point()`) attempts a Pyomo PyNumero
-solve and, if `cyipopt` is installed, uses it for that path. If `cyipopt`
-(or PyNumero) is unavailable, it falls back automatically to scipy's
-SLSQP optimiser. Installing `cyipopt` is therefore **optional** — it can
-speed up the operating-point step but is never required.
+workflow, `find_optimal_operating_point()`) is solved by
+`scipy.optimize.minimize(method="SLSQP")` and needs no solver of its own.
+`process_objective` and `process_constraints` are opaque Python callables
+rather than algebraic expressions, and Pyomo's NL writer cannot serialise a
+callable for IPOPT or any other shelled-out solver. Stage 1 therefore takes
+no `solver` argument, and passing one raises. This is unrelated to
+`design_experiment(solver=...)`, which does choose the solver for the
+criterion optimisation. `solver_options` is forwarded to
+SLSQP, which honours `ftol`, `maxiter` and `disp`.
 
 **Sparsity-enforcing MINLP designs** (`min_effort > 0`) require a MINLP
 solver. BARON via GAMS is recommended:
@@ -446,8 +450,7 @@ designer.dw_bounds_tic       = [(lb, ub), ...]
 
 designer.find_optimal_operating_point(
     init_guess     = np.array([[60.0, 70.0, 1.0]]),
-    solver         = "ipopt",
-    solver_options = {"linear_solver": "ma57"},
+    n_starts       = 3,
 )
 
 # Stage 2
