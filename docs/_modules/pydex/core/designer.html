@@ -1449,11 +1449,22 @@
 
     <span class="nd">@property</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">sampling_times_candidates</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;numpy.ndarray: Candidate sampling times, ``(n_c, n_spt)``.</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;numpy.ndarray: Candidate sampling times.</span>
 
-<span class="sd">        One row per candidate giving the times at which that experiment may be</span>
-<span class="sd">        measured. Rows may be padded with ``numpy.nan`` when candidates have</span>
-<span class="sd">        different numbers of usable times.</span>
+<span class="sd">        Assign either a 1-D vector of times, which every candidate shares, or</span>
+<span class="sd">        a 2-D array of shape ``(n_c, n_spt)`` with one row per candidate. The</span>
+<span class="sd">        vector is the usual form: every candidate must carry the same grid --</span>
+<span class="sd">        ragged grids are refused at :meth:`initialize` -- so the rows of a 2-D</span>
+<span class="sd">        array are necessarily identical, and writing</span>
+<span class="sd">        ``np.array([spt for _ in tic])`` only restates what the shape already</span>
+<span class="sd">        forces.</span>
+
+<span class="sd">        A 1-D vector is broadcast to ``(n_c, n_spt)`` during</span>
+<span class="sd">        :meth:`initialize`, so reading this attribute back afterwards always</span>
+<span class="sd">        gives the 2-D form, whichever way it was set. Because the broadcast</span>
+<span class="sd">        needs the number of candidates, the candidate controls must also have</span>
+<span class="sd">        been assigned by then; the order of the two assignments does not</span>
+<span class="sd">        matter.</span>
 
 <span class="sd">        These are CANDIDATE times, and by default the optimiser chooses which</span>
 <span class="sd">        of them to spend measurements on -- effort is allocated per</span>
@@ -3576,24 +3587,6 @@
 
         <span class="k">return</span> <span class="o">-</span><span class="nb">float</span><span class="p">(</span><span class="n">res</span><span class="o">.</span><span class="n">fun</span><span class="p">)</span>
 
-    <span class="k">def</span><span class="w"> </span><span class="nf">_solve_pyomo_operating_point</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x0</span><span class="p">,</span> <span class="n">lb_arr</span><span class="p">,</span> <span class="n">ub_arr</span><span class="p">,</span> <span class="n">solver_options</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
-<span class="sd">        Solve the operating-point optimisation via PyNumero + cyipopt.</span>
-
-<span class="sd">        PyNumero&#39;s ExternalGreyBoxBlock allows Python callables to be embedded</span>
-<span class="sd">        in a Pyomo model without requiring pyomo_ampl.so. libpynumero_ASL.dylib</span>
-<span class="sd">        is present in the IDAES solver package and supports this path.</span>
-<span class="sd">        Falls back to scipy SLSQP if PyNumero is unavailable.</span>
-<span class="sd">        &quot;&quot;&quot;</span>
-        <span class="k">try</span><span class="p">:</span>
-            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_solve_operating_point_pynumero</span><span class="p">(</span>
-                <span class="n">x0</span><span class="p">,</span> <span class="n">lb_arr</span><span class="p">,</span> <span class="n">ub_arr</span><span class="p">,</span> <span class="n">solver_options</span>
-            <span class="p">)</span>
-        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
-            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_solve_operating_point_scipy</span><span class="p">(</span>
-                <span class="n">x0</span><span class="p">,</span> <span class="n">lb_arr</span><span class="p">,</span> <span class="n">ub_arr</span><span class="p">,</span> <span class="n">solver_options</span>
-            <span class="p">)</span>
-
     <span class="k">def</span><span class="w"> </span><span class="nf">_solve_operating_point_scipy</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x0</span><span class="p">,</span> <span class="n">lb_arr</span><span class="p">,</span> <span class="n">ub_arr</span><span class="p">,</span> <span class="n">solver_options</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Scipy SLSQP fallback for operating point optimisation.&quot;&quot;&quot;</span>
         <span class="kn">from</span><span class="w"> </span><span class="nn">scipy.optimize</span><span class="w"> </span><span class="kn">import</span> <span class="n">minimize</span> <span class="k">as</span> <span class="n">_sp_min</span>
@@ -3634,100 +3627,6 @@
 
         <span class="n">obj_val</span> <span class="o">=</span> <span class="n">sign</span> <span class="o">*</span> <span class="nb">float</span><span class="p">(</span><span class="n">res</span><span class="o">.</span><span class="n">fun</span><span class="p">)</span>
         <span class="k">return</span> <span class="n">res</span><span class="o">.</span><span class="n">x</span><span class="p">,</span> <span class="n">obj_val</span>
-
-    <span class="k">def</span><span class="w"> </span><span class="nf">_solve_operating_point_pynumero</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x0</span><span class="p">,</span> <span class="n">lb_arr</span><span class="p">,</span> <span class="n">ub_arr</span><span class="p">,</span> <span class="n">solver_options</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
-<span class="sd">        Operating point optimisation via PyNumero ExternalGreyBoxBlock + cyipopt.</span>
-<span class="sd">        This uses libpynumero_ASL.dylib (present in IDAES) rather than pyomo_ampl.so.</span>
-<span class="sd">        &quot;&quot;&quot;</span>
-        <span class="kn">from</span><span class="w"> </span><span class="nn">pyomo.contrib.pynumero.interfaces.external_grey_box</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
-            <span class="n">ExternalGreyBoxModel</span><span class="p">,</span> <span class="n">ExternalGreyBoxBlock</span><span class="p">,</span>
-        <span class="p">)</span>
-        <span class="kn">from</span><span class="w"> </span><span class="nn">pyomo.contrib.pynumero.algorithms.solvers.cyipopt_solver</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
-            <span class="n">CyIpoptSolver</span><span class="p">,</span> <span class="n">CyIpoptNLP</span><span class="p">,</span>
-        <span class="p">)</span>
-        <span class="kn">import</span><span class="w"> </span><span class="nn">pyomo.environ</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pyo</span>
-
-        <span class="n">n_tic</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_tic</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_invariant_controls</span> <span class="k">else</span> <span class="mi">0</span>
-        <span class="n">n_tvc</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_tvc</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dynamic_controls</span> <span class="k">else</span> <span class="mi">0</span>
-        <span class="n">n_x</span>   <span class="o">=</span> <span class="n">n_tic</span> <span class="o">+</span> <span class="n">n_tvc</span>
-        <span class="n">sign</span>  <span class="o">=</span> <span class="o">-</span><span class="mf">1.0</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_sense</span> <span class="o">==</span> <span class="s2">&quot;maximize&quot;</span> <span class="k">else</span> <span class="mf">1.0</span>
-        <span class="n">dr</span>    <span class="o">=</span> <span class="bp">self</span>
-        <span class="n">h_fd</span>  <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">finfo</span><span class="p">(</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">eps</span><span class="p">)</span>
-
-        <span class="n">raw_cons</span> <span class="o">=</span> <span class="p">[]</span>
-        <span class="k">if</span> <span class="n">dr</span><span class="o">.</span><span class="n">process_constraints</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="n">raw_cons</span> <span class="o">=</span> <span class="n">dr</span><span class="o">.</span><span class="n">process_constraints</span><span class="p">(</span>
-                <span class="n">x0</span><span class="p">[:</span><span class="n">n_tic</span><span class="p">],</span> <span class="n">x0</span><span class="p">[</span><span class="n">n_tic</span><span class="p">:],</span> <span class="n">dr</span><span class="o">.</span><span class="n">model_parameters</span>
-            <span class="p">)</span>
-        <span class="n">n_eq</span>  <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="mi">1</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">raw_cons</span> <span class="k">if</span> <span class="n">c</span><span class="p">[</span><span class="s2">&quot;type&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="s2">&quot;eq&quot;</span><span class="p">)</span>
-        <span class="n">n_ineq</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="mi">1</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">raw_cons</span> <span class="k">if</span> <span class="n">c</span><span class="p">[</span><span class="s2">&quot;type&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="s2">&quot;ineq&quot;</span><span class="p">)</span>
-
-        <span class="k">class</span><span class="w"> </span><span class="nc">_OpModel</span><span class="p">(</span><span class="n">ExternalGreyBoxModel</span><span class="p">):</span>
-            <span class="k">def</span><span class="w"> </span><span class="nf">input_names</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
-<span class="w">                </span><span class="sd">&quot;&quot;&quot;list of str: Primal variable names, for the cyipopt interface.&quot;&quot;&quot;</span>
-                <span class="k">return</span> <span class="p">[</span><span class="sa">f</span><span class="s2">&quot;x</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_x</span><span class="p">)]</span>
-            <span class="k">def</span><span class="w"> </span><span class="nf">equality_constraint_names</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
-<span class="w">                </span><span class="sd">&quot;&quot;&quot;list of str: Equality constraint names, for cyipopt.&quot;&quot;&quot;</span>
-                <span class="k">return</span> <span class="p">[</span><span class="sa">f</span><span class="s2">&quot;eq</span><span class="si">{</span><span class="n">k</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_eq</span><span class="p">)]</span>
-            <span class="k">def</span><span class="w"> </span><span class="nf">output_names</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
-<span class="w">                </span><span class="sd">&quot;&quot;&quot;list of str: Output names, for cyipopt.&quot;&quot;&quot;</span>
-                <span class="k">return</span> <span class="p">[]</span>
-            <span class="k">def</span><span class="w"> </span><span class="nf">set_input_values</span><span class="p">(</span><span class="n">self_</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
-<span class="w">                </span><span class="sd">&quot;&quot;&quot;Set the primal values at which the callbacks are evaluated.&quot;&quot;&quot;</span>
-                <span class="n">self_</span><span class="o">.</span><span class="n">_x</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
-            <span class="k">def</span><span class="w"> </span><span class="nf">evaluate_equality_constraints</span><span class="p">(</span><span class="n">self_</span><span class="p">):</span>
-<span class="w">                </span><span class="sd">&quot;&quot;&quot;Return the equality constraint residuals at the current point.&quot;&quot;&quot;</span>
-                <span class="n">eq_vals</span> <span class="o">=</span> <span class="p">[</span><span class="nb">float</span><span class="p">(</span><span class="n">c</span><span class="p">[</span><span class="s2">&quot;fun&quot;</span><span class="p">](</span>
-                    <span class="n">self_</span><span class="o">.</span><span class="n">_x</span><span class="p">[:</span><span class="n">n_tic</span><span class="p">],</span> <span class="n">self_</span><span class="o">.</span><span class="n">_x</span><span class="p">[</span><span class="n">n_tic</span><span class="p">:],</span> <span class="n">dr</span><span class="o">.</span><span class="n">model_parameters</span>
-                <span class="p">))</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">raw_cons</span> <span class="k">if</span> <span class="n">c</span><span class="p">[</span><span class="s2">&quot;type&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="s2">&quot;eq&quot;</span><span class="p">]</span>
-                <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">eq_vals</span><span class="p">)</span>
-            <span class="k">def</span><span class="w"> </span><span class="nf">evaluate_jacobian_equality_constraints</span><span class="p">(</span><span class="n">self_</span><span class="p">):</span>
-<span class="w">                </span><span class="sd">&quot;&quot;&quot;Return the Jacobian of the equality constraints, sparse.&quot;&quot;&quot;</span>
-                <span class="kn">import</span><span class="w"> </span><span class="nn">scipy.sparse</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">sp</span>
-                <span class="n">rows</span><span class="p">,</span> <span class="n">cols</span><span class="p">,</span> <span class="n">vals</span> <span class="o">=</span> <span class="p">[],</span> <span class="p">[],</span> <span class="p">[]</span>
-                <span class="n">eq_idx</span> <span class="o">=</span> <span class="mi">0</span>
-                <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">raw_cons</span><span class="p">:</span>
-                    <span class="k">if</span> <span class="n">c</span><span class="p">[</span><span class="s2">&quot;type&quot;</span><span class="p">]</span> <span class="o">!=</span> <span class="s2">&quot;eq&quot;</span><span class="p">:</span>
-                        <span class="k">continue</span>
-                    <span class="n">f</span>  <span class="o">=</span> <span class="n">c</span><span class="p">[</span><span class="s2">&quot;fun&quot;</span><span class="p">]</span>
-                    <span class="n">f0</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">f</span><span class="p">(</span><span class="n">self_</span><span class="o">.</span><span class="n">_x</span><span class="p">[:</span><span class="n">n_tic</span><span class="p">],</span> <span class="n">self_</span><span class="o">.</span><span class="n">_x</span><span class="p">[</span><span class="n">n_tic</span><span class="p">:],</span> <span class="n">dr</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">))</span>
-                    <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_x</span><span class="p">):</span>
-                        <span class="n">xp</span> <span class="o">=</span> <span class="n">self_</span><span class="o">.</span><span class="n">_x</span><span class="o">.</span><span class="n">copy</span><span class="p">();</span> <span class="n">xp</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">+=</span> <span class="n">h_fd</span>
-                        <span class="n">fp</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">f</span><span class="p">(</span><span class="n">xp</span><span class="p">[:</span><span class="n">n_tic</span><span class="p">],</span> <span class="n">xp</span><span class="p">[</span><span class="n">n_tic</span><span class="p">:],</span> <span class="n">dr</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">))</span>
-                        <span class="n">rows</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">eq_idx</span><span class="p">);</span> <span class="n">cols</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">j</span><span class="p">);</span> <span class="n">vals</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">fp</span><span class="o">-</span><span class="n">f0</span><span class="p">)</span><span class="o">/</span><span class="n">h_fd</span><span class="p">)</span>
-                    <span class="n">eq_idx</span> <span class="o">+=</span> <span class="mi">1</span>
-                <span class="k">return</span> <span class="n">sp</span><span class="o">.</span><span class="n">coo_matrix</span><span class="p">((</span><span class="n">vals</span><span class="p">,</span> <span class="p">(</span><span class="n">rows</span><span class="p">,</span> <span class="n">cols</span><span class="p">)),</span> <span class="n">shape</span><span class="o">=</span><span class="p">(</span><span class="n">n_eq</span><span class="p">,</span> <span class="n">n_x</span><span class="p">))</span>
-
-        <span class="n">m</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">ConcreteModel</span><span class="p">()</span>
-        <span class="n">m</span><span class="o">.</span><span class="n">ex</span> <span class="o">=</span> <span class="n">ExternalGreyBoxBlock</span><span class="p">()</span>
-        <span class="n">m</span><span class="o">.</span><span class="n">ex</span><span class="o">.</span><span class="n">set_external_model</span><span class="p">(</span><span class="n">_OpModel</span><span class="p">())</span>
-        <span class="n">m</span><span class="o">.</span><span class="n">x</span> <span class="o">=</span> <span class="n">m</span><span class="o">.</span><span class="n">ex</span><span class="o">.</span><span class="n">inputs</span>
-
-        <span class="c1"># objective</span>
-        <span class="k">def</span><span class="w"> </span><span class="nf">_obj_expr</span><span class="p">():</span>
-            <span class="n">xv</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">pyo</span><span class="o">.</span><span class="n">value</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">x</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;x</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">])</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_x</span><span class="p">)])</span>
-            <span class="k">return</span> <span class="n">sign</span> <span class="o">*</span> <span class="nb">float</span><span class="p">(</span><span class="n">dr</span><span class="o">.</span><span class="n">process_objective</span><span class="p">(</span>
-                <span class="n">xv</span><span class="p">[:</span><span class="n">n_tic</span><span class="p">],</span> <span class="n">xv</span><span class="p">[</span><span class="n">n_tic</span><span class="p">:],</span> <span class="n">dr</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">))</span>
-
-        <span class="c1"># inequality constraints as regular Pyomo constraints</span>
-        <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">raw_cons</span><span class="p">):</span>
-            <span class="k">if</span> <span class="n">c</span><span class="p">[</span><span class="s2">&quot;type&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="s2">&quot;ineq&quot;</span><span class="p">:</span>
-                <span class="n">f</span> <span class="o">=</span> <span class="n">c</span><span class="p">[</span><span class="s2">&quot;fun&quot;</span><span class="p">]</span>
-                <span class="k">def</span><span class="w"> </span><span class="nf">_ineq</span><span class="p">(</span><span class="n">m</span><span class="p">,</span> <span class="n">_f</span><span class="o">=</span><span class="n">f</span><span class="p">):</span>
-                    <span class="n">xv</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">pyo</span><span class="o">.</span><span class="n">value</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">x</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;x</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">])</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_x</span><span class="p">)])</span>
-                    <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="n">_f</span><span class="p">(</span><span class="n">xv</span><span class="p">[:</span><span class="n">n_tic</span><span class="p">],</span> <span class="n">xv</span><span class="p">[</span><span class="n">n_tic</span><span class="p">:],</span> <span class="n">dr</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">))</span> <span class="o">&gt;=</span> <span class="mi">0</span>
-                <span class="nb">setattr</span><span class="p">(</span><span class="n">m</span><span class="p">,</span> <span class="sa">f</span><span class="s2">&quot;ineq_</span><span class="si">{</span><span class="n">k</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Constraint</span><span class="p">(</span><span class="n">rule</span><span class="o">=</span><span class="n">_ineq</span><span class="p">))</span>
-
-        <span class="c1"># bounds</span>
-        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_x</span><span class="p">):</span>
-            <span class="n">v</span> <span class="o">=</span> <span class="n">m</span><span class="o">.</span><span class="n">x</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;x</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">]</span>
-            <span class="n">v</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">x0</span><span class="p">[</span><span class="n">i</span><span class="p">]))</span>
-            <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">lb_arr</span><span class="p">[</span><span class="n">i</span><span class="p">]):</span> <span class="n">v</span><span class="o">.</span><span class="n">setlb</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">lb_arr</span><span class="p">[</span><span class="n">i</span><span class="p">]))</span>
-            <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">ub_arr</span><span class="p">[</span><span class="n">i</span><span class="p">]):</span> <span class="n">v</span><span class="o">.</span><span class="n">setub</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">ub_arr</span><span class="p">[</span><span class="n">i</span><span class="p">]))</span>
-
-        <span class="c1"># fall through to scipy if this gets too complex</span>
-        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span><span class="s2">&quot;PyNumero path not fully implemented; using scipy.&quot;</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_solve_pyomo_cvar</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">criterion</span><span class="p">,</span> <span class="n">beta</span><span class="p">,</span> <span class="n">e0</span><span class="p">,</span> <span class="n">min_expected_value</span><span class="p">,</span>
                           <span class="n">solver_options</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
@@ -3846,7 +3745,7 @@
 
 <div class="viewcode-block" id="Designer.find_optimal_operating_point">
 <a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.find_optimal_operating_point">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">find_optimal_operating_point</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">init_guess</span><span class="p">,</span> <span class="n">solver</span><span class="o">=</span><span class="s2">&quot;ipopt&quot;</span><span class="p">,</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">find_optimal_operating_point</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">init_guess</span><span class="p">,</span> <span class="n">solver</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
                                       <span class="n">solver_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">n_starts</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">        Stage 1 of V-optimal MBDoE: find the process operating condition(s)</span>
@@ -3867,13 +3766,22 @@
 <span class="sd">            Initial guess(es) for [tic | tvc].  If 2-D, each row is solved</span>
 <span class="sd">            independently and all solutions are stored.</span>
 
-<span class="sd">        solver : str</span>
-<span class="sd">            Pyomo solver name (default ``&quot;ipopt&quot;``).  Any solver registered</span>
-<span class="sd">            with ``pyo.SolverFactory`` may be used.</span>
+<span class="sd">        solver : None</span>
+<span class="sd">            Not selectable.  Stage 1 optimises ``process_objective`` and</span>
+<span class="sd">            ``process_constraints``, which are opaque Python callables</span>
+<span class="sd">            rather than algebraic expressions, so Pyomo&#39;s NL writer cannot</span>
+<span class="sd">            serialise them for a shelled-out solver such as IPOPT.  The</span>
+<span class="sd">            optimisation is performed by</span>
+<span class="sd">            ``scipy.optimize.minimize(method=&quot;SLSQP&quot;)``.  Passing anything</span>
+<span class="sd">            here raises, rather than being accepted and ignored.</span>
+
+<span class="sd">            Unrelated to ``design_experiment(solver=...)``, which does</span>
+<span class="sd">            choose the solver for the criterion optimisation.</span>
 
 <span class="sd">        solver_options : dict, optional</span>
-<span class="sd">            Options forwarded to the solver.  For IPOPT use keys such as</span>
-<span class="sd">            ``&quot;tol&quot;``, ``&quot;max_iter&quot;``, ``&quot;linear_solver&quot;`` (e.g. ``&quot;ma57&quot;``).</span>
+<span class="sd">            Options forwarded to SLSQP.  Only ``ftol``, ``maxiter`` and</span>
+<span class="sd">            ``disp`` are honoured; anything else is dropped.  Defaults are</span>
+<span class="sd">            ``ftol=1e-8`` and ``maxiter=3000``.</span>
 
 <span class="sd">        n_starts : int</span>
 <span class="sd">            Number of random restarts per operating point (default 1).</span>
@@ -3887,11 +3795,22 @@
 <span class="sd">        --------</span>
 <span class="sd">        &gt;&gt;&gt; designer.find_optimal_operating_point(</span>
 <span class="sd">        ...     init_guess    = np.array([[T0_guess, Tj_guess, cat_guess]]),</span>
-<span class="sd">        ...     solver        = &quot;ipopt&quot;,</span>
-<span class="sd">        ...     solver_options = {&quot;tol&quot;: 1e-8, &quot;linear_solver&quot;: &quot;ma57&quot;},</span>
+<span class="sd">        ...     n_starts      = 3,</span>
 <span class="sd">        ... )</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="c1"># --- guards ---</span>
+        <span class="k">if</span> <span class="n">solver</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
+                <span class="s2">&quot;find_optimal_operating_point() does not take a solver. &quot;</span>
+                <span class="s2">&quot;Stage 1 optimises process_objective and &quot;</span>
+                <span class="s2">&quot;process_constraints, which are opaque Python callables, &quot;</span>
+                <span class="s2">&quot;so it is solved by &quot;</span>
+                <span class="s2">&quot;scipy.optimize.minimize(method=&#39;SLSQP&#39;); Pyomo&#39;s NL &quot;</span>
+                <span class="s2">&quot;writer cannot serialise a callable for IPOPT or any &quot;</span>
+                <span class="s2">&quot;other shelled-out solver. Use solver_options to pass &quot;</span>
+                <span class="s2">&quot;&#39;ftol&#39;, &#39;maxiter&#39; or &#39;disp&#39;. design_experiment(solver=...) &quot;</span>
+                <span class="s2">&quot;is a separate argument and is unaffected.&quot;</span>
+            <span class="p">)</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_status</span> <span class="o">!=</span> <span class="s1">&#39;ready&#39;</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
                 <span class="s2">&quot;Designer must be initialized before calling &quot;</span>
@@ -3932,70 +3851,63 @@
                 <span class="sa">f</span><span class="s2">&quot;n_tic + n_tvc = </span><span class="si">{</span><span class="n">n_x</span><span class="si">}</span><span class="s2">. Each row must be [tic | tvc].&quot;</span>
             <span class="p">)</span>
 
-        <span class="c1"># store solver choice</span>
-        <span class="n">old_solver</span>      <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_solver</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_solver</span>    <span class="o">=</span> <span class="n">solver</span>
-
         <span class="n">results_tic</span> <span class="o">=</span> <span class="p">[]</span>
         <span class="n">results_tvc</span> <span class="o">=</span> <span class="p">[]</span>
         <span class="n">results_obj</span> <span class="o">=</span> <span class="p">[]</span>
 
-        <span class="k">try</span><span class="p">:</span>
-          <span class="k">for</span> <span class="n">w</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">r_w</span><span class="p">):</span>
-            <span class="n">best_x</span>   <span class="o">=</span> <span class="kc">None</span>
-            <span class="n">best_obj</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span>
+        <span class="k">for</span> <span class="n">w</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">r_w</span><span class="p">):</span>
+          <span class="n">best_x</span>   <span class="o">=</span> <span class="kc">None</span>
+          <span class="n">best_obj</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span>
 
-            <span class="k">for</span> <span class="n">start</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_starts</span><span class="p">):</span>
-                <span class="k">if</span> <span class="n">start</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
-                    <span class="n">x0</span> <span class="o">=</span> <span class="n">init_guess</span><span class="p">[</span><span class="n">w</span><span class="p">]</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
-                <span class="k">else</span><span class="p">:</span>
-                    <span class="n">lo</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">lb_arr</span><span class="p">),</span> <span class="n">lb_arr</span><span class="p">,</span> <span class="o">-</span><span class="mf">1e6</span><span class="p">)</span>
-                    <span class="n">hi</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">ub_arr</span><span class="p">),</span> <span class="n">ub_arr</span><span class="p">,</span>  <span class="mf">1e6</span><span class="p">)</span>
-                    <span class="n">x0</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="n">lo</span><span class="p">,</span> <span class="n">hi</span><span class="p">)</span>
+          <span class="k">for</span> <span class="n">start</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_starts</span><span class="p">):</span>
+              <span class="k">if</span> <span class="n">start</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+                  <span class="n">x0</span> <span class="o">=</span> <span class="n">init_guess</span><span class="p">[</span><span class="n">w</span><span class="p">]</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+              <span class="k">else</span><span class="p">:</span>
+                  <span class="n">lo</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">lb_arr</span><span class="p">),</span> <span class="n">lb_arr</span><span class="p">,</span> <span class="o">-</span><span class="mf">1e6</span><span class="p">)</span>
+                  <span class="n">hi</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">ub_arr</span><span class="p">),</span> <span class="n">ub_arr</span><span class="p">,</span>  <span class="mf">1e6</span><span class="p">)</span>
+                  <span class="n">x0</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="n">lo</span><span class="p">,</span> <span class="n">hi</span><span class="p">)</span>
 
-                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
-                    <span class="n">tag</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;point </span><span class="si">{</span><span class="n">w</span><span class="o">+</span><span class="mi">1</span><span class="si">}</span><span class="s2">/</span><span class="si">{</span><span class="n">r_w</span><span class="si">}</span><span class="s2">, start </span><span class="si">{</span><span class="n">start</span><span class="o">+</span><span class="mi">1</span><span class="si">}</span><span class="s2">/</span><span class="si">{</span><span class="n">n_starts</span><span class="si">}</span><span class="s2">&quot;</span>
-                    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[find_optimal_operating_point] Solving </span><span class="si">{</span><span class="n">tag</span><span class="si">}</span><span class="s2"> ...&quot;</span><span class="p">)</span>
+              <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
+                  <span class="n">tag</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;point </span><span class="si">{</span><span class="n">w</span><span class="o">+</span><span class="mi">1</span><span class="si">}</span><span class="s2">/</span><span class="si">{</span><span class="n">r_w</span><span class="si">}</span><span class="s2">, start </span><span class="si">{</span><span class="n">start</span><span class="o">+</span><span class="mi">1</span><span class="si">}</span><span class="s2">/</span><span class="si">{</span><span class="n">n_starts</span><span class="si">}</span><span class="s2">&quot;</span>
+                  <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[find_optimal_operating_point] Solving </span><span class="si">{</span><span class="n">tag</span><span class="si">}</span><span class="s2"> ...&quot;</span><span class="p">)</span>
 
-                <span class="k">try</span><span class="p">:</span>
-                    <span class="n">x_opt</span><span class="p">,</span> <span class="n">obj_val</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_solve_pyomo_operating_point</span><span class="p">(</span>
-                        <span class="n">x0</span><span class="p">,</span> <span class="n">lb_arr</span><span class="p">,</span> <span class="n">ub_arr</span><span class="p">,</span> <span class="n">solver_options</span>
-                    <span class="p">)</span>
-                <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
-                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
-                        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Warning: solver failed (</span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">), skipping this start.&quot;</span><span class="p">)</span>
-                    <span class="k">continue</span>
+              <span class="k">try</span><span class="p">:</span>
+                  <span class="n">x_opt</span><span class="p">,</span> <span class="n">obj_val</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_solve_operating_point_scipy</span><span class="p">(</span>
+                      <span class="n">x0</span><span class="p">,</span> <span class="n">lb_arr</span><span class="p">,</span> <span class="n">ub_arr</span><span class="p">,</span> <span class="n">solver_options</span>
+                  <span class="p">)</span>
+              <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+                  <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
+                      <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Warning: solver failed (</span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">), skipping this start.&quot;</span><span class="p">)</span>
+                  <span class="k">continue</span>
 
-                <span class="n">cmp</span> <span class="o">=</span> <span class="n">obj_val</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_sense</span> <span class="o">==</span> <span class="s2">&quot;minimize&quot;</span> <span class="k">else</span> <span class="o">-</span><span class="n">obj_val</span>
-                <span class="k">if</span> <span class="n">cmp</span> <span class="o">&lt;</span> <span class="n">best_obj</span><span class="p">:</span>
-                    <span class="n">best_obj</span> <span class="o">=</span> <span class="n">cmp</span>
-                    <span class="n">best_x</span>   <span class="o">=</span> <span class="n">x_opt</span>
+              <span class="n">cmp</span> <span class="o">=</span> <span class="n">obj_val</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_sense</span> <span class="o">==</span> <span class="s2">&quot;minimize&quot;</span> <span class="k">else</span> <span class="o">-</span><span class="n">obj_val</span>
+              <span class="k">if</span> <span class="n">cmp</span> <span class="o">&lt;</span> <span class="n">best_obj</span><span class="p">:</span>
+                  <span class="n">best_obj</span> <span class="o">=</span> <span class="n">cmp</span>
+                  <span class="n">best_x</span>   <span class="o">=</span> <span class="n">x_opt</span>
 
-                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
-                    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Objective (</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">dw_sense</span><span class="si">}</span><span class="s2">): </span><span class="si">{</span><span class="n">obj_val</span><span class="si">:</span><span class="s2">.6g</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+              <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
+                  <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Objective (</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">dw_sense</span><span class="si">}</span><span class="s2">): </span><span class="si">{</span><span class="n">obj_val</span><span class="si">:</span><span class="s2">.6g</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 
-            <span class="k">if</span> <span class="n">best_x</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-                <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
-                    <span class="sa">f</span><span class="s2">&quot;All </span><span class="si">{</span><span class="n">n_starts</span><span class="si">}</span><span class="s2"> start(s) failed for operating point &quot;</span>
-                    <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">w</span><span class="o">+</span><span class="mi">1</span><span class="si">}</span><span class="s2">/</span><span class="si">{</span><span class="n">r_w</span><span class="si">}</span><span class="s2"> (solver=&#39;</span><span class="si">{</span><span class="n">solver</span><span class="si">}</span><span class="s2">&#39;). Check bounds, initial guess, and constraints.&quot;</span>
-                <span class="p">)</span>
+          <span class="k">if</span> <span class="n">best_x</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+              <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                  <span class="sa">f</span><span class="s2">&quot;All </span><span class="si">{</span><span class="n">n_starts</span><span class="si">}</span><span class="s2"> start(s) failed for operating point &quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">w</span><span class="o">+</span><span class="mi">1</span><span class="si">}</span><span class="s2">/</span><span class="si">{</span><span class="n">r_w</span><span class="si">}</span><span class="s2">. Check bounds, initial guess, and constraints.&quot;</span>
+              <span class="p">)</span>
 
-            <span class="n">results_tic</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">best_x</span><span class="p">[:</span><span class="n">n_tic</span><span class="p">])</span>
-            <span class="n">results_tvc</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">best_x</span><span class="p">[</span><span class="n">n_tic</span><span class="p">:])</span>
-            <span class="n">results_obj</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
-                <span class="o">-</span><span class="n">best_obj</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_sense</span> <span class="o">==</span> <span class="s2">&quot;maximize&quot;</span> <span class="k">else</span> <span class="n">best_obj</span>
-            <span class="p">)</span>
+          <span class="n">results_tic</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">best_x</span><span class="p">[:</span><span class="n">n_tic</span><span class="p">])</span>
+          <span class="n">results_tvc</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">best_x</span><span class="p">[</span><span class="n">n_tic</span><span class="p">:])</span>
+          <span class="n">results_obj</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+              <span class="o">-</span><span class="n">best_obj</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_sense</span> <span class="o">==</span> <span class="s2">&quot;maximize&quot;</span> <span class="k">else</span> <span class="n">best_obj</span>
+          <span class="p">)</span>
 
-            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
-                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  dw_tic[</span><span class="si">{</span><span class="n">w</span><span class="si">}</span><span class="s2">] = </span><span class="si">{</span><span class="n">best_x</span><span class="p">[:</span><span class="n">n_tic</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  dw_tvc[</span><span class="si">{</span><span class="n">w</span><span class="si">}</span><span class="s2">] = </span><span class="si">{</span><span class="n">best_x</span><span class="p">[</span><span class="n">n_tic</span><span class="p">:]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+          <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
+              <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  dw_tic[</span><span class="si">{</span><span class="n">w</span><span class="si">}</span><span class="s2">] = </span><span class="si">{</span><span class="n">best_x</span><span class="p">[:</span><span class="n">n_tic</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+              <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  dw_tvc[</span><span class="si">{</span><span class="n">w</span><span class="si">}</span><span class="s2">] = </span><span class="si">{</span><span class="n">best_x</span><span class="p">[</span><span class="n">n_tic</span><span class="p">:]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 
-          <span class="bp">self</span><span class="o">.</span><span class="n">dw_tic</span>       <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">results_tic</span><span class="p">)</span>   <span class="c1"># (r_w, n_tic)  — also sets _dw_fixed</span>
-          <span class="bp">self</span><span class="o">.</span><span class="n">dw_tvc</span>       <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">results_tvc</span><span class="p">)</span>   <span class="c1"># (r_w, n_tvc)</span>
-          <span class="bp">self</span><span class="o">.</span><span class="n">_dw_obj_vals</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">results_obj</span><span class="p">)</span>   <span class="c1"># (r_w,) objective at each point</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dw_tic</span>       <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">results_tic</span><span class="p">)</span>   <span class="c1"># (r_w, n_tic)  — also sets _dw_fixed</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dw_tvc</span>       <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">results_tvc</span><span class="p">)</span>   <span class="c1"># (r_w, n_tvc)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_dw_obj_vals</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">results_obj</span><span class="p">)</span>   <span class="c1"># (r_w,) objective at each point</span>
 
-        <span class="k">finally</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_solver</span> <span class="o">=</span> <span class="n">old_solver</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[find_optimal_operating_point] Done. &quot;</span>
@@ -12333,6 +12245,48 @@
                                                  <span class="sa">f</span><span class="s2">&quot;spt_candidates has </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c_spt</span><span class="si">}</span><span class="s2">, &quot;</span> \
                                                  <span class="sa">f</span><span class="s2">&quot;but </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="si">}</span><span class="s2"> is expected.&quot;</span>
 
+    <span class="k">def</span><span class="w"> </span><span class="nf">_broadcast_sampling_times</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Accept a 1-D sampling-time vector and share it across candidates.</span>
+
+<span class="sd">        Every candidate must carry the same sampling grid -- ragged grids are</span>
+<span class="sd">        refused by :meth:`_check_var_spt` -- so requiring one row per candidate</span>
+<span class="sd">        makes the caller write ``np.array([spt for _ in tic])`` to say</span>
+<span class="sd">        something the shape already forces. A 1-D vector says it directly.</span>
+
+<span class="sd">        Broadcasting happens here rather than in the property setter because</span>
+<span class="sd">        the number of candidates is not known until the controls have also</span>
+<span class="sd">        been assigned, and the two may be set in either order.</span>
+
+<span class="sd">        A 2-D array is left exactly as given, so nothing that already worked</span>
+<span class="sd">        changes. Called from :meth:`_get_component_sizes` before any shape is</span>
+<span class="sd">        read.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">sptc</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sptc</span>
+        <span class="k">if</span> <span class="n">sptc</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span>
+
+        <span class="n">sptc</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">sptc</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">sptc</span><span class="o">.</span><span class="n">ndim</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_sptc</span> <span class="o">=</span> <span class="n">sptc</span>
+            <span class="k">return</span>
+
+        <span class="n">n_c</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">for</span> <span class="n">cand</span> <span class="ow">in</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_ticc</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tvcc</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">cand</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">n_c</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">cand</span><span class="p">)</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+                <span class="k">break</span>
+        <span class="k">if</span> <span class="n">n_c</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
+                <span class="s2">&quot;sampling_times_candidates was given as a 1-D vector, which &quot;</span>
+                <span class="s2">&quot;pydex shares across every candidate, but no candidate &quot;</span>
+                <span class="s2">&quot;controls have been set yet so the number of candidates is &quot;</span>
+                <span class="s2">&quot;unknown. Assign ti_controls_candidates (or &quot;</span>
+                <span class="s2">&quot;tv_controls_candidates) as well, or pass the sampling times &quot;</span>
+                <span class="s2">&quot;as a 2-D array of shape (n_c, n_spt).&quot;</span>
+            <span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_sptc</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">sptc</span><span class="p">,</span> <span class="p">(</span><span class="n">n_c</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+
     <span class="k">def</span><span class="w"> </span><span class="nf">_check_var_spt</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">([</span><span class="nb">len</span><span class="p">(</span><span class="n">spt</span><span class="p">)</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sampling_times_candidates</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="k">for</span> <span class="n">spt</span> <span class="ow">in</span>
                    <span class="bp">self</span><span class="o">.</span><span class="n">sampling_times_candidates</span><span class="p">])</span> \
@@ -12406,6 +12360,8 @@
             <span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_get_component_sizes</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_broadcast_sampling_times</span><span class="p">()</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_simulate_signature</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">n_c_tic</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_tic</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">ti_controls_candidates</span><span class="o">.</span><span class="n">shape</span>

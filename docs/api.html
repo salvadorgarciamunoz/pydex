@@ -947,10 +947,20 @@ set changed.</p>
 <dl class="py property">
 <dt class="sig sig-object py" id="pydex.core.designer.Designer.sampling_times_candidates">
 <em class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">sampling_times_candidates</span></span><a class="headerlink" href="#pydex.core.designer.Designer.sampling_times_candidates" title="Link to this definition"></a></dt>
-<dd><p>Candidate sampling times, <code class="docutils literal notranslate"><span class="pre">(n_c,</span> <span class="pre">n_spt)</span></code>.</p>
-<p>One row per candidate giving the times at which that experiment may be
-measured. Rows may be padded with <code class="docutils literal notranslate"><span class="pre">numpy.nan</span></code> when candidates have
-different numbers of usable times.</p>
+<dd><p>Candidate sampling times.</p>
+<p>Assign either a 1-D vector of times, which every candidate shares, or
+a 2-D array of shape <code class="docutils literal notranslate"><span class="pre">(n_c,</span> <span class="pre">n_spt)</span></code> with one row per candidate. The
+vector is the usual form: every candidate must carry the same grid –
+ragged grids are refused at <a class="reference internal" href="#pydex.core.designer.Designer.initialize" title="pydex.core.designer.Designer.initialize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">initialize()</span></code></a> – so the rows of a 2-D
+array are necessarily identical, and writing
+<code class="docutils literal notranslate"><span class="pre">np.array([spt</span> <span class="pre">for</span> <span class="pre">_</span> <span class="pre">in</span> <span class="pre">tic])</span></code> only restates what the shape already
+forces.</p>
+<p>A 1-D vector is broadcast to <code class="docutils literal notranslate"><span class="pre">(n_c,</span> <span class="pre">n_spt)</span></code> during
+<a class="reference internal" href="#pydex.core.designer.Designer.initialize" title="pydex.core.designer.Designer.initialize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">initialize()</span></code></a>, so reading this attribute back afterwards always
+gives the 2-D form, whichever way it was set. Because the broadcast
+needs the number of candidates, the candidate controls must also have
+been assigned by then; the order of the two assignments does not
+matter.</p>
 <p>These are CANDIDATE times, and by default the optimiser chooses which
 of them to spend measurements on – effort is allocated per
 (candidate, sampling-time) cell, and most listed times typically end
@@ -1280,7 +1290,7 @@ epsilon-constraint method using Pyomo.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="pydex.core.designer.Designer.find_optimal_operating_point">
-<span class="sig-name descname"><span class="pre">find_optimal_operating_point</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">init_guess</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'ipopt'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver_options</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_starts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.find_optimal_operating_point"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.find_optimal_operating_point" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">find_optimal_operating_point</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">init_guess</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solver_options</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_starts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.find_optimal_operating_point"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.find_optimal_operating_point" title="Link to this definition"></a></dt>
 <dd><p>Stage 1 of V-optimal MBDoE: find the process operating condition(s)
 dw at which the model needs to be most accurate.</p>
 <p>Solves a nonlinear constrained optimisation over the ti_controls and
@@ -1295,10 +1305,19 @@ to build the W matrix and target the FIM inversion accordingly.</p>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>init_guess</strong> (<em>array-like</em><em>, </em><em>shape</em><em> (</em><em>n_x</em><em>,</em><em>) or </em><em>(</em><em>r_w</em><em>, </em><em>n_x</em><em>)</em>) – Initial guess(es) for [tic | tvc].  If 2-D, each row is solved
 independently and all solutions are stored.</p></li>
-<li><p><strong>solver</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Pyomo solver name (default <code class="docutils literal notranslate"><span class="pre">&quot;ipopt&quot;</span></code>).  Any solver registered
-with <code class="docutils literal notranslate"><span class="pre">pyo.SolverFactory</span></code> may be used.</p></li>
-<li><p><strong>solver_options</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>, </em><em>optional</em>) – Options forwarded to the solver.  For IPOPT use keys such as
-<code class="docutils literal notranslate"><span class="pre">&quot;tol&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;max_iter&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;linear_solver&quot;</span></code> (e.g. <code class="docutils literal notranslate"><span class="pre">&quot;ma57&quot;</span></code>).</p></li>
+<li><p><strong>solver</strong> (<em>None</em>) – <p>Not selectable.  Stage 1 optimises <code class="docutils literal notranslate"><span class="pre">process_objective</span></code> and
+<code class="docutils literal notranslate"><span class="pre">process_constraints</span></code>, which are opaque Python callables
+rather than algebraic expressions, so Pyomo’s NL writer cannot
+serialise them for a shelled-out solver such as IPOPT.  The
+optimisation is performed by
+<code class="docutils literal notranslate"><span class="pre">scipy.optimize.minimize(method=&quot;SLSQP&quot;)</span></code>.  Passing anything
+here raises, rather than being accepted and ignored.</p>
+<p>Unrelated to <code class="docutils literal notranslate"><span class="pre">design_experiment(solver=...)</span></code>, which does
+choose the solver for the criterion optimisation.</p>
+</p></li>
+<li><p><strong>solver_options</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>, </em><em>optional</em>) – Options forwarded to SLSQP.  Only <code class="docutils literal notranslate"><span class="pre">ftol</span></code>, <code class="docutils literal notranslate"><span class="pre">maxiter</span></code> and
+<code class="docutils literal notranslate"><span class="pre">disp</span></code> are honoured; anything else is dropped.  Defaults are
+<code class="docutils literal notranslate"><span class="pre">ftol=1e-8</span></code> and <code class="docutils literal notranslate"><span class="pre">maxiter=3000</span></code>.</p></li>
 <li><p><strong>n_starts</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Number of random restarts per operating point (default 1).</p></li>
 </ul>
 </dd>
@@ -1313,8 +1332,7 @@ with <code class="docutils literal notranslate"><span class="pre">pyo.SolverFact
 <p class="rubric">Examples</p>
 <div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">designer</span><span class="o">.</span><span class="n">find_optimal_operating_point</span><span class="p">(</span>
 <span class="gp">... </span>    <span class="n">init_guess</span>    <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="n">T0_guess</span><span class="p">,</span> <span class="n">Tj_guess</span><span class="p">,</span> <span class="n">cat_guess</span><span class="p">]]),</span>
-<span class="gp">... </span>    <span class="n">solver</span>        <span class="o">=</span> <span class="s2">&quot;ipopt&quot;</span><span class="p">,</span>
-<span class="gp">... </span>    <span class="n">solver_options</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;tol&quot;</span><span class="p">:</span> <span class="mf">1e-8</span><span class="p">,</span> <span class="s2">&quot;linear_solver&quot;</span><span class="p">:</span> <span class="s2">&quot;ma57&quot;</span><span class="p">},</span>
+<span class="gp">... </span>    <span class="n">n_starts</span>      <span class="o">=</span> <span class="mi">3</span><span class="p">,</span>
 <span class="gp">... </span><span class="p">)</span>
 </pre></div>
 </div>

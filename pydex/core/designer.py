@@ -1371,11 +1371,22 @@ class Designer:
 
     @property
     def sampling_times_candidates(self):
-        """numpy.ndarray: Candidate sampling times, ``(n_c, n_spt)``.
+        """numpy.ndarray: Candidate sampling times.
 
-        One row per candidate giving the times at which that experiment may be
-        measured. Rows may be padded with ``numpy.nan`` when candidates have
-        different numbers of usable times.
+        Assign either a 1-D vector of times, which every candidate shares, or
+        a 2-D array of shape ``(n_c, n_spt)`` with one row per candidate. The
+        vector is the usual form: every candidate must carry the same grid --
+        ragged grids are refused at :meth:`initialize` -- so the rows of a 2-D
+        array are necessarily identical, and writing
+        ``np.array([spt for _ in tic])`` only restates what the shape already
+        forces.
+
+        A 1-D vector is broadcast to ``(n_c, n_spt)`` during
+        :meth:`initialize`, so reading this attribute back afterwards always
+        gives the 2-D form, whichever way it was set. Because the broadcast
+        needs the number of candidates, the candidate controls must also have
+        been assigned by then; the order of the two assignments does not
+        matter.
 
         These are CANDIDATE times, and by default the optimiser chooses which
         of them to spend measurements on -- effort is allocated per
@@ -3471,24 +3482,6 @@ class Designer:
 
         return -float(res.fun)
 
-    def _solve_pyomo_operating_point(self, x0, lb_arr, ub_arr, solver_options):
-        """
-        Solve the operating-point optimisation via PyNumero + cyipopt.
-
-        PyNumero's ExternalGreyBoxBlock allows Python callables to be embedded
-        in a Pyomo model without requiring pyomo_ampl.so. libpynumero_ASL.dylib
-        is present in the IDAES solver package and supports this path.
-        Falls back to scipy SLSQP if PyNumero is unavailable.
-        """
-        try:
-            return self._solve_operating_point_pynumero(
-                x0, lb_arr, ub_arr, solver_options
-            )
-        except Exception:
-            return self._solve_operating_point_scipy(
-                x0, lb_arr, ub_arr, solver_options
-            )
-
     def _solve_operating_point_scipy(self, x0, lb_arr, ub_arr, solver_options):
         """Scipy SLSQP fallback for operating point optimisation."""
         from scipy.optimize import minimize as _sp_min
@@ -3529,100 +3522,6 @@ class Designer:
 
         obj_val = sign * float(res.fun)
         return res.x, obj_val
-
-    def _solve_operating_point_pynumero(self, x0, lb_arr, ub_arr, solver_options):
-        """
-        Operating point optimisation via PyNumero ExternalGreyBoxBlock + cyipopt.
-        This uses libpynumero_ASL.dylib (present in IDAES) rather than pyomo_ampl.so.
-        """
-        from pyomo.contrib.pynumero.interfaces.external_grey_box import (
-            ExternalGreyBoxModel, ExternalGreyBoxBlock,
-        )
-        from pyomo.contrib.pynumero.algorithms.solvers.cyipopt_solver import (
-            CyIpoptSolver, CyIpoptNLP,
-        )
-        import pyomo.environ as pyo
-
-        n_tic = self.n_tic if self._invariant_controls else 0
-        n_tvc = self.n_tvc if self._dynamic_controls else 0
-        n_x   = n_tic + n_tvc
-        sign  = -1.0 if self.dw_sense == "maximize" else 1.0
-        dr    = self
-        h_fd  = np.sqrt(np.finfo(float).eps)
-
-        raw_cons = []
-        if dr.process_constraints is not None:
-            raw_cons = dr.process_constraints(
-                x0[:n_tic], x0[n_tic:], dr.model_parameters
-            )
-        n_eq  = sum(1 for c in raw_cons if c["type"] == "eq")
-        n_ineq = sum(1 for c in raw_cons if c["type"] == "ineq")
-
-        class _OpModel(ExternalGreyBoxModel):
-            def input_names(self):
-                """list of str: Primal variable names, for the cyipopt interface."""
-                return [f"x{i}" for i in range(n_x)]
-            def equality_constraint_names(self):
-                """list of str: Equality constraint names, for cyipopt."""
-                return [f"eq{k}" for k in range(n_eq)]
-            def output_names(self):
-                """list of str: Output names, for cyipopt."""
-                return []
-            def set_input_values(self_, x):
-                """Set the primal values at which the callbacks are evaluated."""
-                self_._x = np.array(x)
-            def evaluate_equality_constraints(self_):
-                """Return the equality constraint residuals at the current point."""
-                eq_vals = [float(c["fun"](
-                    self_._x[:n_tic], self_._x[n_tic:], dr.model_parameters
-                )) for c in raw_cons if c["type"] == "eq"]
-                return np.array(eq_vals)
-            def evaluate_jacobian_equality_constraints(self_):
-                """Return the Jacobian of the equality constraints, sparse."""
-                import scipy.sparse as sp
-                rows, cols, vals = [], [], []
-                eq_idx = 0
-                for c in raw_cons:
-                    if c["type"] != "eq":
-                        continue
-                    f  = c["fun"]
-                    f0 = float(f(self_._x[:n_tic], self_._x[n_tic:], dr.model_parameters))
-                    for j in range(n_x):
-                        xp = self_._x.copy(); xp[j] += h_fd
-                        fp = float(f(xp[:n_tic], xp[n_tic:], dr.model_parameters))
-                        rows.append(eq_idx); cols.append(j); vals.append((fp-f0)/h_fd)
-                    eq_idx += 1
-                return sp.coo_matrix((vals, (rows, cols)), shape=(n_eq, n_x))
-
-        m = pyo.ConcreteModel()
-        m.ex = ExternalGreyBoxBlock()
-        m.ex.set_external_model(_OpModel())
-        m.x = m.ex.inputs
-
-        # objective
-        def _obj_expr():
-            xv = np.array([pyo.value(m.x[f"x{i}"]) for i in range(n_x)])
-            return sign * float(dr.process_objective(
-                xv[:n_tic], xv[n_tic:], dr.model_parameters))
-
-        # inequality constraints as regular Pyomo constraints
-        for k, c in enumerate(raw_cons):
-            if c["type"] == "ineq":
-                f = c["fun"]
-                def _ineq(m, _f=f):
-                    xv = np.array([pyo.value(m.x[f"x{i}"]) for i in range(n_x)])
-                    return float(_f(xv[:n_tic], xv[n_tic:], dr.model_parameters)) >= 0
-                setattr(m, f"ineq_{k}", pyo.Constraint(rule=_ineq))
-
-        # bounds
-        for i in range(n_x):
-            v = m.x[f"x{i}"]
-            v.set_value(float(x0[i]))
-            if np.isfinite(lb_arr[i]): v.setlb(float(lb_arr[i]))
-            if np.isfinite(ub_arr[i]): v.setub(float(ub_arr[i]))
-
-        # fall through to scipy if this gets too complex
-        raise NotImplementedError("PyNumero path not fully implemented; using scipy.")
 
     def _solve_pyomo_cvar(self, criterion, beta, e0, min_expected_value,
                           solver_options, **kwargs):
@@ -3739,7 +3638,7 @@ class Designer:
         """Delegate to unified Pyomo solver (kept for internal compatibility)."""
         return self._solve_pyomo(criterion, e0, fix_effort, opt_options, **kwargs)
 
-    def find_optimal_operating_point(self, init_guess, solver="ipopt",
+    def find_optimal_operating_point(self, init_guess, solver=None,
                                       solver_options=None, n_starts=1):
         """
         Stage 1 of V-optimal MBDoE: find the process operating condition(s)
@@ -3760,13 +3659,22 @@ class Designer:
             Initial guess(es) for [tic | tvc].  If 2-D, each row is solved
             independently and all solutions are stored.
 
-        solver : str
-            Pyomo solver name (default ``"ipopt"``).  Any solver registered
-            with ``pyo.SolverFactory`` may be used.
+        solver : None
+            Not selectable.  Stage 1 optimises ``process_objective`` and
+            ``process_constraints``, which are opaque Python callables
+            rather than algebraic expressions, so Pyomo's NL writer cannot
+            serialise them for a shelled-out solver such as IPOPT.  The
+            optimisation is performed by
+            ``scipy.optimize.minimize(method="SLSQP")``.  Passing anything
+            here raises, rather than being accepted and ignored.
+
+            Unrelated to ``design_experiment(solver=...)``, which does
+            choose the solver for the criterion optimisation.
 
         solver_options : dict, optional
-            Options forwarded to the solver.  For IPOPT use keys such as
-            ``"tol"``, ``"max_iter"``, ``"linear_solver"`` (e.g. ``"ma57"``).
+            Options forwarded to SLSQP.  Only ``ftol``, ``maxiter`` and
+            ``disp`` are honoured; anything else is dropped.  Defaults are
+            ``ftol=1e-8`` and ``maxiter=3000``.
 
         n_starts : int
             Number of random restarts per operating point (default 1).
@@ -3780,11 +3688,22 @@ class Designer:
         --------
         >>> designer.find_optimal_operating_point(
         ...     init_guess    = np.array([[T0_guess, Tj_guess, cat_guess]]),
-        ...     solver        = "ipopt",
-        ...     solver_options = {"tol": 1e-8, "linear_solver": "ma57"},
+        ...     n_starts      = 3,
         ... )
         """
         # --- guards ---
+        if solver is not None:
+            raise SyntaxError(
+                "find_optimal_operating_point() does not take a solver. "
+                "Stage 1 optimises process_objective and "
+                "process_constraints, which are opaque Python callables, "
+                "so it is solved by "
+                "scipy.optimize.minimize(method='SLSQP'); Pyomo's NL "
+                "writer cannot serialise a callable for IPOPT or any "
+                "other shelled-out solver. Use solver_options to pass "
+                "'ftol', 'maxiter' or 'disp'. design_experiment(solver=...) "
+                "is a separate argument and is unaffected."
+            )
         if self._status != 'ready':
             raise SyntaxError(
                 "Designer must be initialized before calling "
@@ -3825,70 +3744,63 @@ class Designer:
                 f"n_tic + n_tvc = {n_x}. Each row must be [tic | tvc]."
             )
 
-        # store solver choice
-        old_solver      = self._solver
-        self._solver    = solver
-
         results_tic = []
         results_tvc = []
         results_obj = []
 
-        try:
-          for w in range(r_w):
-            best_x   = None
-            best_obj = np.inf
+        for w in range(r_w):
+          best_x   = None
+          best_obj = np.inf
 
-            for start in range(n_starts):
-                if start == 0:
-                    x0 = init_guess[w].copy()
-                else:
-                    lo = np.where(np.isfinite(lb_arr), lb_arr, -1e6)
-                    hi = np.where(np.isfinite(ub_arr), ub_arr,  1e6)
-                    x0 = np.random.uniform(lo, hi)
+          for start in range(n_starts):
+              if start == 0:
+                  x0 = init_guess[w].copy()
+              else:
+                  lo = np.where(np.isfinite(lb_arr), lb_arr, -1e6)
+                  hi = np.where(np.isfinite(ub_arr), ub_arr,  1e6)
+                  x0 = np.random.uniform(lo, hi)
 
-                if self._verbose >= 1:
-                    tag = f"point {w+1}/{r_w}, start {start+1}/{n_starts}"
-                    print(f"[find_optimal_operating_point] Solving {tag} ...")
+              if self._verbose >= 1:
+                  tag = f"point {w+1}/{r_w}, start {start+1}/{n_starts}"
+                  print(f"[find_optimal_operating_point] Solving {tag} ...")
 
-                try:
-                    x_opt, obj_val = self._solve_pyomo_operating_point(
-                        x0, lb_arr, ub_arr, solver_options
-                    )
-                except Exception as exc:
-                    if self._verbose >= 1:
-                        print(f"  Warning: solver failed ({exc}), skipping this start.")
-                    continue
+              try:
+                  x_opt, obj_val = self._solve_operating_point_scipy(
+                      x0, lb_arr, ub_arr, solver_options
+                  )
+              except Exception as exc:
+                  if self._verbose >= 1:
+                      print(f"  Warning: solver failed ({exc}), skipping this start.")
+                  continue
 
-                cmp = obj_val if self.dw_sense == "minimize" else -obj_val
-                if cmp < best_obj:
-                    best_obj = cmp
-                    best_x   = x_opt
+              cmp = obj_val if self.dw_sense == "minimize" else -obj_val
+              if cmp < best_obj:
+                  best_obj = cmp
+                  best_x   = x_opt
 
-                if self._verbose >= 1:
-                    print(f"  Objective ({self.dw_sense}): {obj_val:.6g}")
+              if self._verbose >= 1:
+                  print(f"  Objective ({self.dw_sense}): {obj_val:.6g}")
 
-            if best_x is None:
-                raise RuntimeError(
-                    f"All {n_starts} start(s) failed for operating point "
-                    f"{w+1}/{r_w} (solver='{solver}'). Check bounds, initial guess, and constraints."
-                )
+          if best_x is None:
+              raise RuntimeError(
+                  f"All {n_starts} start(s) failed for operating point "
+                  f"{w+1}/{r_w}. Check bounds, initial guess, and constraints."
+              )
 
-            results_tic.append(best_x[:n_tic])
-            results_tvc.append(best_x[n_tic:])
-            results_obj.append(
-                -best_obj if self.dw_sense == "maximize" else best_obj
-            )
+          results_tic.append(best_x[:n_tic])
+          results_tvc.append(best_x[n_tic:])
+          results_obj.append(
+              -best_obj if self.dw_sense == "maximize" else best_obj
+          )
 
-            if self._verbose >= 1:
-                print(f"  dw_tic[{w}] = {best_x[:n_tic]}")
-                print(f"  dw_tvc[{w}] = {best_x[n_tic:]}")
+          if self._verbose >= 1:
+              print(f"  dw_tic[{w}] = {best_x[:n_tic]}")
+              print(f"  dw_tvc[{w}] = {best_x[n_tic:]}")
 
-          self.dw_tic       = np.array(results_tic)   # (r_w, n_tic)  — also sets _dw_fixed
-          self.dw_tvc       = np.array(results_tvc)   # (r_w, n_tvc)
-          self._dw_obj_vals = np.array(results_obj)   # (r_w,) objective at each point
+        self.dw_tic       = np.array(results_tic)   # (r_w, n_tic)  — also sets _dw_fixed
+        self.dw_tvc       = np.array(results_tvc)   # (r_w, n_tvc)
+        self._dw_obj_vals = np.array(results_obj)   # (r_w,) objective at each point
 
-        finally:
-            self._solver = old_solver
 
         if self._verbose >= 1:
             print(f"[find_optimal_operating_point] Done. "
@@ -12057,6 +11969,48 @@ class Designer:
                                                  f"spt_candidates has {self.n_c_spt}, " \
                                                  f"but {self.n_c} is expected."
 
+    def _broadcast_sampling_times(self):
+        """Accept a 1-D sampling-time vector and share it across candidates.
+
+        Every candidate must carry the same sampling grid -- ragged grids are
+        refused by :meth:`_check_var_spt` -- so requiring one row per candidate
+        makes the caller write ``np.array([spt for _ in tic])`` to say
+        something the shape already forces. A 1-D vector says it directly.
+
+        Broadcasting happens here rather than in the property setter because
+        the number of candidates is not known until the controls have also
+        been assigned, and the two may be set in either order.
+
+        A 2-D array is left exactly as given, so nothing that already worked
+        changes. Called from :meth:`_get_component_sizes` before any shape is
+        read.
+        """
+        sptc = self._sptc
+        if sptc is None:
+            return
+
+        sptc = np.asarray(sptc, dtype=float)
+        if sptc.ndim != 1:
+            self._sptc = sptc
+            return
+
+        n_c = None
+        for cand in (self._ticc, self._tvcc):
+            if cand is not None:
+                n_c = np.asarray(cand).shape[0]
+                break
+        if n_c is None:
+            raise SyntaxError(
+                "sampling_times_candidates was given as a 1-D vector, which "
+                "pydex shares across every candidate, but no candidate "
+                "controls have been set yet so the number of candidates is "
+                "unknown. Assign ti_controls_candidates (or "
+                "tv_controls_candidates) as well, or pass the sampling times "
+                "as a 2-D array of shape (n_c, n_spt)."
+            )
+
+        self._sptc = np.tile(sptc, (n_c, 1))
+
     def _check_var_spt(self):
         if np.all([len(spt) == len(self.sampling_times_candidates[0]) for spt in
                    self.sampling_times_candidates]) \
@@ -12130,6 +12084,8 @@ class Designer:
             )
 
     def _get_component_sizes(self):
+
+        self._broadcast_sampling_times()
 
         if self._simulate_signature == 1:
             self.n_c_tic, self.n_tic = self.ti_controls_candidates.shape

@@ -824,7 +824,6 @@ def test_13_v_optimal(d):
     dw_tic, _ = d.find_optimal_operating_point(
         init_guess     = np.array([[55.0, 65.0, 1.0],
                                    [60.0, 75.0, 0.75]]),
-        solver         = "ipopt",           # passed but SLSQP is used internally
         solver_options = {"ftol": 1e-8, "maxiter": 500},
         n_starts       = 1,
     )
@@ -873,7 +872,6 @@ def test_13b_operating_point(d):
     # --- single start ---
     dw_tic, dw_tvc = d.find_optimal_operating_point(
         init_guess     = np.array([[55.0, 65.0, 1.0]]),
-        solver         = "ipopt",
         solver_options = {"ftol": 1e-10, "maxiter": 1000},
         n_starts       = 1,
     )
@@ -922,7 +920,6 @@ def test_13b_operating_point(d):
     # 4. Multiple starts from a single point — should find same optimum from any start
     dw_tic_ms, dw_tvc_ms = d.find_optimal_operating_point(
         init_guess     = np.array([[55.0, 65.0, 1.0]]),
-        solver         = "ipopt",
         solver_options = {"ftol": 1e-10, "maxiter": 1000},
         n_starts       = 3,
     )
@@ -5377,7 +5374,6 @@ def test_59_v_optimal_guards():
     dw_tic, _ = d.find_optimal_operating_point(
         init_guess     = np.array([[55.0, 65.0, 1.0],
                                    [60.0, 75.0, 0.75]]),
-        solver         = "ipopt",
         solver_options = {"ftol": 1e-8, "maxiter": 500},
         n_starts       = 1,
     )
