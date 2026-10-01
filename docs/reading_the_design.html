@@ -1,0 +1,264 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reading the design &mdash; pydex 0.8.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=486e5634"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Examples" href="examples.html" />
+    <link rel="prev" title="Installation" href="installation.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            pydex
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Reading the design</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#the-short-version">The short version</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#the-design-designer-efforts">The design: <code class="docutils literal notranslate"><span class="pre">designer.efforts</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#the-supported-candidates">The supported candidates</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#the-whole-result-designer-oed-result">The whole result: <code class="docutils literal notranslate"><span class="pre">designer.oed_result</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#whole-runs-apportion">Whole runs: <code class="docutils literal notranslate"><span class="pre">apportion()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#other-quantities-on-the-designer">Other quantities on the designer</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#one-trap-printing-changes-the-design">One trap: printing changes the design</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">pydex</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Reading the design</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/reading_the_design.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="reading-the-design">
+<h1>Reading the design<a class="headerlink" href="#reading-the-design" title="Link to this heading"></a></h1>
+<p><code class="docutils literal notranslate"><span class="pre">design_experiment()</span></code> prints a report and the plotting methods draw
+pictures, but the design itself is available as data. Everything below is on
+the <a class="reference internal" href="api.html#pydex.core.designer.Designer" title="pydex.core.designer.Designer"><code class="xref py py-class docutils literal notranslate"><span class="pre">Designer</span></code></a> after a solve, and nothing here
+needs the report to have been printed.</p>
+<section id="the-short-version">
+<h2>The short version<a class="headerlink" href="#the-short-version" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">design_experiment()</span></code> <strong>returns</strong> the full result, so the usual idiom is</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">result</span> <span class="o">=</span> <span class="n">designer</span><span class="o">.</span><span class="n">design_experiment</span><span class="p">(</span><span class="n">designer</span><span class="o">.</span><span class="n">d_opt_criterion</span><span class="p">,</span> <span class="n">solver</span><span class="o">=</span><span class="s2">&quot;ipopt&quot;</span><span class="p">)</span>
+
+<span class="n">result</span><span class="p">[</span><span class="s2">&quot;criterion_value&quot;</span><span class="p">]</span>     <span class="c1"># the objective, as reported</span>
+<span class="n">result</span><span class="p">[</span><span class="s2">&quot;optimal_efforts&quot;</span><span class="p">]</span>     <span class="c1"># the design itself, (n_c, n_spt)</span>
+
+<span class="n">designer</span><span class="o">.</span><span class="n">get_optimal_candidates_table</span><span class="p">()</span>   <span class="c1"># a tidy DataFrame to hand to a lab</span>
+</pre></div>
+</div>
+</section>
+<section id="the-design-designer-efforts">
+<h2>The design: <code class="docutils literal notranslate"><span class="pre">designer.efforts</span></code><a class="headerlink" href="#the-design-designer-efforts" title="Link to this heading"></a></h2>
+<p>The design <em>is</em> the effort array.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">designer</span><span class="o">.</span><span class="n">efforts</span><span class="o">.</span><span class="n">shape</span>    <span class="c1"># (n_c, n_spt)</span>
+<span class="n">designer</span><span class="o">.</span><span class="n">efforts</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span>    <span class="c1"># 1.0 -- a unit budget</span>
+</pre></div>
+</div>
+<p>One row per candidate, in the order you enumerated them; one column per
+sampling time. Entries are <strong>fractions of your experimental budget</strong>, not
+numbers of runs, and they sum to 1. A zero entry is the design telling you
+not to run that candidate at that time – on a typical problem most entries
+are zero.</p>
+<p>The column meaning follows the sampling-time case (see <code class="docutils literal notranslate"><span class="pre">n_spt</span></code> on
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.design_experiment" title="pydex.core.designer.Designer.design_experiment"><code class="xref py py-meth docutils literal notranslate"><span class="pre">design_experiment()</span></code></a>):</p>
+<ul class="simple">
+<li><p>sampling times optimised (<code class="docutils literal notranslate"><span class="pre">n_spt</span></code> omitted) – one column per candidate
+grid time, effort allocated per <em>measurement</em>;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">n_spt=k</span></code> – one column per <em>schedule</em> of k times, shape
+<code class="docutils literal notranslate"><span class="pre">(n_c,</span> <span class="pre">n_spt_comb)</span></code>;</p></li>
+<li><p>fixed grid (<code class="docutils literal notranslate"><span class="pre">n_spt</span></code> equal to the number of times listed) – a single
+column, effort allocated per <em>experiment</em>;</p></li>
+<li><p>a static model – a single column.</p></li>
+</ul>
+</section>
+<section id="the-supported-candidates">
+<h2>The supported candidates<a class="headerlink" href="#the-supported-candidates" title="Link to this heading"></a></h2>
+<p><a class="reference internal" href="api.html#pydex.core.designer.Designer.get_optimal_candidates" title="pydex.core.designer.Designer.get_optimal_candidates"><code class="xref py py-meth docutils literal notranslate"><span class="pre">get_optimal_candidates()</span></code></a> collects just
+the candidates carrying non-negligible effort:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">opt</span> <span class="o">=</span> <span class="n">designer</span><span class="o">.</span><span class="n">get_optimal_candidates</span><span class="p">(</span><span class="n">tol</span><span class="o">=</span><span class="mf">1e-4</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>One entry per supported candidate, each holding its index, control values,
+sampling times, schedules and efforts. Also cached on
+<code class="xref py py-attr docutils literal notranslate"><span class="pre">optimal_candidates</span></code>.</p>
+<p>For anything you intend to export or hand over, prefer
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.get_optimal_candidates_table" title="pydex.core.designer.Designer.get_optimal_candidates_table"><code class="xref py py-meth docutils literal notranslate"><span class="pre">get_optimal_candidates_table()</span></code></a>, which
+returns a tidy <a class="reference external" href="https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.html#pandas.DataFrame" title="(in pandas v3.0.6)"><code class="xref py py-class docutils literal notranslate"><span class="pre">pandas.DataFrame</span></code></a> with one row per experiment to run:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">designer</span><span class="o">.</span><span class="n">ti_controls_names</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;x1&quot;</span><span class="p">,</span> <span class="s2">&quot;x2&quot;</span><span class="p">]</span>
+<span class="o">...</span>
+<span class="n">designer</span><span class="o">.</span><span class="n">get_optimal_candidates_table</span><span class="p">()</span>
+</pre></div>
+</div>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Experiment  Candidate   x1   x2  Effort
+         1          1 -1.0 -1.0    0.25
+         2          5 -1.0  1.0    0.25
+         3         21  1.0 -1.0    0.25
+         4         25  1.0  1.0    0.25
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">Experiment</span></code> is sequential over the runs being recommended and corresponds
+to nothing in the candidate pool; <code class="docutils literal notranslate"><span class="pre">Candidate</span></code> is the 1-indexed pool
+position, kept so a row can be cross-referenced against plot legends and
+solver logs. Setting <code class="docutils literal notranslate"><span class="pre">ti_controls_names</span></code> is what turns the control columns
+from <code class="docutils literal notranslate"><span class="pre">Time-invariant</span> <span class="pre">Control</span> <span class="pre">0</span></code> into your own names.</p>
+</section>
+<section id="the-whole-result-designer-oed-result">
+<h2>The whole result: <code class="docutils literal notranslate"><span class="pre">designer.oed_result</span></code><a class="headerlink" href="#the-whole-result-designer-oed-result" title="Link to this heading"></a></h2>
+<p>The dictionary returned by <code class="docutils literal notranslate"><span class="pre">design_experiment()</span></code> is also kept on
+<code class="xref py py-attr docutils literal notranslate"><span class="pre">oed_result</span></code>, and is what
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.load_oed_result" title="pydex.core.designer.Designer.load_oed_result"><code class="xref py py-meth docutils literal notranslate"><span class="pre">load_oed_result()</span></code></a> reads back. Its keys:</p>
+<p><code class="docutils literal notranslate"><span class="pre">optimal_efforts</span></code>, <code class="docutils literal notranslate"><span class="pre">criterion_value</span></code>, <code class="docutils literal notranslate"><span class="pre">optimality_criterion</span></code>,
+<code class="docutils literal notranslate"><span class="pre">solver</span></code>, <code class="docutils literal notranslate"><span class="pre">ti_controls_candidates</span></code>, <code class="docutils literal notranslate"><span class="pre">tv_controls_candidates</span></code>,
+<code class="docutils literal notranslate"><span class="pre">sampling_times_candidates</span></code>, <code class="docutils literal notranslate"><span class="pre">model_parameters</span></code>, <code class="docutils literal notranslate"><span class="pre">prior_fim</span></code>,
+<code class="docutils literal notranslate"><span class="pre">prior_fim_mp</span></code>, <code class="docutils literal notranslate"><span class="pre">prior_n_exp</span></code>, <code class="docutils literal notranslate"><span class="pre">pseudo_bayesian</span></code>,
+<code class="docutils literal notranslate"><span class="pre">pseudo_bayesian_type</span></code>, <code class="docutils literal notranslate"><span class="pre">regularized</span></code>, <code class="docutils literal notranslate"><span class="pre">n_spt_spec</span></code>,
+<code class="docutils literal notranslate"><span class="pre">optimize_sampling_times</span></code>, <code class="docutils literal notranslate"><span class="pre">solution_time</span></code>, <code class="docutils literal notranslate"><span class="pre">optimization_time</span></code>,
+<code class="docutils literal notranslate"><span class="pre">sensitivity_analysis_time</span></code>.</p>
+<p><strong>This is the supported way to read the criterion value.</strong> There is no public
+<code class="docutils literal notranslate"><span class="pre">designer.criterion_value</span></code> attribute; use <code class="docutils literal notranslate"><span class="pre">oed_result[&quot;criterion_value&quot;]</span></code>,
+or <a class="reference internal" href="api.html#pydex.core.designer.Designer.compute_criterion_value" title="pydex.core.designer.Designer.compute_criterion_value"><code class="xref py py-meth docutils literal notranslate"><span class="pre">compute_criterion_value()</span></code></a> to score a
+design under a criterion of your choosing.</p>
+</section>
+<section id="whole-runs-apportion">
+<h2>Whole runs: <code class="docutils literal notranslate"><span class="pre">apportion()</span></code><a class="headerlink" href="#whole-runs-apportion" title="Link to this heading"></a></h2>
+<p>Efforts are fractions, so a lab cannot run them directly.
+<a class="reference internal" href="api.html#pydex.core.designer.Designer.apportion" title="pydex.core.designer.Designer.apportion"><code class="xref py py-meth docutils literal notranslate"><span class="pre">apportion()</span></code></a> rounds a solved design to a
+budget of whole experiments:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">runs</span> <span class="o">=</span> <span class="n">designer</span><span class="o">.</span><span class="n">apportion</span><span class="p">(</span><span class="mi">8</span><span class="p">)</span>          <span class="c1"># also on designer.apportionments</span>
+<span class="n">designer</span><span class="o">.</span><span class="n">rounding_efficiency</span>          <span class="c1"># how much the rounding cost</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">apportion()</span></code> is a cheap query against an already-solved design, so
+sweeping it across several budgets and comparing is a legitimate way to
+<em>choose</em> a budget. Two things to know:</p>
+<ul class="simple">
+<li><p>the return is <strong>ragged</strong> – a 1-D object array of per-candidate integer
+arrays – when supported candidates carry effort at different numbers of
+sampling times. Total it with <code class="docutils literal notranslate"><span class="pre">int(np.nansum(a))</span> <span class="pre">for</span> <span class="pre">a</span> <span class="pre">in</span> <span class="pre">app</span></code>, never
+<code class="docutils literal notranslate"><span class="pre">astype(int)</span></code> on the whole thing;</p></li>
+<li><p><a class="reference internal" href="api.html#pydex.core.designer.Designer.rounding_efficiency" title="pydex.core.designer.Designer.rounding_efficiency"><code class="xref py py-attr docutils literal notranslate"><span class="pre">rounding_efficiency</span></code></a> is only computed
+when it would be reported. At <code class="docutils literal notranslate"><span class="pre">verbose=0</span></code> it stays <code class="docutils literal notranslate"><span class="pre">None</span></code>; pass
+<code class="docutils literal notranslate"><span class="pre">compute_actual_efficiency=True</span></code> to force it.</p></li>
+</ul>
+</section>
+<section id="other-quantities-on-the-designer">
+<h2>Other quantities on the designer<a class="headerlink" href="#other-quantities-on-the-designer" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">designer.fim</span></code></p></td>
+<td><p>the information matrix for the current design</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">designer.sensitivities</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">(n_c,</span> <span class="pre">n_spt,</span> <span class="pre">n_m_r,</span> <span class="pre">n_mp)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">designer.response</span></code></p></td>
+<td><p>predicted responses, after <code class="docutils literal notranslate"><span class="pre">simulate_candidates()</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">designer.apportionments</span></code></p></td>
+<td><p>the last <code class="docutils literal notranslate"><span class="pre">apportion()</span></code> result</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">designer.optimal_candidates</span></code></p></td>
+<td><p>the last <code class="docutils literal notranslate"><span class="pre">get_optimal_candidates()</span></code> result</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="one-trap-printing-changes-the-design">
+<h2>One trap: printing changes the design<a class="headerlink" href="#one-trap-printing-changes-the-design" title="Link to this heading"></a></h2>
+<p><a class="reference internal" href="api.html#pydex.core.designer.Designer.print_optimal_candidates" title="pydex.core.designer.Designer.print_optimal_candidates"><code class="xref py py-meth docutils literal notranslate"><span class="pre">print_optimal_candidates()</span></code></a> goes through
+<code class="docutils literal notranslate"><span class="pre">get_optimal_candidates()</span></code>, which zeroes efforts below <code class="docutils literal notranslate"><span class="pre">tol</span></code> and
+renormalises what remains. So the printing call has a side effect on
+<code class="docutils literal notranslate"><span class="pre">designer.efforts</span></code>, and a criterion value computed before and after the
+same print need not agree.</p>
+<p><strong>Capture any value you intend to quote before printing anything.</strong> If you
+only ever read the table or the dictionary this does not arise; it matters
+when you read <code class="docutils literal notranslate"><span class="pre">designer.efforts</span></code> yourself.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="installation.html" class="btn btn-neutral float-left" title="Installation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="examples.html" class="btn btn-neutral float-right" title="Examples" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2026, Kennedy Putra Kusumo, Salvador Garcia-Munoz, and contributors.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

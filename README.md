@@ -108,6 +108,59 @@ Good starting points:
 explains the `_no_ift` / `_no_ift_no_collocation` naming scheme, which
 lets you compare sensitivity methods on an otherwise identical problem.
 
+## Reading the design
+
+`design_experiment()` prints a report and the `plot_*` methods draw
+pictures, but the design itself is available as data. It **returns** the
+full result, so the usual idiom is:
+
+```python
+result = designer.design_experiment(designer.d_opt_criterion, solver="ipopt")
+
+result["criterion_value"]     # the objective, as reported
+result["optimal_efforts"]     # the design itself, (n_c, n_spt)
+
+designer.get_optimal_candidates_table()   # a tidy DataFrame to hand to a lab
+```
+
+**The design is `designer.efforts`**, shape `(n_c, n_spt)`: one row per
+candidate in the order you enumerated them, one column per sampling time
+(or per schedule with `n_spt=k`, or a single column for a fixed grid or a
+static model). Entries are **fractions of your experimental budget**, not
+numbers of runs, and they sum to 1. A zero is the design telling you not
+to run that candidate — on a typical problem most entries are zero.
+
+| what you want | where it is |
+|---|---|
+| the design | `designer.efforts` |
+| just the supported candidates | `designer.get_optimal_candidates(tol=1e-4)` |
+| a protocol to hand over | `designer.get_optimal_candidates_table()` → DataFrame |
+| the criterion value | `result["criterion_value"]` |
+| everything, as a dict | `designer.oed_result` (what `load_oed_result()` reads back) |
+| whole runs for a budget | `designer.apportion(n)`, and `designer.apportionments` |
+| the information matrix | `designer.fim` |
+| the sensitivities | `designer.sensitivities`, `(n_c, n_spt, n_m_r, n_mp)` |
+
+There is **no public `designer.criterion_value`**; read it from the result
+dict, or call `compute_criterion_value()` to score a design under a
+criterion of your choosing.
+
+Two things worth knowing:
+
+- **`apportion()` returns a ragged object array** when supported candidates
+  carry effort at different numbers of sampling times. Total it with
+  `int(np.nansum(a)) for a in app`, never `astype(int)` on the whole thing.
+  `designer.rounding_efficiency` is only computed when it would be
+  reported — at `verbose=0` it stays `None` unless you pass
+  `compute_actual_efficiency=True`.
+- **`print_optimal_candidates()` changes the design.** It goes through
+  `get_optimal_candidates()`, which zeroes efforts below `tol` and
+  renormalises what remains, so capture any value you intend to quote
+  *before* printing. This does not arise if you only read the table or the
+  result dict.
+
+Full detail: [Reading the design](https://salvadorgarciamunoz.github.io/pydex/reading_the_design.html).
+
 ## Documentation
 
 Built docs: **https://salvadorgarciamunoz.github.io/pydex/**

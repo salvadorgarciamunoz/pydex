@@ -18,6 +18,7 @@ Yao/McAuley orthogonalisation.
    :caption: Contents
 
    installation
+   reading_the_design
    examples
    api
 
