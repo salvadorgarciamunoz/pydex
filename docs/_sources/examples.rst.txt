@@ -450,6 +450,22 @@ on these instances is perfect — four independent brute-force cross-checks
 agreeing exactly — but that is empirical evidence about these problems, not
 a proof.
 
+Measurement error
+-----------------
+
+``examples/error_model/`` — the first-order decay designed under a constant and
+under a relative measurement error, using the name-keyed ``error_variance``.
+With ``k = 0.5`` the constant-error design is ``{0, 2.0}``; with ``rel_sd =
+0.05`` the second sampling time moves to 2.8, 4.4 or 7.0 as ``abs_sd`` falls
+from 0.02 to 0.005 to 0.001.
+
+* ``relative_error_design.py``
+
+The floor, ``abs_sd``, is what bounds how late the design will go, so it is the
+number to get right: it is the instrument's absolute precision near zero, not
+its limit of quantification. The script ends with a misspelt response name
+being refused, because the keys are matched against ``response_names`` exactly.
+
 ASL elimination
 ---------------
 

@@ -13,6 +13,7 @@ from os import getcwd, path, makedirs
 from pickle import dump, load
 from string import Template
 from time import time
+import copy
 import itertools
 import warnings
 import __main__ as main
@@ -859,8 +860,33 @@ class Designer:
             ``error_cov``, so ``{"P": 0.09}`` and ``np.diag([0.09])`` give
             identical designs. Setting both ``error_variance`` and
             ``error_cov`` raises. Diagonal only: correlated errors need
-            ``error_cov``. At present only constant error is supported, and a
-            positive ``rel_sd`` raises ``NotImplementedError``.
+            ``error_cov``.
+
+            A measurement of a response predicted at ``y`` has variance
+            ``(rel_sd * y) ** 2 + abs_sd ** 2`` (the two-component error model
+            of Rocke & Lorenzato, 1995; ``nlme``'s ``varConstProp``), and the
+            weight entering the FIM is its reciprocal, evaluated once per
+            (candidate, sampling time) at the NOMINAL prediction and held
+            fixed through the finite-difference loop. With any ``rel_sd > 0``
+            ``error_cov`` and ``error_fim`` stay ``None`` and every consumer
+            (the FIM, prior experiments, the V-optimal W matrix,
+            :meth:`run_estimability`, :meth:`diagnose_sensitivity`) builds the
+            weights from predictions, so they cannot disagree. This is the
+            weighted-least-squares information matrix, not the full Gaussian
+            FIM: with a parameter-dependent variance the latter carries an
+            extra ``0.5 * tr(S^-1 S' S^-1 S')`` term, deliberately neglected
+            (about ``2 * CV ** 2`` of the information: 0.5% at 5% CV, 2% at
+            10%). With exact IFT sensitivities you get exact ``dy/dtheta``
+            combined with a weight from a nominal prediction. Requires
+            ``eval_sensitivities(store_predictions=True)``, the default.
+
+            Choosing the numbers: both are ONE standard deviation. A "+/-10%"
+            quoted as a 95% interval is ``rel_sd = 0.05``, not 0.10. ``abs_sd``
+            is the instrument's absolute precision near zero (baseline, blank
+            variability), NOT the limit of quantification: LOQ is conventionally
+            about 10 sigma, so divide it by ten. A zero ``abs_sd`` is refused,
+            since it would give a response predicted near zero an unbounded
+            weight; pydex warns when one response's weights span more than 1e6.
         rounding_efficiency (float or None): Set by :meth:`apportion`. The
             criterion value of the rounded design as a fraction of the
             continuous one, for the criteria that have a standard relative
@@ -943,12 +969,29 @@ class Designer:
         self.error_cov = None
         self._error_cov_defaulted = False
         self.error_fim = None
-        # Name-keyed measurement error (see the class docstring). Resolved by
-        # initialize() into a constant error_cov/error_fim; the array it
-        # derived is kept so a second initialize() can tell "error_cov is the
-        # one I derived" from "the user also set error_cov".
+        # Name-keyed measurement error (see the class docstring), resolved by
+        # initialize(). Constant error becomes the equivalent diagonal
+        # error_cov. Prediction-dependent error (any rel_sd > 0) leaves
+        # error_cov and error_fim as None ON PURPOSE: any consumer that was
+        # not taught the weights then fails loudly instead of silently using
+        # the wrong ones.
         self.error_variance = None
-        self._error_cov_from_variance = None
+        self._error_het = False          # True when any rel_sd > 0
+        self._ev_names = None            # response names, in error_cov row order
+        self._ev_rel = None              # rel_sd per measured response
+        self._ev_abs_var = None          # abs_sd ** 2 per measured response
+        # Every error_cov array initialize() derived from error_variance. Kept
+        # as a list, not one slot, because _swap_candidates() exchanges
+        # error_cov with go_error_cov and re-initializes: after a swap the
+        # derived array lives in the OTHER slot, so "is this the one I
+        # derived" must be answerable for any of them.
+        self._error_cov_derived = []
+        # Nominal predictions (n_c, n_spt, n_m_r) recorded by
+        # eval_sensitivities() alongside self.sensitivities, and swapped with
+        # them. The weights are evaluated from these, once, and held fixed
+        # through the finite-difference perturbation loop.
+        self._grid_pred = None
+        self._go_grid_pred = None
 
         """ goal_oriented_ds"""
         self.n_c_go = None
@@ -1791,12 +1834,15 @@ class Designer:
         # ─────────────────────────────────────────────────────────────────────
 
         if self.error_variance is not None:
-            # Validates and resolves BY NAME; sets error_cov. Runs before the
+            # Validates and resolves BY NAME; sets error_cov (constant error)
+            # or leaves it None (prediction-dependent error). Runs before the
             # identity default below so a name-keyed model is never replaced by
             # one, and before error_fim is inverted from it.
             self._resolve_error_variance()
+        else:
+            self._clear_error_variance_state()
 
-        if self.error_cov is None:
+        if self.error_cov is None and not self._error_het:
             print(
                 f"[WARNING]: because the error_cov is not given, Pydex defaults to the "
                 f"identity matrix of size {self.n_m_r}x{self.n_m_r}.")
@@ -1807,13 +1853,18 @@ class Designer:
             # difference to decide whether a noise-weighted ranking is
             # meaningful or fabricated.
             self._error_cov_defaulted = True
-        try:
-            self.error_fim = np.linalg.inv(self.error_cov)
-        except np.linalg.LinAlgError:
-            raise SyntaxError(
-                "The provided error covariance is singular, please make sure you "
-                "have passed in the correct error covariance."
-            )
+        if self._error_het:
+            # Weights depend on the predictions, so there is no single
+            # information matrix to precompute here.
+            self.error_fim = None
+        else:
+            try:
+                self.error_fim = np.linalg.inv(self.error_cov)
+            except np.linalg.LinAlgError:
+                raise SyntaxError(
+                    "The provided error covariance is singular, please make sure you "
+                    "have passed in the correct error covariance."
+                )
 
         self._status = 'ready'
         self._verbose = verbose
@@ -1833,7 +1884,11 @@ class Designer:
                 print(f"{'Number of sampling time choices':<40}: {self.n_spt}")
             if self._dynamic_controls:
                 print(f"{'Number of time-varying controls':<40}: {self.n_tvc}")
-            print(f"{'Covariance of measured responses':<40}: \n {self.error_cov}")
+            if self._error_het:
+                print(f"{'Covariance of measured responses':<40}: "
+                      f"prediction-dependent (see error model)")
+            else:
+                print(f"{'Covariance of measured responses':<40}: \n {self.error_cov}")
             if self.error_variance is not None:
                 print(f"{'Error model (error_variance)':<40}: "
                       f"{self.error_variance}")
@@ -1843,8 +1898,25 @@ class Designer:
 
         return self._status
 
+    def _clear_error_variance_state(self):
+        """``error_variance`` is unset: forget any earlier resolution.
+
+        A no-op for a designer that never used ``error_variance``, so the
+        ``error_cov`` path is untouched. If it WAS used and has since been
+        unset, an ``error_cov`` this class derived from it is dropped: unset
+        means unset, not "keep the old numbers". (Cached atomic FIMs need no
+        handling here: ``initialize()`` already invalidates them.)
+        """
+        if (self.error_cov is not None
+                and any(self.error_cov is d for d in self._error_cov_derived)):
+            self.error_cov = None
+        self._error_het = False
+        self._ev_names = None
+        self._ev_rel = None
+        self._ev_abs_var = None
+
     def _resolve_error_variance(self):
-        """Resolve :attr:`error_variance` into a constant ``error_cov``.
+        """Resolve :attr:`error_variance` for :meth:`initialize`.
 
         Keys are matched BY NAME, exactly, against :attr:`response_names`
         (the same rule ``interest_parameters`` follows against
@@ -1855,31 +1927,45 @@ class Designer:
 
         Each entry is either a bare number (a VARIANCE, as ``error_cov``) or a
         dict with ``abs_sd`` (required, > 0) and ``rel_sd`` (optional, >= 0),
-        both STANDARD DEVIATIONS. This step supports the constant case only:
-        a positive ``rel_sd`` raises :class:`NotImplementedError` rather than
-        being accepted and ignored, because ignoring it would return a
-        homoscedastic design under a label that claims otherwise.
+        both STANDARD DEVIATIONS. The variance of a measurement of predicted
+        value ``y`` is ``(rel_sd * y) ** 2 + abs_sd ** 2``.
 
-        Sets ``error_cov`` to ``diag(variances)`` in ``response_names`` order,
-        so every consumer of ``error_cov`` sees exactly what the equivalent
-        hand-written matrix would give.
+        With every ``rel_sd`` zero the error is constant, and ``error_cov`` is
+        set to ``diag(variances)`` in ``response_names`` order, so every
+        consumer sees exactly what the equivalent hand-written matrix would
+        give. With any ``rel_sd > 0`` the weights depend on the predictions:
+        ``error_cov`` and ``error_fim`` are left ``None`` and the weights are
+        built from the nominal predictions by :meth:`_error_weights`.
 
         Raises:
-            ValueError: Both ``error_variance`` and ``error_cov`` were set; the
-                structure is not a dict of the expected form; a name is
-                unknown or a measured response is missing; ``abs_sd <= 0`` or
-                absent; ``rel_sd < 0``; a value is not a finite number.
-            NotImplementedError: ``rel_sd > 0`` (not yet supported).
+            ValueError: Both ``error_variance`` and ``error_cov`` (or
+                ``go_error_cov``) were set; the structure is not a dict of the
+                expected form; a name is unknown or a measured response is
+                missing; ``abs_sd <= 0`` or absent; ``rel_sd < 0``; a value is
+                not a finite number.
         """
         spec = self.error_variance
+        derived = self._error_cov_derived
+
+        def _is_derived(a):
+            return a is not None and any(a is d for d in derived)
+
         if (self.error_cov is not None
                 and not self._error_cov_defaulted
-                and self.error_cov is not self._error_cov_from_variance):
+                and not _is_derived(self.error_cov)):
             raise ValueError(
                 "Both error_variance and error_cov are set. They are two "
                 "ways of stating the same thing: set one. (An error_cov that "
                 "initialize() derived from error_variance on an earlier call "
                 "does not count.)"
+            )
+        if self.go_error_cov is not None and not _is_derived(self.go_error_cov):
+            raise ValueError(
+                "Both error_variance and go_error_cov are set. go_error_cov "
+                "exists only because error_cov is a constant that has to be "
+                "swapped with the goal-oriented grid; error_variance needs no "
+                "swap, since the goal-oriented grid has its own predictions "
+                "and therefore its own weights. Unset go_error_cov."
             )
         if not isinstance(spec, dict):
             raise ValueError(
@@ -1929,7 +2015,7 @@ class Designer:
                 )
             return float(x)
 
-        variances = []
+        rel_sd, abs_var = [], []
         for name in names:
             entry = spec[name]
             if isinstance(entry, dict):
@@ -1946,27 +2032,20 @@ class Designer:
                         f"numerical guard: without it a response predicted "
                         f"near zero gets an unbounded weight."
                     )
-                abs_sd = _num(entry["abs_sd"], "abs_sd", name)
-                if abs_sd <= 0:
+                a_sd = _num(entry["abs_sd"], "abs_sd", name)
+                if a_sd <= 0:
                     raise ValueError(
                         f"error_variance['{name}']: abs_sd must be > 0; got "
-                        f"{abs_sd}. (A standard deviation, not a variance.)"
+                        f"{a_sd}. (A standard deviation, not a variance.)"
                     )
-                rel_sd = _num(entry.get("rel_sd", 0.0), "rel_sd", name)
-                if rel_sd < 0:
+                r_sd = _num(entry.get("rel_sd", 0.0), "rel_sd", name)
+                if r_sd < 0:
                     raise ValueError(
                         f"error_variance['{name}']: rel_sd must be >= 0; got "
-                        f"{rel_sd}."
+                        f"{r_sd}."
                     )
-                if rel_sd > 0:
-                    raise NotImplementedError(
-                        f"error_variance['{name}']: rel_sd > 0 (a relative, "
-                        f"prediction-dependent error) is not implemented yet. "
-                        f"Only constant error is supported at this stage; "
-                        f"ignoring rel_sd would silently give a homoscedastic "
-                        f"design."
-                    )
-                variances.append(abs_sd ** 2)
+                rel_sd.append(r_sd)
+                abs_var.append(a_sd ** 2)
             else:
                 var = _num(entry, "a bare value (a variance)", name)
                 if var <= 0:
@@ -1974,12 +2053,144 @@ class Designer:
                         f"error_variance['{name}']: a bare number is a "
                         f"variance and must be > 0; got {var}."
                     )
-                variances.append(var)
+                rel_sd.append(0.0)
+                abs_var.append(var)
 
-        cov = np.diag(variances)
-        self.error_cov = cov
-        self._error_cov_from_variance = cov
+        het = any(r > 0 for r in rel_sd)
+        self._ev_names = names
+        self._ev_rel = np.asarray(rel_sd, dtype=float)
+        self._ev_abs_var = np.asarray(abs_var, dtype=float)
+        self._error_het = het
+
+        new_cov = None if het else np.diag(abs_var)
+        cur = self.error_cov
+        if (new_cov is not None and _is_derived(cur)
+                and np.array_equal(cur, new_cov)):
+            pass    # same constant error as before: keep the same object
+        else:
+            self.error_cov = new_cov
+            if new_cov is not None:
+                derived.append(new_cov)
+                del derived[:-8]
         self._error_cov_defaulted = False
+
+    def _error_weights(self, y):
+        """Measurement weights ``1 / variance`` at predictions ``y``.
+
+        ``variance = (rel_sd * y) ** 2 + abs_sd ** 2`` per measured response
+        (the two-component error model of Rocke & Lorenzato, 1995,
+        *Technometrics* 37(2):176-184). ``y`` has the measured responses on
+        its LAST axis, in ``response_names`` order; the result has the same
+        shape. Diagonal only.
+
+        A non-finite prediction gets weight 0, the same treatment as a
+        candidate whose sensitivities failed (it contributes no information).
+
+        Warns, without raising, on a negative prediction of a response with
+        ``rel_sd > 0`` (the model is outside its physical range; the square
+        keeps the weight sign-safe) and when the weights of one response span
+        more than 1e6 across the grid, the signature of a prediction near zero
+        dominating the design.
+        """
+        import warnings as _w
+        y = np.asarray(y, dtype=float)
+        if y.shape[-1] != self.n_m_r:
+            raise ValueError(
+                f"predictions have {y.shape[-1]} response column(s) but "
+                f"{self.n_m_r} response(s) are measured. error_variance needs "
+                f"simulate() to return exactly the measured responses."
+            )
+        rel, abs_var = self._ev_rel, self._ev_abs_var
+        with np.errstate(invalid="ignore", over="ignore"):
+            var = (rel * y) ** 2 + abs_var
+        ok = np.isfinite(var)
+        w = np.zeros_like(var)
+        w[ok] = 1.0 / var[ok]
+
+        neg = (y < 0) & (rel > 0)
+        if np.any(neg):
+            bad = sorted({self._ev_names[j] for j in np.where(neg)[-1]})
+            _w.warn(
+                f"error_variance: negative predicted value(s) for {bad}. The "
+                f"model is being evaluated outside its physical range; the "
+                f"weight uses the square and stays finite.",
+                RuntimeWarning, stacklevel=3)
+        flat_w = w.reshape(-1, w.shape[-1])
+        flat_ok = ok.reshape(-1, ok.shape[-1])
+        for j in range(w.shape[-1]):
+            wj = flat_w[flat_ok[:, j], j]
+            if wj.size and wj.min() > 0 and wj.max() / wj.min() > 1e6:
+                _w.warn(
+                    f"error_variance: the weights of '{self._ev_names[j]}' "
+                    f"span {wj.max() / wj.min():.1e} across the grid. A "
+                    f"prediction near zero is probably dominating the "
+                    f"design; check abs_sd.",
+                    RuntimeWarning, stacklevel=3)
+        return w
+
+    def _grid_error_weights(self):
+        """Weights for the candidate grid: ``(n_c, n_spt, n_m_r)``.
+
+        Built from the nominal predictions recorded by
+        :meth:`eval_sensitivities` for the SAME evaluation that produced
+        ``self.sensitivities``. Every consumer of the grid weights (the FIM,
+        estimability, sensitivity diagnostics) calls this, so they cannot
+        disagree.
+        """
+        if self._grid_pred is None:
+            raise RuntimeError(
+                "error_variance has rel_sd > 0, so the weights are built from "
+                "the nominal predictions, but none are recorded for the "
+                "current sensitivities. They are recorded by "
+                "eval_sensitivities(store_predictions=True); sensitivities "
+                "loaded with load_sensitivity() carry none. Set "
+                "designer.sensitivities = None and recompute."
+            )
+        w = self._error_weights(self._grid_pred)
+        if w.shape[:2] != (self.n_c, self.n_spt):
+            raise RuntimeError(
+                f"recorded predictions have grid shape {w.shape[:2]} but the "
+                f"candidate grid is {(self.n_c, self.n_spt)}; they are stale. "
+                f"Set designer.sensitivities = None and recompute."
+            )
+        return w
+
+    def _capture_grid_predictions(self, resp_start, par_resp):
+        """Record the nominal predictions of the grid just evaluated.
+
+        ``par_resp`` is the list of per-candidate responses from the parallel
+        IFT branch, which does not store them; otherwise they are read from
+        the blocks :meth:`_store_current_response` appended after
+        ``resp_start`` (``self.response`` ACCUMULATES across calls, so it is
+        sliced, never indexed from zero). Best effort when the error is
+        constant, since nothing then needs them; an error when it does.
+        """
+        pred = None
+        err = None
+        try:
+            if par_resp is not None:
+                pred = np.asarray([np.asarray(r, dtype=float) for r in par_resp])
+            elif (self.response is not None
+                    and len(self.response) - resp_start == self.n_c):
+                pred = np.asarray(self.response[resp_start:], dtype=float)
+            if pred is not None:
+                pred = pred.reshape(self.n_c, self.n_spt, -1)
+                if pred.shape[-1] != self.n_m_r:
+                    err = (f"simulate() returns {pred.shape[-1]} response "
+                           f"column(s) but {self.n_m_r} are measured; "
+                           f"error_variance needs exactly the measured ones.")
+                    pred = None
+        except Exception as exc:        # noqa: BLE001 -- reported below if needed
+            err = f"could not read the predictions ({exc})"
+            pred = None
+        if pred is None and self._error_het:
+            raise RuntimeError(
+                "error_variance has rel_sd > 0, which needs the nominal "
+                "predictions, and they were not available: "
+                + (err or "eval_sensitivities() ran with "
+                   "store_predictions=False.")
+            )
+        self._grid_pred = pred
 
     def simulate_candidates(self, store_predictions=True,
                             plot_simulation_times=False):
@@ -2328,12 +2539,19 @@ class Designer:
 
             try:
                 if _use_pyomo_ift:
-                    _, sens_k = self._eval_sensitivities_pyomo_ift(
+                    resp_k, sens_k = self._eval_sensitivities_pyomo_ift(
                         self._current_tic,
                         mp,
                         store_predictions=False,
                     )
                 else:
+                    resp_k = None
+                    if self._error_het:
+                        # nominal predictions AT THE PRIOR CONDITIONS, not the
+                        # candidate grid's: the weights are theirs
+                        resp_k = self._simulate_internal(
+                            self._current_tic, self._current_tvc, mp,
+                            self._current_spt)
                     sens_k = jacob_fun(mp, False)
                     # reshape to (n_spt, n_mr, n_mp)
                     n_spt_k = self._current_spt.size
@@ -2361,9 +2579,13 @@ class Designer:
 
             # accumulate FIM: sum over time points and responses
             # sens_k shape: (n_spt, n_mr, n_mp)
+            if self._error_het:
+                _w_k = self._error_weights(
+                    np.asarray(resp_k, dtype=float).reshape(sens_k.shape[0], -1))
             for t in range(sens_k.shape[0]):
                 s = sens_k[t]   # (n_mr, n_mp)
-                fim_prior += repeats[k] * (s.T @ error_fim @ s)
+                _e = np.diag(_w_k[t]) if self._error_het else error_fim
+                fim_prior += repeats[k] * (s.T @ _e @ s)
 
             if self._verbose >= 2:
                 print(f"  [{k+1}/{n_prior}] tic={tic[k]}  "
@@ -4605,6 +4827,14 @@ class Designer:
             "prior_fim": self._prior_fim,
             "prior_fim_mp": self._prior_fim_mp,
             "prior_n_exp": self._prior_n_exp,
+            # A criterion_value only means something under the weighting it
+            # was computed with, and with prediction-dependent error that is
+            # no longer one matrix. error_cov is None when the error is
+            # prediction-dependent (see error_variance).
+            "error_variance": copy.deepcopy(self.error_variance),
+            "error_cov": (None if self.error_cov is None
+                          else np.array(self.error_cov)),
+            "error_cov_defaulted": bool(self._error_cov_defaulted),
         }
         if write:
             self.write_oed_result()
@@ -6762,6 +6992,11 @@ class Designer:
             self.measurable_responses,
             self.n_m_r,
             self.model_parameters,
+            # Appended after the original ten, so a state written before these
+            # existed still loads and an older loader ignores them. A saved
+            # state never recorded the weighting it was computed under.
+            copy.deepcopy(self.error_variance),
+            None if self._error_cov_defaulted else self.error_cov,
         ]
 
         designer_file = f"state"
@@ -6785,6 +7020,11 @@ class Designer:
         self.measurable_responses = state[7]
         self.n_m_r = state[8]
         self.model_parameters = state[9]
+        if len(state) > 10:
+            # an error_cov that was derived from error_variance is re-derived
+            # by initialize(); restoring both would trip the "both set" check
+            self.error_variance = state[10]
+            self.error_cov = None if state[10] is not None else state[11]
 
     def save_responses(self):
         """Placeholder — not implemented.
@@ -6808,6 +7048,9 @@ class Designer:
             sens_path (str): Path relative to the current working directory.
         """
         self.sensitivities = load(open(getcwd() + "/" + sens_path, "rb"))
+        # a cached file carries no nominal predictions; the ones recorded for
+        # the sensitivities it replaced no longer belong to them
+        self._grid_pred = None
         self._model_parameters_changed = False
         self._candidates_changed = False
         return self.sensitivities
@@ -7235,7 +7478,19 @@ class Designer:
             dw_spt = np.array([0.0])
 
         # scaling vectors
-        s_y     = np.sqrt(np.diag(self.error_cov))          # length n_m_r
+        if self._error_het:
+            # per (dw point, time, response), from the predictions at dw below
+            s_y = None
+        else:
+            s_y = np.sqrt(np.diag(self.error_cov))          # length n_m_r
+            _C = np.asarray(self.error_cov, dtype=float)
+            if not np.allclose(_C, np.diag(np.diag(_C)), rtol=0.0, atol=0.0):
+                import warnings as _w
+                _w.warn(
+                    "error_cov has off-diagonal terms, but the V-optimal W "
+                    "matrix scales rows by sqrt(diag(error_cov)) only: the "
+                    "correlations are ignored here (they are used by the FIM).",
+                    RuntimeWarning, stacklevel=2)
         s_theta = np.abs(self.model_parameters)              # length n_mp
         # avoid division by zero for parameters that are exactly 0
         s_theta = np.where(s_theta == 0, 1.0, s_theta)
@@ -7278,7 +7533,8 @@ class Designer:
             # V-optimal design at all. Gradient handles the scalar case and
             # returns shape (n_mp,), which reshapes to the (1, n_mp) row the
             # assembly below expects.
-            n_out = int(np.atleast_1d(model_at_dw(self.model_parameters)).size)
+            y_nom = np.atleast_1d(model_at_dw(self.model_parameters))
+            n_out = int(y_nom.size)
             if n_out == 1:
                 grad_func = nd.Gradient(
                     lambda mp: float(np.atleast_1d(model_at_dw(mp))[0]),
@@ -7294,7 +7550,13 @@ class Designer:
             # apply McAuley scaling: W_ij = S_ij * s_yi / s_theta_j
             # s_y tiles over spt dimension: [s_y0, s_y1, ..., s_y0, s_y1, ...]
             n_spt_dw = len(dw_spt)
-            s_y_tiled = np.tile(s_y, n_spt_dw)                  # (n_spt_dw * n_m_r,)
+            if self._error_het:
+                # std dev of a measurement AT the predicted value at dw
+                with np.errstate(divide="ignore"):
+                    s_y_tiled = np.sqrt(1.0 / self._error_weights(
+                        y_nom.reshape(n_spt_dw, -1))).reshape(-1)
+            else:
+                s_y_tiled = np.tile(s_y, n_spt_dw)              # (n_spt_dw * n_m_r,)
             W_w = S_w * (s_y_tiled[:, None] / s_theta[None, :]) # (n_spt_dw * n_m_r, n_mp)
 
             W_blocks.append(W_w)
@@ -7489,6 +7751,9 @@ class Designer:
         self.n_spt, self.n_spt_go = self.n_spt_go, self.n_spt
         self.simulate, self.go_simulate = self.go_simulate, self.simulate
         self.go_sensitivities, self.sensitivities = self.sensitivities, self.go_sensitivities
+        # the nominal predictions belong to the sensitivities: the goal-oriented
+        # grid has its own, and therefore gets its own measurement weights
+        self._grid_pred, self._go_grid_pred = self._go_grid_pred, self._grid_pred
         self.error_cov, self.go_error_cov = self.go_error_cov, self.error_cov
 
         # Clear the per-grid buffers before re-initialising. The two grids have
@@ -7721,6 +7986,20 @@ class Designer:
                     "where all_vars has the n_mp parameter Vars listed first."
                 )
 
+        if self._error_het and not store_predictions:
+            raise ValueError(
+                "error_variance has rel_sd > 0, so the measurement weights are "
+                "built from the nominal predictions that eval_sensitivities() "
+                "records. store_predictions=False discards them; leaving it "
+                "True is required, and falling back to unweighted would "
+                "silently change the design."
+            )
+        # self.response ACCUMULATES across calls, so remember where this
+        # call's blocks start. _par_resp carries the parallel IFT branch's
+        # responses, which that branch does not store.
+        _resp_start = 0 if self.response is None else len(self.response)
+        _par_resp = None
+
         self._sensitivity_analysis_done = False
         if self._verbose >= 2:
             print('[Sensitivity Analysis]'.center(100, "-"))
@@ -7823,6 +8102,10 @@ class Designer:
                 for tic, tvc, spt in candidates
             )
 
+            # The workers return the nominal responses too (they cannot store
+            # them: they run in subprocesses). joblib returns results in input
+            # order, so these line up with the candidates.
+            _par_resp = [_r for _r, _ in results]
             for i, (temp_resp, temp_sens) in enumerate(results):
                 self.sensitivities[i, :] = temp_sens
                 candidate_sens_times.append(0.0)  # timing not meaningful in parallel
@@ -7953,6 +8236,10 @@ class Designer:
         if self._verbose >= 2 and self.sens_report_freq != 0:
             print("".center(100, "-"))
         self._sensitivity_analysis_time += finish - start
+
+        # Record the nominal predictions of THIS grid next to the sensitivities
+        # they belong to: the measurement weights are evaluated from them.
+        self._capture_grid_predictions(_resp_start, _par_resp)
 
         # Unreachable while ragged candidate grids are refused (Open Item 20);
         # _var_n_sampling_time is only ever set False. Kept deliberately.
@@ -8256,10 +8543,17 @@ class Designer:
         n_c, n_spt, n_mr, n_mp = S.shape
         Z_ud = S.reshape(n_c * n_spt * n_mr, n_mp)
 
-        weighted = self.error_cov is not None and not getattr(
-            self, "_error_cov_defaulted", False)
+        # Prediction-dependent error: the weights are per (candidate, time,
+        # response), from the SAME array the FIM uses (_grid_error_weights).
+        _Wg = self._grid_error_weights() if self._error_het else None
+        weighted = self._error_het or (
+            self.error_cov is not None and not getattr(
+                self, "_error_cov_defaulted", False))
         Z_w = None
-        if weighted:
+        if self._error_het:
+            # row weighting is per-row 1/sigma: simpler than the matrix path
+            Z_w = (S * np.sqrt(_Wg)[..., None]).reshape(n_c * n_spt * n_mr, n_mp)
+        elif weighted:
             # row weighting needs Sigma^(-1/2), NOT inv(Sigma); they coincide
             # only when Sigma is the identity
             C = np.asarray(self.error_cov, dtype=float)
@@ -8351,12 +8645,15 @@ class Designer:
         # Costs one einsum on an array already in memory: measured at 31 us
         # against 16.6 s of sensitivity analysis on a 9-parameter model, i.e.
         # 0.0002% of the cost of getting here.
-        try:
-            _efim = (np.linalg.inv(np.asarray(self.error_cov, dtype=float))
-                     if self.error_cov is not None else np.eye(n_mr))
-        except np.linalg.LinAlgError:
-            _efim = np.eye(n_mr)
-        abs_info = np.einsum("ktrj,rq,ktqj->j", S_scaled, _efim, S_scaled)
+        if self._error_het:
+            abs_info = np.einsum("ktrj,ktr,ktrj->j", S_scaled, _Wg, S_scaled)
+        else:
+            try:
+                _efim = (np.linalg.inv(np.asarray(self.error_cov, dtype=float))
+                         if self.error_cov is not None else np.eye(n_mr))
+            except np.linalg.LinAlgError:
+                _efim = np.eye(n_mr)
+            abs_info = np.einsum("ktrj,rq,ktqj->j", S_scaled, _efim, S_scaled)
 
         grp_idx = _groups(C, corr_tol)
         sweep = [(t, _groups(C, t)) for t in (0.99, 0.98, 0.95, 0.90, 0.80)]
@@ -8448,7 +8745,9 @@ class Designer:
         print(f"  columns        : raw d(prediction)/d(parameter), no scaling "
               f"by parameter value")
         if w:
-            print(f"  row weighting  : error_cov as supplied — reporting BOTH "
+            print(f"  row weighting  : "
+                  f"{'error_variance' if self.error_variance is not None else 'error_cov'}"
+                  f" as supplied — reporting BOTH "
                   f"indices")
         else:
             print(f"  row weighting  : none (error_cov not supplied, or not "
@@ -8559,7 +8858,8 @@ class Designer:
         names = out["corr_names"]
         C = np.asarray(out["corr_matrix"])   # NOT out["correlation"], which is a
         p = len(names)                       # DataFrame -> C[i, j] raises KeyError
-        tag = ("weighted by error_cov" if out["weighted"]
+        tag = (("weighted by error_variance" if self.error_variance is not None
+                else "weighted by error_cov") if out["weighted"]
                else "unweighted (error_cov not supplied)")
         print()
         print(f"  PARAMETER CORRELATION   ({tag})")
@@ -8748,7 +9048,8 @@ class Designer:
         ax.set_yticks(range(p))
         ax.set_xticklabels(names_all, rotation=45, ha="right", fontsize=tick_fs)
         ax.set_yticklabels(names_all, fontsize=tick_fs)
-        tag = "weighted by error_cov" if weighted else "unweighted"
+        tag = (("weighted by error_variance" if self.error_variance is not None
+                else "weighted by error_cov") if weighted else "unweighted")
         # Group membership in the subtitle only when it is unambiguously short.
         #
         # Counting CHARACTERS is the wrong test: "$\theta_{10}$" is 13 source
@@ -9085,6 +9386,7 @@ class Designer:
         )
 
         # --- error FIM ---
+        _Wd = self._grid_error_weights() if self._error_het else None
         err_fim = self.error_fim if self.error_fim is not None else np.eye(self.n_m_r)
 
         # --- measurable responses only ---
@@ -9103,7 +9405,8 @@ class Designer:
             A_c = np.zeros((self.n_mp, self.n_mp))
             for t in range(sens_m.shape[1]):
                 S_t = sens_m[c, t]            # (n_m_r, n_mp)
-                A_c += S_t.T @ err_fim @ S_t  # (n_mp, n_mp)
+                _e = np.diag(_Wd[c, t]) if _Wd is not None else err_fim
+                A_c += S_t.T @ _e @ S_t  # (n_mp, n_mp)
             diag_A[c] = np.diag(A_c)
 
             # eigenvalues (symmetric matrix — use eigvalsh for stability)
@@ -9355,6 +9658,17 @@ class Designer:
         """ evaluate fim """
         start = time()
 
+        # The measurement weight entering each atomic FIM. Constant error: the
+        # one precomputed error_fim, exactly as before. Prediction-dependent
+        # error: diag(1/variance) per (candidate, sampling time), from the
+        # nominal predictions recorded with these sensitivities. This is the
+        # single site where W enters the FIM.
+        _W = (self._grid_error_weights()
+              if (self._error_het and self._compute_atomics) else None)
+
+        def _emat(c, t):
+            return self.error_fim if _W is None else np.diag(_W[c, t])
+
         # reshape efforts to (n_c, n_spt) for iteration
         if self._specified_n_spt:
             self.efforts = self.efforts.reshape((self.n_c, self.n_spt_comb))
@@ -9404,7 +9718,8 @@ class Designer:
                             _atom_fim = np.zeros((self.n_mp, self.n_mp))
                         else:
                             _atom_fim = sum(
-                                _s.T @ self.error_fim @ _s for _s in _s_comb
+                                _s.T @ _emat(c, _t) @ _s
+                                for _s, _t in zip(_s_comb, spt)
                             )
                         self.fim += e * _atom_fim
                         if not self._large_memory_requirement:
@@ -9415,7 +9730,7 @@ class Designer:
             else:
                 for c, (eff, sen) in enumerate(zip(self.efforts, self.sensitivities)):
                     for spt, (e, s) in enumerate(zip(eff, sen)):
-                        add_candidates(s, e, self.error_fim)
+                        add_candidates(s, e, _emat(c, spt))
             if self._save_atomics and not self._pseudo_bayesian:
                 sens_file = f"atomics_{self.n_c}_cand"
                 if self._dynamic_system:
@@ -9558,6 +9873,7 @@ class Designer:
                     import types, numpy as _np
                     mp = _np.asarray(mp, dtype=float)
                     sens_scr = _np.empty((len(tic_list_), n_spt__, n_mr_, n_mp__))
+                    resp_scr = _np.empty((len(tic_list_), n_spt__, n_mr_))
                     for c, tic in enumerate(tic_list_):
                         # _eval_sensitivities_pyomo_ift gates the
                         # sampling_times kwarg on _dynamic_system. That flag was
@@ -9595,16 +9911,20 @@ class Designer:
                             pyomo_output_var_name = out_names_,
                             n_m_r                 = n_mr_,
                         )
-                        _, sens = Designer._eval_sensitivities_pyomo_ift(
+                        resp_c, sens = Designer._eval_sensitivities_pyomo_ift(
                             fake, tic, mp, store_predictions=False
                         )
                         sens_scr[c] = sens
+                        # nominal responses, for the measurement weights; the
+                        # worker cannot store them on the designer
+                        resp_scr[c] = _np.asarray(resp_c, dtype=float).reshape(
+                            n_spt__, n_mr_)
                     # Apply parameter-value normalization (S_ij *= theta_j)
                     # This mirrors the _norm_sens_by_params step in eval_sensitivities
                     # which is bypassed when skip_sens_eval=True.
                     if norm_sens:
                         sens_scr *= mp[_np.newaxis, _np.newaxis, _np.newaxis, :]
-                    return scr, sens_scr
+                    return scr, sens_scr, resp_scr
 
                 if self._verbose >= 1:
                     print(
@@ -9626,14 +9946,17 @@ class Designer:
                     for scr in range(self.n_scr)
                 )
                 self._sensitivity_analysis_time = time() - _pb_par_start
-                for scr, sens_scr in raw:
+                scr_pred = np.empty((self.n_scr, self.n_c, self.n_spt, self.n_m_r))
+                for scr, sens_scr, resp_scr in raw:
                     scr_sens[scr] = sens_scr
+                    scr_pred[scr] = resp_scr
 
                 # Build per-scenario FIMs from the collected sensitivities
                 for scr, mp in enumerate(self.model_parameters):
                     self._current_scr     = scr
                     self._current_scr_mp  = mp
                     self.sensitivities    = scr_sens[scr]
+                    self._grid_pred       = scr_pred[scr]
                     self.atomic_fims      = None
                     self._eval_fim(efforts, store_predictions,
                                    skip_sens_eval=True)

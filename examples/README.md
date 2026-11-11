@@ -522,6 +522,20 @@ why the second panel exists: it plots how much worse each design is than the
 best on each criterion, so the crossover is visible where the ellipses hide it.
 Needs matplotlib; nothing else beyond pydex and IPOPT.
 
+## Measurement error — `examples/error_model/`
+
+`relative_error_design.py` designs the first-order decay `A(t) = A0*exp(-k*t)` under a
+constant measurement error and under a relative one, using the name-keyed
+`error_variance`. One response and two parameters, so the design is two sampling times.
+At `k = 0.5` the constant-error design is `{0, 2.0}`; with `rel_sd = 0.05` the second
+time moves to 2.8, 4.4 or 7.0 as `abs_sd` falls from 0.02 to 0.005 to 0.001. The floor is
+what bounds how late the design will go, which is why `abs_sd` is the number to get right:
+it is the instrument's absolute precision near zero, not its limit of quantification.
+
+The last block shows a misspelt response name being refused. The keys are matched against
+`response_names` exactly, so a typo cannot silently assign a variance to the wrong
+response the way a mis-ordered `error_cov` can. Needs ipopt; nothing is written to disk.
+
 ## V-optimal MBDoE — `examples/v_optimal/`
 
 Two-stage V-optimal design on a three-reaction batch reactor, following

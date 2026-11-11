@@ -816,8 +816,31 @@ response’s own units, required and &gt; 0; <code class="docutils literal notra
 <code class="docutils literal notranslate"><span class="pre">error_cov</span></code>, so <code class="docutils literal notranslate"><span class="pre">{&quot;P&quot;:</span> <span class="pre">0.09}</span></code> and <code class="docutils literal notranslate"><span class="pre">np.diag([0.09])</span></code> give
 identical designs. Setting both <code class="docutils literal notranslate"><span class="pre">error_variance</span></code> and
 <code class="docutils literal notranslate"><span class="pre">error_cov</span></code> raises. Diagonal only: correlated errors need
-<code class="docutils literal notranslate"><span class="pre">error_cov</span></code>. At present only constant error is supported, and a
-positive <code class="docutils literal notranslate"><span class="pre">rel_sd</span></code> raises <code class="docutils literal notranslate"><span class="pre">NotImplementedError</span></code>.</p>
+<code class="docutils literal notranslate"><span class="pre">error_cov</span></code>.</p>
+<p>A measurement of a response predicted at <code class="docutils literal notranslate"><span class="pre">y</span></code> has variance
+<code class="docutils literal notranslate"><span class="pre">(rel_sd</span> <span class="pre">*</span> <span class="pre">y)</span> <span class="pre">**</span> <span class="pre">2</span> <span class="pre">+</span> <span class="pre">abs_sd</span> <span class="pre">**</span> <span class="pre">2</span></code> (the two-component error model
+of Rocke &amp; Lorenzato, 1995; <code class="docutils literal notranslate"><span class="pre">nlme</span></code>’s <code class="docutils literal notranslate"><span class="pre">varConstProp</span></code>), and the
+weight entering the FIM is its reciprocal, evaluated once per
+(candidate, sampling time) at the NOMINAL prediction and held
+fixed through the finite-difference loop. With any <code class="docutils literal notranslate"><span class="pre">rel_sd</span> <span class="pre">&gt;</span> <span class="pre">0</span></code>
+<code class="docutils literal notranslate"><span class="pre">error_cov</span></code> and <code class="docutils literal notranslate"><span class="pre">error_fim</span></code> stay <code class="docutils literal notranslate"><span class="pre">None</span></code> and every consumer
+(the FIM, prior experiments, the V-optimal W matrix,
+<a class="reference internal" href="#pydex.core.designer.Designer.run_estimability" title="pydex.core.designer.Designer.run_estimability"><code class="xref py py-meth docutils literal notranslate"><span class="pre">run_estimability()</span></code></a>, <a class="reference internal" href="#pydex.core.designer.Designer.diagnose_sensitivity" title="pydex.core.designer.Designer.diagnose_sensitivity"><code class="xref py py-meth docutils literal notranslate"><span class="pre">diagnose_sensitivity()</span></code></a>) builds the
+weights from predictions, so they cannot disagree. This is the
+weighted-least-squares information matrix, not the full Gaussian
+FIM: with a parameter-dependent variance the latter carries an
+extra <code class="docutils literal notranslate"><span class="pre">0.5</span> <span class="pre">*</span> <span class="pre">tr(S^-1</span> <span class="pre">S'</span> <span class="pre">S^-1</span> <span class="pre">S')</span></code> term, deliberately neglected
+(about <code class="docutils literal notranslate"><span class="pre">2</span> <span class="pre">*</span> <span class="pre">CV</span> <span class="pre">**</span> <span class="pre">2</span></code> of the information: 0.5% at 5% CV, 2% at
+10%). With exact IFT sensitivities you get exact <code class="docutils literal notranslate"><span class="pre">dy/dtheta</span></code>
+combined with a weight from a nominal prediction. Requires
+<code class="docutils literal notranslate"><span class="pre">eval_sensitivities(store_predictions=True)</span></code>, the default.</p>
+<p>Choosing the numbers: both are ONE standard deviation. A “+/-10%”
+quoted as a 95% interval is <code class="docutils literal notranslate"><span class="pre">rel_sd</span> <span class="pre">=</span> <span class="pre">0.05</span></code>, not 0.10. <code class="docutils literal notranslate"><span class="pre">abs_sd</span></code>
+is the instrument’s absolute precision near zero (baseline, blank
+variability), NOT the limit of quantification: LOQ is conventionally
+about 10 sigma, so divide it by ten. A zero <code class="docutils literal notranslate"><span class="pre">abs_sd</span></code> is refused,
+since it would give a response predicted near zero an unbounded
+weight; pydex warns when one response’s weights span more than 1e6.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Type<span class="colon">:</span></dt>
 <dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.15)">dict</a> or None</p>

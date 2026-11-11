@@ -13,9 +13,10 @@ SCOPE OF THIS COMMIT
 --------------------
 The API only, and NO behaviour change: a dict resolves to the constant diagonal
 `error_cov` it is equivalent to, and every downstream consumer sees that. The
-prediction-dependent part (`rel_sd > 0`) is the next commit; here it must RAISE
-rather than be accepted and ignored, because ignoring it would hand back a
-homoscedastic design under a label that claims otherwise.
+prediction-dependent part (`rel_sd > 0`) is tested in test_error_model_weights.py.
+In the first commit it raised rather than being accepted and ignored, because
+ignoring it would have handed back a homoscedastic design under a label that
+claims otherwise.
 
 Solver-free: the equivalence tests go through `eval_fim` (finite-difference
 sensitivities over `simulate()`), not through an optimiser.
@@ -211,15 +212,6 @@ def test_negative_rel_sd_raises():
     d = _designer(error_variance={"conc": {"abs_sd": 0.1, "rel_sd": -0.1},
                                   "temp": 0.09})
     with pytest.raises(ValueError, match="rel_sd must be >= 0"):
-        d.initialize(verbose=0)
-
-
-def test_positive_rel_sd_is_refused_not_ignored():
-    """Commit 1 has no prediction-dependent weights. Accepting rel_sd and
-    dropping it would return a HOMOSCEDASTIC design labelled as relative."""
-    d = _designer(error_variance={"conc": {"abs_sd": 0.1, "rel_sd": 0.1},
-                                  "temp": 0.09})
-    with pytest.raises(NotImplementedError, match="rel_sd"):
         d.initialize(verbose=0)
 
 

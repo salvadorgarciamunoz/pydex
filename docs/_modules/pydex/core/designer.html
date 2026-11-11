@@ -87,6 +87,7 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">pickle</span><span class="w"> </span><span class="kn">import</span> <span class="n">dump</span><span class="p">,</span> <span class="n">load</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">string</span><span class="w"> </span><span class="kn">import</span> <span class="n">Template</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">time</span><span class="w"> </span><span class="kn">import</span> <span class="n">time</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">copy</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">itertools</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">__main__</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">main</span>
@@ -935,8 +936,33 @@
 <span class="sd">            ``error_cov``, so ``{&quot;P&quot;: 0.09}`` and ``np.diag([0.09])`` give</span>
 <span class="sd">            identical designs. Setting both ``error_variance`` and</span>
 <span class="sd">            ``error_cov`` raises. Diagonal only: correlated errors need</span>
-<span class="sd">            ``error_cov``. At present only constant error is supported, and a</span>
-<span class="sd">            positive ``rel_sd`` raises ``NotImplementedError``.</span>
+<span class="sd">            ``error_cov``.</span>
+
+<span class="sd">            A measurement of a response predicted at ``y`` has variance</span>
+<span class="sd">            ``(rel_sd * y) ** 2 + abs_sd ** 2`` (the two-component error model</span>
+<span class="sd">            of Rocke &amp; Lorenzato, 1995; ``nlme``&#39;s ``varConstProp``), and the</span>
+<span class="sd">            weight entering the FIM is its reciprocal, evaluated once per</span>
+<span class="sd">            (candidate, sampling time) at the NOMINAL prediction and held</span>
+<span class="sd">            fixed through the finite-difference loop. With any ``rel_sd &gt; 0``</span>
+<span class="sd">            ``error_cov`` and ``error_fim`` stay ``None`` and every consumer</span>
+<span class="sd">            (the FIM, prior experiments, the V-optimal W matrix,</span>
+<span class="sd">            :meth:`run_estimability`, :meth:`diagnose_sensitivity`) builds the</span>
+<span class="sd">            weights from predictions, so they cannot disagree. This is the</span>
+<span class="sd">            weighted-least-squares information matrix, not the full Gaussian</span>
+<span class="sd">            FIM: with a parameter-dependent variance the latter carries an</span>
+<span class="sd">            extra ``0.5 * tr(S^-1 S&#39; S^-1 S&#39;)`` term, deliberately neglected</span>
+<span class="sd">            (about ``2 * CV ** 2`` of the information: 0.5% at 5% CV, 2% at</span>
+<span class="sd">            10%). With exact IFT sensitivities you get exact ``dy/dtheta``</span>
+<span class="sd">            combined with a weight from a nominal prediction. Requires</span>
+<span class="sd">            ``eval_sensitivities(store_predictions=True)``, the default.</span>
+
+<span class="sd">            Choosing the numbers: both are ONE standard deviation. A &quot;+/-10%&quot;</span>
+<span class="sd">            quoted as a 95% interval is ``rel_sd = 0.05``, not 0.10. ``abs_sd``</span>
+<span class="sd">            is the instrument&#39;s absolute precision near zero (baseline, blank</span>
+<span class="sd">            variability), NOT the limit of quantification: LOQ is conventionally</span>
+<span class="sd">            about 10 sigma, so divide it by ten. A zero ``abs_sd`` is refused,</span>
+<span class="sd">            since it would give a response predicted near zero an unbounded</span>
+<span class="sd">            weight; pydex warns when one response&#39;s weights span more than 1e6.</span>
 <span class="sd">        rounding_efficiency (float or None): Set by :meth:`apportion`. The</span>
 <span class="sd">            criterion value of the rounded design as a fraction of the</span>
 <span class="sd">            continuous one, for the criteria that have a standard relative</span>
@@ -1021,12 +1047,29 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_defaulted</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">error_fim</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="c1"># Name-keyed measurement error (see the class docstring). Resolved by</span>
-        <span class="c1"># initialize() into a constant error_cov/error_fim; the array it</span>
-        <span class="c1"># derived is kept so a second initialize() can tell &quot;error_cov is the</span>
-        <span class="c1"># one I derived&quot; from &quot;the user also set error_cov&quot;.</span>
+        <span class="c1"># Name-keyed measurement error (see the class docstring), resolved by</span>
+        <span class="c1"># initialize(). Constant error becomes the equivalent diagonal</span>
+        <span class="c1"># error_cov. Prediction-dependent error (any rel_sd &gt; 0) leaves</span>
+        <span class="c1"># error_cov and error_fim as None ON PURPOSE: any consumer that was</span>
+        <span class="c1"># not taught the weights then fails loudly instead of silently using</span>
+        <span class="c1"># the wrong ones.</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_from_variance</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span> <span class="o">=</span> <span class="kc">False</span>          <span class="c1"># True when any rel_sd &gt; 0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ev_names</span> <span class="o">=</span> <span class="kc">None</span>            <span class="c1"># response names, in error_cov row order</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ev_rel</span> <span class="o">=</span> <span class="kc">None</span>              <span class="c1"># rel_sd per measured response</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ev_abs_var</span> <span class="o">=</span> <span class="kc">None</span>          <span class="c1"># abs_sd ** 2 per measured response</span>
+        <span class="c1"># Every error_cov array initialize() derived from error_variance. Kept</span>
+        <span class="c1"># as a list, not one slot, because _swap_candidates() exchanges</span>
+        <span class="c1"># error_cov with go_error_cov and re-initializes: after a swap the</span>
+        <span class="c1"># derived array lives in the OTHER slot, so &quot;is this the one I</span>
+        <span class="c1"># derived&quot; must be answerable for any of them.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_derived</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="c1"># Nominal predictions (n_c, n_spt, n_m_r) recorded by</span>
+        <span class="c1"># eval_sensitivities() alongside self.sensitivities, and swapped with</span>
+        <span class="c1"># them. The weights are evaluated from these, once, and held fixed</span>
+        <span class="c1"># through the finite-difference perturbation loop.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_grid_pred</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_go_grid_pred</span> <span class="o">=</span> <span class="kc">None</span>
 
 <span class="w">        </span><span class="sd">&quot;&quot;&quot; goal_oriented_ds&quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">n_c_go</span> <span class="o">=</span> <span class="kc">None</span>
@@ -1878,12 +1921,15 @@
         <span class="c1"># ─────────────────────────────────────────────────────────────────────</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="c1"># Validates and resolves BY NAME; sets error_cov. Runs before the</span>
+            <span class="c1"># Validates and resolves BY NAME; sets error_cov (constant error)</span>
+            <span class="c1"># or leaves it None (prediction-dependent error). Runs before the</span>
             <span class="c1"># identity default below so a name-keyed model is never replaced by</span>
             <span class="c1"># one, and before error_fim is inverted from it.</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_resolve_error_variance</span><span class="p">()</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_clear_error_variance_state</span><span class="p">()</span>
 
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span><span class="p">:</span>
             <span class="nb">print</span><span class="p">(</span>
                 <span class="sa">f</span><span class="s2">&quot;[WARNING]: because the error_cov is not given, Pydex defaults to the &quot;</span>
                 <span class="sa">f</span><span class="s2">&quot;identity matrix of size </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="si">}</span><span class="s2">x</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="si">}</span><span class="s2">.&quot;</span><span class="p">)</span>
@@ -1894,13 +1940,18 @@
             <span class="c1"># difference to decide whether a noise-weighted ranking is</span>
             <span class="c1"># meaningful or fabricated.</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_defaulted</span> <span class="o">=</span> <span class="kc">True</span>
-        <span class="k">try</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">error_fim</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">)</span>
-        <span class="k">except</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">LinAlgError</span><span class="p">:</span>
-            <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
-                <span class="s2">&quot;The provided error covariance is singular, please make sure you &quot;</span>
-                <span class="s2">&quot;have passed in the correct error covariance.&quot;</span>
-            <span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span><span class="p">:</span>
+            <span class="c1"># Weights depend on the predictions, so there is no single</span>
+            <span class="c1"># information matrix to precompute here.</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">error_fim</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">error_fim</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">)</span>
+            <span class="k">except</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">LinAlgError</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
+                    <span class="s2">&quot;The provided error covariance is singular, please make sure you &quot;</span>
+                    <span class="s2">&quot;have passed in the correct error covariance.&quot;</span>
+                <span class="p">)</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">_status</span> <span class="o">=</span> <span class="s1">&#39;ready&#39;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">=</span> <span class="n">verbose</span>
@@ -1920,7 +1971,11 @@
                 <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Number of sampling time choices&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
             <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dynamic_controls</span><span class="p">:</span>
                 <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Number of time-varying controls&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_tvc</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Covariance of measured responses&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="se">\n</span><span class="s2"> </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span><span class="p">:</span>
+                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Covariance of measured responses&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: &quot;</span>
+                      <span class="sa">f</span><span class="s2">&quot;prediction-dependent (see error model)&quot;</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Covariance of measured responses&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="se">\n</span><span class="s2"> </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
             <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Error model (error_variance)&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: &quot;</span>
                       <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
@@ -1931,8 +1986,25 @@
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_status</span></div>
 
 
+    <span class="k">def</span><span class="w"> </span><span class="nf">_clear_error_variance_state</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;``error_variance`` is unset: forget any earlier resolution.</span>
+
+<span class="sd">        A no-op for a designer that never used ``error_variance``, so the</span>
+<span class="sd">        ``error_cov`` path is untouched. If it WAS used and has since been</span>
+<span class="sd">        unset, an ``error_cov`` this class derived from it is dropped: unset</span>
+<span class="sd">        means unset, not &quot;keep the old numbers&quot;. (Cached atomic FIMs need no</span>
+<span class="sd">        handling here: ``initialize()`` already invalidates them.)</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+                <span class="ow">and</span> <span class="nb">any</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="n">d</span> <span class="k">for</span> <span class="n">d</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_derived</span><span class="p">)):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ev_names</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ev_rel</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ev_abs_var</span> <span class="o">=</span> <span class="kc">None</span>
+
     <span class="k">def</span><span class="w"> </span><span class="nf">_resolve_error_variance</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Resolve :attr:`error_variance` into a constant ``error_cov``.</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Resolve :attr:`error_variance` for :meth:`initialize`.</span>
 
 <span class="sd">        Keys are matched BY NAME, exactly, against :attr:`response_names`</span>
 <span class="sd">        (the same rule ``interest_parameters`` follows against</span>
@@ -1943,31 +2015,45 @@
 
 <span class="sd">        Each entry is either a bare number (a VARIANCE, as ``error_cov``) or a</span>
 <span class="sd">        dict with ``abs_sd`` (required, &gt; 0) and ``rel_sd`` (optional, &gt;= 0),</span>
-<span class="sd">        both STANDARD DEVIATIONS. This step supports the constant case only:</span>
-<span class="sd">        a positive ``rel_sd`` raises :class:`NotImplementedError` rather than</span>
-<span class="sd">        being accepted and ignored, because ignoring it would return a</span>
-<span class="sd">        homoscedastic design under a label that claims otherwise.</span>
+<span class="sd">        both STANDARD DEVIATIONS. The variance of a measurement of predicted</span>
+<span class="sd">        value ``y`` is ``(rel_sd * y) ** 2 + abs_sd ** 2``.</span>
 
-<span class="sd">        Sets ``error_cov`` to ``diag(variances)`` in ``response_names`` order,</span>
-<span class="sd">        so every consumer of ``error_cov`` sees exactly what the equivalent</span>
-<span class="sd">        hand-written matrix would give.</span>
+<span class="sd">        With every ``rel_sd`` zero the error is constant, and ``error_cov`` is</span>
+<span class="sd">        set to ``diag(variances)`` in ``response_names`` order, so every</span>
+<span class="sd">        consumer sees exactly what the equivalent hand-written matrix would</span>
+<span class="sd">        give. With any ``rel_sd &gt; 0`` the weights depend on the predictions:</span>
+<span class="sd">        ``error_cov`` and ``error_fim`` are left ``None`` and the weights are</span>
+<span class="sd">        built from the nominal predictions by :meth:`_error_weights`.</span>
 
 <span class="sd">        Raises:</span>
-<span class="sd">            ValueError: Both ``error_variance`` and ``error_cov`` were set; the</span>
-<span class="sd">                structure is not a dict of the expected form; a name is</span>
-<span class="sd">                unknown or a measured response is missing; ``abs_sd &lt;= 0`` or</span>
-<span class="sd">                absent; ``rel_sd &lt; 0``; a value is not a finite number.</span>
-<span class="sd">            NotImplementedError: ``rel_sd &gt; 0`` (not yet supported).</span>
+<span class="sd">            ValueError: Both ``error_variance`` and ``error_cov`` (or</span>
+<span class="sd">                ``go_error_cov``) were set; the structure is not a dict of the</span>
+<span class="sd">                expected form; a name is unknown or a measured response is</span>
+<span class="sd">                missing; ``abs_sd &lt;= 0`` or absent; ``rel_sd &lt; 0``; a value is</span>
+<span class="sd">                not a finite number.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">spec</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span>
+        <span class="n">derived</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_derived</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">_is_derived</span><span class="p">(</span><span class="n">a</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">a</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">any</span><span class="p">(</span><span class="n">a</span> <span class="ow">is</span> <span class="n">d</span> <span class="k">for</span> <span class="n">d</span> <span class="ow">in</span> <span class="n">derived</span><span class="p">)</span>
+
         <span class="k">if</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
                 <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_defaulted</span>
-                <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_from_variance</span><span class="p">):</span>
+                <span class="ow">and</span> <span class="ow">not</span> <span class="n">_is_derived</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">)):</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
                 <span class="s2">&quot;Both error_variance and error_cov are set. They are two &quot;</span>
                 <span class="s2">&quot;ways of stating the same thing: set one. (An error_cov that &quot;</span>
                 <span class="s2">&quot;initialize() derived from error_variance on an earlier call &quot;</span>
                 <span class="s2">&quot;does not count.)&quot;</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">go_error_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">_is_derived</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">go_error_cov</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;Both error_variance and go_error_cov are set. go_error_cov &quot;</span>
+                <span class="s2">&quot;exists only because error_cov is a constant that has to be &quot;</span>
+                <span class="s2">&quot;swapped with the goal-oriented grid; error_variance needs no &quot;</span>
+                <span class="s2">&quot;swap, since the goal-oriented grid has its own predictions &quot;</span>
+                <span class="s2">&quot;and therefore its own weights. Unset go_error_cov.&quot;</span>
             <span class="p">)</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
@@ -2017,7 +2103,7 @@
                 <span class="p">)</span>
             <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
 
-        <span class="n">variances</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">rel_sd</span><span class="p">,</span> <span class="n">abs_var</span> <span class="o">=</span> <span class="p">[],</span> <span class="p">[]</span>
         <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">names</span><span class="p">:</span>
             <span class="n">entry</span> <span class="o">=</span> <span class="n">spec</span><span class="p">[</span><span class="n">name</span><span class="p">]</span>
             <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">entry</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
@@ -2034,27 +2120,20 @@
                         <span class="sa">f</span><span class="s2">&quot;numerical guard: without it a response predicted &quot;</span>
                         <span class="sa">f</span><span class="s2">&quot;near zero gets an unbounded weight.&quot;</span>
                     <span class="p">)</span>
-                <span class="n">abs_sd</span> <span class="o">=</span> <span class="n">_num</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="s2">&quot;abs_sd&quot;</span><span class="p">],</span> <span class="s2">&quot;abs_sd&quot;</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
-                <span class="k">if</span> <span class="n">abs_sd</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="n">a_sd</span> <span class="o">=</span> <span class="n">_num</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="s2">&quot;abs_sd&quot;</span><span class="p">],</span> <span class="s2">&quot;abs_sd&quot;</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">a_sd</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
                     <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
                         <span class="sa">f</span><span class="s2">&quot;error_variance[&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39;]: abs_sd must be &gt; 0; got &quot;</span>
-                        <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">abs_sd</span><span class="si">}</span><span class="s2">. (A standard deviation, not a variance.)&quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">a_sd</span><span class="si">}</span><span class="s2">. (A standard deviation, not a variance.)&quot;</span>
                     <span class="p">)</span>
-                <span class="n">rel_sd</span> <span class="o">=</span> <span class="n">_num</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;rel_sd&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">),</span> <span class="s2">&quot;rel_sd&quot;</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
-                <span class="k">if</span> <span class="n">rel_sd</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="n">r_sd</span> <span class="o">=</span> <span class="n">_num</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;rel_sd&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">),</span> <span class="s2">&quot;rel_sd&quot;</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">r_sd</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
                     <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
                         <span class="sa">f</span><span class="s2">&quot;error_variance[&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39;]: rel_sd must be &gt;= 0; got &quot;</span>
-                        <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">rel_sd</span><span class="si">}</span><span class="s2">.&quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">r_sd</span><span class="si">}</span><span class="s2">.&quot;</span>
                     <span class="p">)</span>
-                <span class="k">if</span> <span class="n">rel_sd</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
-                    <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span>
-                        <span class="sa">f</span><span class="s2">&quot;error_variance[&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39;]: rel_sd &gt; 0 (a relative, &quot;</span>
-                        <span class="sa">f</span><span class="s2">&quot;prediction-dependent error) is not implemented yet. &quot;</span>
-                        <span class="sa">f</span><span class="s2">&quot;Only constant error is supported at this stage; &quot;</span>
-                        <span class="sa">f</span><span class="s2">&quot;ignoring rel_sd would silently give a homoscedastic &quot;</span>
-                        <span class="sa">f</span><span class="s2">&quot;design.&quot;</span>
-                    <span class="p">)</span>
-                <span class="n">variances</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">abs_sd</span> <span class="o">**</span> <span class="mi">2</span><span class="p">)</span>
+                <span class="n">rel_sd</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">r_sd</span><span class="p">)</span>
+                <span class="n">abs_var</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">a_sd</span> <span class="o">**</span> <span class="mi">2</span><span class="p">)</span>
             <span class="k">else</span><span class="p">:</span>
                 <span class="n">var</span> <span class="o">=</span> <span class="n">_num</span><span class="p">(</span><span class="n">entry</span><span class="p">,</span> <span class="s2">&quot;a bare value (a variance)&quot;</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
                 <span class="k">if</span> <span class="n">var</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
@@ -2062,12 +2141,144 @@
                         <span class="sa">f</span><span class="s2">&quot;error_variance[&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39;]: a bare number is a &quot;</span>
                         <span class="sa">f</span><span class="s2">&quot;variance and must be &gt; 0; got </span><span class="si">{</span><span class="n">var</span><span class="si">}</span><span class="s2">.&quot;</span>
                     <span class="p">)</span>
-                <span class="n">variances</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">var</span><span class="p">)</span>
+                <span class="n">rel_sd</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>
+                <span class="n">abs_var</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">var</span><span class="p">)</span>
 
-        <span class="n">cov</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">variances</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="o">=</span> <span class="n">cov</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_from_variance</span> <span class="o">=</span> <span class="n">cov</span>
+        <span class="n">het</span> <span class="o">=</span> <span class="nb">any</span><span class="p">(</span><span class="n">r</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">rel_sd</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ev_names</span> <span class="o">=</span> <span class="n">names</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ev_rel</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">rel_sd</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ev_abs_var</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">abs_var</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span> <span class="o">=</span> <span class="n">het</span>
+
+        <span class="n">new_cov</span> <span class="o">=</span> <span class="kc">None</span> <span class="k">if</span> <span class="n">het</span> <span class="k">else</span> <span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">abs_var</span><span class="p">)</span>
+        <span class="n">cur</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">new_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">_is_derived</span><span class="p">(</span><span class="n">cur</span><span class="p">)</span>
+                <span class="ow">and</span> <span class="n">np</span><span class="o">.</span><span class="n">array_equal</span><span class="p">(</span><span class="n">cur</span><span class="p">,</span> <span class="n">new_cov</span><span class="p">)):</span>
+            <span class="k">pass</span>    <span class="c1"># same constant error as before: keep the same object</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="o">=</span> <span class="n">new_cov</span>
+            <span class="k">if</span> <span class="n">new_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">derived</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">new_cov</span><span class="p">)</span>
+                <span class="k">del</span> <span class="n">derived</span><span class="p">[:</span><span class="o">-</span><span class="mi">8</span><span class="p">]</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_defaulted</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_error_weights</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Measurement weights ``1 / variance`` at predictions ``y``.</span>
+
+<span class="sd">        ``variance = (rel_sd * y) ** 2 + abs_sd ** 2`` per measured response</span>
+<span class="sd">        (the two-component error model of Rocke &amp; Lorenzato, 1995,</span>
+<span class="sd">        *Technometrics* 37(2):176-184). ``y`` has the measured responses on</span>
+<span class="sd">        its LAST axis, in ``response_names`` order; the result has the same</span>
+<span class="sd">        shape. Diagonal only.</span>
+
+<span class="sd">        A non-finite prediction gets weight 0, the same treatment as a</span>
+<span class="sd">        candidate whose sensitivities failed (it contributes no information).</span>
+
+<span class="sd">        Warns, without raising, on a negative prediction of a response with</span>
+<span class="sd">        ``rel_sd &gt; 0`` (the model is outside its physical range; the square</span>
+<span class="sd">        keeps the weight sign-safe) and when the weights of one response span</span>
+<span class="sd">        more than 1e6 across the grid, the signature of a prediction near zero</span>
+<span class="sd">        dominating the design.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_w</span>
+        <span class="n">y</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">y</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">y</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;predictions have </span><span class="si">{</span><span class="n">y</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="si">}</span><span class="s2"> response column(s) but &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="si">}</span><span class="s2"> response(s) are measured. error_variance needs &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;simulate() to return exactly the measured responses.&quot;</span>
+            <span class="p">)</span>
+        <span class="n">rel</span><span class="p">,</span> <span class="n">abs_var</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ev_rel</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ev_abs_var</span>
+        <span class="k">with</span> <span class="n">np</span><span class="o">.</span><span class="n">errstate</span><span class="p">(</span><span class="n">invalid</span><span class="o">=</span><span class="s2">&quot;ignore&quot;</span><span class="p">,</span> <span class="n">over</span><span class="o">=</span><span class="s2">&quot;ignore&quot;</span><span class="p">):</span>
+            <span class="n">var</span> <span class="o">=</span> <span class="p">(</span><span class="n">rel</span> <span class="o">*</span> <span class="n">y</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">+</span> <span class="n">abs_var</span>
+        <span class="n">ok</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">var</span><span class="p">)</span>
+        <span class="n">w</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">var</span><span class="p">)</span>
+        <span class="n">w</span><span class="p">[</span><span class="n">ok</span><span class="p">]</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="n">var</span><span class="p">[</span><span class="n">ok</span><span class="p">]</span>
+
+        <span class="n">neg</span> <span class="o">=</span> <span class="p">(</span><span class="n">y</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">rel</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">any</span><span class="p">(</span><span class="n">neg</span><span class="p">):</span>
+            <span class="n">bad</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">({</span><span class="bp">self</span><span class="o">.</span><span class="n">_ev_names</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">neg</span><span class="p">)[</span><span class="o">-</span><span class="mi">1</span><span class="p">]})</span>
+            <span class="n">_w</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;error_variance: negative predicted value(s) for </span><span class="si">{</span><span class="n">bad</span><span class="si">}</span><span class="s2">. The &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;model is being evaluated outside its physical range; the &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;weight uses the square and stays finite.&quot;</span><span class="p">,</span>
+                <span class="ne">RuntimeWarning</span><span class="p">,</span> <span class="n">stacklevel</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+        <span class="n">flat_w</span> <span class="o">=</span> <span class="n">w</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span>
+        <span class="n">flat_ok</span> <span class="o">=</span> <span class="n">ok</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">ok</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span>
+        <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]):</span>
+            <span class="n">wj</span> <span class="o">=</span> <span class="n">flat_w</span><span class="p">[</span><span class="n">flat_ok</span><span class="p">[:,</span> <span class="n">j</span><span class="p">],</span> <span class="n">j</span><span class="p">]</span>
+            <span class="k">if</span> <span class="n">wj</span><span class="o">.</span><span class="n">size</span> <span class="ow">and</span> <span class="n">wj</span><span class="o">.</span><span class="n">min</span><span class="p">()</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="ow">and</span> <span class="n">wj</span><span class="o">.</span><span class="n">max</span><span class="p">()</span> <span class="o">/</span> <span class="n">wj</span><span class="o">.</span><span class="n">min</span><span class="p">()</span> <span class="o">&gt;</span> <span class="mf">1e6</span><span class="p">:</span>
+                <span class="n">_w</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">&quot;error_variance: the weights of &#39;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_ev_names</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="si">}</span><span class="s2">&#39; &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;span </span><span class="si">{</span><span class="n">wj</span><span class="o">.</span><span class="n">max</span><span class="p">()</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">wj</span><span class="o">.</span><span class="n">min</span><span class="p">()</span><span class="si">:</span><span class="s2">.1e</span><span class="si">}</span><span class="s2"> across the grid. A &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;prediction near zero is probably dominating the &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;design; check abs_sd.&quot;</span><span class="p">,</span>
+                    <span class="ne">RuntimeWarning</span><span class="p">,</span> <span class="n">stacklevel</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">w</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_grid_error_weights</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Weights for the candidate grid: ``(n_c, n_spt, n_m_r)``.</span>
+
+<span class="sd">        Built from the nominal predictions recorded by</span>
+<span class="sd">        :meth:`eval_sensitivities` for the SAME evaluation that produced</span>
+<span class="sd">        ``self.sensitivities``. Every consumer of the grid weights (the FIM,</span>
+<span class="sd">        estimability, sensitivity diagnostics) calls this, so they cannot</span>
+<span class="sd">        disagree.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_grid_pred</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="s2">&quot;error_variance has rel_sd &gt; 0, so the weights are built from &quot;</span>
+                <span class="s2">&quot;the nominal predictions, but none are recorded for the &quot;</span>
+                <span class="s2">&quot;current sensitivities. They are recorded by &quot;</span>
+                <span class="s2">&quot;eval_sensitivities(store_predictions=True); sensitivities &quot;</span>
+                <span class="s2">&quot;loaded with load_sensitivity() carry none. Set &quot;</span>
+                <span class="s2">&quot;designer.sensitivities = None and recompute.&quot;</span>
+            <span class="p">)</span>
+        <span class="n">w</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_weights</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_grid_pred</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[:</span><span class="mi">2</span><span class="p">]</span> <span class="o">!=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;recorded predictions have grid shape </span><span class="si">{</span><span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[:</span><span class="mi">2</span><span class="p">]</span><span class="si">}</span><span class="s2"> but the &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;candidate grid is </span><span class="si">{</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="p">,</span><span class="w"> </span><span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span><span class="p">)</span><span class="si">}</span><span class="s2">; they are stale. &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;Set designer.sensitivities = None and recompute.&quot;</span>
+            <span class="p">)</span>
+        <span class="k">return</span> <span class="n">w</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_capture_grid_predictions</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">resp_start</span><span class="p">,</span> <span class="n">par_resp</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Record the nominal predictions of the grid just evaluated.</span>
+
+<span class="sd">        ``par_resp`` is the list of per-candidate responses from the parallel</span>
+<span class="sd">        IFT branch, which does not store them; otherwise they are read from</span>
+<span class="sd">        the blocks :meth:`_store_current_response` appended after</span>
+<span class="sd">        ``resp_start`` (``self.response`` ACCUMULATES across calls, so it is</span>
+<span class="sd">        sliced, never indexed from zero). Best effort when the error is</span>
+<span class="sd">        constant, since nothing then needs them; an error when it does.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">pred</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">err</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">par_resp</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">pred</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">([</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">r</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">par_resp</span><span class="p">])</span>
+            <span class="k">elif</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">response</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+                    <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">response</span><span class="p">)</span> <span class="o">-</span> <span class="n">resp_start</span> <span class="o">==</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="p">):</span>
+                <span class="n">pred</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">response</span><span class="p">[</span><span class="n">resp_start</span><span class="p">:],</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">pred</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">pred</span> <span class="o">=</span> <span class="n">pred</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">pred</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="p">:</span>
+                    <span class="n">err</span> <span class="o">=</span> <span class="p">(</span><span class="sa">f</span><span class="s2">&quot;simulate() returns </span><span class="si">{</span><span class="n">pred</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="si">}</span><span class="s2"> response &quot;</span>
+                           <span class="sa">f</span><span class="s2">&quot;column(s) but </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="si">}</span><span class="s2"> are measured; &quot;</span>
+                           <span class="sa">f</span><span class="s2">&quot;error_variance needs exactly the measured ones.&quot;</span><span class="p">)</span>
+                    <span class="n">pred</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>        <span class="c1"># noqa: BLE001 -- reported below if needed</span>
+            <span class="n">err</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;could not read the predictions (</span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">)&quot;</span>
+            <span class="n">pred</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="n">pred</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="s2">&quot;error_variance has rel_sd &gt; 0, which needs the nominal &quot;</span>
+                <span class="s2">&quot;predictions, and they were not available: &quot;</span>
+                <span class="o">+</span> <span class="p">(</span><span class="n">err</span> <span class="ow">or</span> <span class="s2">&quot;eval_sensitivities() ran with &quot;</span>
+                   <span class="s2">&quot;store_predictions=False.&quot;</span><span class="p">)</span>
+            <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_grid_pred</span> <span class="o">=</span> <span class="n">pred</span>
 
 <div class="viewcode-block" id="Designer.simulate_candidates">
 <a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.simulate_candidates">[docs]</a>
@@ -2427,12 +2638,19 @@
 
             <span class="k">try</span><span class="p">:</span>
                 <span class="k">if</span> <span class="n">_use_pyomo_ift</span><span class="p">:</span>
-                    <span class="n">_</span><span class="p">,</span> <span class="n">sens_k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_eval_sensitivities_pyomo_ift</span><span class="p">(</span>
+                    <span class="n">resp_k</span><span class="p">,</span> <span class="n">sens_k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_eval_sensitivities_pyomo_ift</span><span class="p">(</span>
                         <span class="bp">self</span><span class="o">.</span><span class="n">_current_tic</span><span class="p">,</span>
                         <span class="n">mp</span><span class="p">,</span>
                         <span class="n">store_predictions</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
                     <span class="p">)</span>
                 <span class="k">else</span><span class="p">:</span>
+                    <span class="n">resp_k</span> <span class="o">=</span> <span class="kc">None</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span><span class="p">:</span>
+                        <span class="c1"># nominal predictions AT THE PRIOR CONDITIONS, not the</span>
+                        <span class="c1"># candidate grid&#39;s: the weights are theirs</span>
+                        <span class="n">resp_k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_simulate_internal</span><span class="p">(</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_current_tic</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_tvc</span><span class="p">,</span> <span class="n">mp</span><span class="p">,</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_current_spt</span><span class="p">)</span>
                     <span class="n">sens_k</span> <span class="o">=</span> <span class="n">jacob_fun</span><span class="p">(</span><span class="n">mp</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
                     <span class="c1"># reshape to (n_spt, n_mr, n_mp)</span>
                     <span class="n">n_spt_k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_spt</span><span class="o">.</span><span class="n">size</span>
@@ -2460,9 +2678,13 @@
 
             <span class="c1"># accumulate FIM: sum over time points and responses</span>
             <span class="c1"># sens_k shape: (n_spt, n_mr, n_mp)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span><span class="p">:</span>
+                <span class="n">_w_k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_weights</span><span class="p">(</span>
+                    <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">resp_k</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">sens_k</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">))</span>
             <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">sens_k</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]):</span>
                 <span class="n">s</span> <span class="o">=</span> <span class="n">sens_k</span><span class="p">[</span><span class="n">t</span><span class="p">]</span>   <span class="c1"># (n_mr, n_mp)</span>
-                <span class="n">fim_prior</span> <span class="o">+=</span> <span class="n">repeats</span><span class="p">[</span><span class="n">k</span><span class="p">]</span> <span class="o">*</span> <span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">T</span> <span class="o">@</span> <span class="n">error_fim</span> <span class="o">@</span> <span class="n">s</span><span class="p">)</span>
+                <span class="n">_e</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">_w_k</span><span class="p">[</span><span class="n">t</span><span class="p">])</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span> <span class="k">else</span> <span class="n">error_fim</span>
+                <span class="n">fim_prior</span> <span class="o">+=</span> <span class="n">repeats</span><span class="p">[</span><span class="n">k</span><span class="p">]</span> <span class="o">*</span> <span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">T</span> <span class="o">@</span> <span class="n">_e</span> <span class="o">@</span> <span class="n">s</span><span class="p">)</span>
 
             <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">2</span><span class="p">:</span>
                 <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  [</span><span class="si">{</span><span class="n">k</span><span class="o">+</span><span class="mi">1</span><span class="si">}</span><span class="s2">/</span><span class="si">{</span><span class="n">n_prior</span><span class="si">}</span><span class="s2">] tic=</span><span class="si">{</span><span class="n">tic</span><span class="p">[</span><span class="n">k</span><span class="p">]</span><span class="si">}</span><span class="s2">  &quot;</span>
@@ -4719,6 +4941,14 @@
             <span class="s2">&quot;prior_fim&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_prior_fim</span><span class="p">,</span>
             <span class="s2">&quot;prior_fim_mp&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_prior_fim_mp</span><span class="p">,</span>
             <span class="s2">&quot;prior_n_exp&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_prior_n_exp</span><span class="p">,</span>
+            <span class="c1"># A criterion_value only means something under the weighting it</span>
+            <span class="c1"># was computed with, and with prediction-dependent error that is</span>
+            <span class="c1"># no longer one matrix. error_cov is None when the error is</span>
+            <span class="c1"># prediction-dependent (see error_variance).</span>
+            <span class="s2">&quot;error_variance&quot;</span><span class="p">:</span> <span class="n">copy</span><span class="o">.</span><span class="n">deepcopy</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span><span class="p">),</span>
+            <span class="s2">&quot;error_cov&quot;</span><span class="p">:</span> <span class="p">(</span><span class="kc">None</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="kc">None</span>
+                          <span class="k">else</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">)),</span>
+            <span class="s2">&quot;error_cov_defaulted&quot;</span><span class="p">:</span> <span class="nb">bool</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_defaulted</span><span class="p">),</span>
         <span class="p">}</span>
         <span class="k">if</span> <span class="n">write</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">write_oed_result</span><span class="p">()</span>
@@ -6948,6 +7178,11 @@
             <span class="bp">self</span><span class="o">.</span><span class="n">measurable_responses</span><span class="p">,</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="p">,</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">,</span>
+            <span class="c1"># Appended after the original ten, so a state written before these</span>
+            <span class="c1"># existed still loads and an older loader ignores them. A saved</span>
+            <span class="c1"># state never recorded the weighting it was computed under.</span>
+            <span class="n">copy</span><span class="o">.</span><span class="n">deepcopy</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span><span class="p">),</span>
+            <span class="kc">None</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_defaulted</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">,</span>
         <span class="p">]</span>
 
         <span class="n">designer_file</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;state&quot;</span>
@@ -6973,7 +7208,12 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">sampling_times_candidates</span> <span class="o">=</span> <span class="n">state</span><span class="p">[</span><span class="mi">6</span><span class="p">]</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">measurable_responses</span> <span class="o">=</span> <span class="n">state</span><span class="p">[</span><span class="mi">7</span><span class="p">]</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span> <span class="o">=</span> <span class="n">state</span><span class="p">[</span><span class="mi">8</span><span class="p">]</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">model_parameters</span> <span class="o">=</span> <span class="n">state</span><span class="p">[</span><span class="mi">9</span><span class="p">]</span></div>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model_parameters</span> <span class="o">=</span> <span class="n">state</span><span class="p">[</span><span class="mi">9</span><span class="p">]</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">state</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">10</span><span class="p">:</span>
+            <span class="c1"># an error_cov that was derived from error_variance is re-derived</span>
+            <span class="c1"># by initialize(); restoring both would trip the &quot;both set&quot; check</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span> <span class="o">=</span> <span class="n">state</span><span class="p">[</span><span class="mi">10</span><span class="p">]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="o">=</span> <span class="kc">None</span> <span class="k">if</span> <span class="n">state</span><span class="p">[</span><span class="mi">10</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">state</span><span class="p">[</span><span class="mi">11</span><span class="p">]</span></div>
 
 
 <div class="viewcode-block" id="Designer.save_responses">
@@ -7003,6 +7243,9 @@
 <span class="sd">            sens_path (str): Path relative to the current working directory.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">sensitivities</span> <span class="o">=</span> <span class="n">load</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="n">getcwd</span><span class="p">()</span> <span class="o">+</span> <span class="s2">&quot;/&quot;</span> <span class="o">+</span> <span class="n">sens_path</span><span class="p">,</span> <span class="s2">&quot;rb&quot;</span><span class="p">))</span>
+        <span class="c1"># a cached file carries no nominal predictions; the ones recorded for</span>
+        <span class="c1"># the sensitivities it replaced no longer belong to them</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_grid_pred</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_model_parameters_changed</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_candidates_changed</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">sensitivities</span></div>
@@ -7470,7 +7713,19 @@
             <span class="n">dw_spt</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="mf">0.0</span><span class="p">])</span>
 
         <span class="c1"># scaling vectors</span>
-        <span class="n">s_y</span>     <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">))</span>          <span class="c1"># length n_m_r</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span><span class="p">:</span>
+            <span class="c1"># per (dw point, time, response), from the predictions at dw below</span>
+            <span class="n">s_y</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">s_y</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">))</span>          <span class="c1"># length n_m_r</span>
+            <span class="n">_C</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">np</span><span class="o">.</span><span class="n">allclose</span><span class="p">(</span><span class="n">_C</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">_C</span><span class="p">)),</span> <span class="n">rtol</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">atol</span><span class="o">=</span><span class="mf">0.0</span><span class="p">):</span>
+                <span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_w</span>
+                <span class="n">_w</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span>
+                    <span class="s2">&quot;error_cov has off-diagonal terms, but the V-optimal W &quot;</span>
+                    <span class="s2">&quot;matrix scales rows by sqrt(diag(error_cov)) only: the &quot;</span>
+                    <span class="s2">&quot;correlations are ignored here (they are used by the FIM).&quot;</span><span class="p">,</span>
+                    <span class="ne">RuntimeWarning</span><span class="p">,</span> <span class="n">stacklevel</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
         <span class="n">s_theta</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">)</span>              <span class="c1"># length n_mp</span>
         <span class="c1"># avoid division by zero for parameters that are exactly 0</span>
         <span class="n">s_theta</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">s_theta</span> <span class="o">==</span> <span class="mi">0</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="n">s_theta</span><span class="p">)</span>
@@ -7513,7 +7768,8 @@
             <span class="c1"># V-optimal design at all. Gradient handles the scalar case and</span>
             <span class="c1"># returns shape (n_mp,), which reshapes to the (1, n_mp) row the</span>
             <span class="c1"># assembly below expects.</span>
-            <span class="n">n_out</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">atleast_1d</span><span class="p">(</span><span class="n">model_at_dw</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">))</span><span class="o">.</span><span class="n">size</span><span class="p">)</span>
+            <span class="n">y_nom</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">atleast_1d</span><span class="p">(</span><span class="n">model_at_dw</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">))</span>
+            <span class="n">n_out</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">y_nom</span><span class="o">.</span><span class="n">size</span><span class="p">)</span>
             <span class="k">if</span> <span class="n">n_out</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
                 <span class="n">grad_func</span> <span class="o">=</span> <span class="n">nd</span><span class="o">.</span><span class="n">Gradient</span><span class="p">(</span>
                     <span class="k">lambda</span> <span class="n">mp</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">atleast_1d</span><span class="p">(</span><span class="n">model_at_dw</span><span class="p">(</span><span class="n">mp</span><span class="p">))[</span><span class="mi">0</span><span class="p">]),</span>
@@ -7529,7 +7785,13 @@
             <span class="c1"># apply McAuley scaling: W_ij = S_ij * s_yi / s_theta_j</span>
             <span class="c1"># s_y tiles over spt dimension: [s_y0, s_y1, ..., s_y0, s_y1, ...]</span>
             <span class="n">n_spt_dw</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">dw_spt</span><span class="p">)</span>
-            <span class="n">s_y_tiled</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">s_y</span><span class="p">,</span> <span class="n">n_spt_dw</span><span class="p">)</span>                  <span class="c1"># (n_spt_dw * n_m_r,)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span><span class="p">:</span>
+                <span class="c1"># std dev of a measurement AT the predicted value at dw</span>
+                <span class="k">with</span> <span class="n">np</span><span class="o">.</span><span class="n">errstate</span><span class="p">(</span><span class="n">divide</span><span class="o">=</span><span class="s2">&quot;ignore&quot;</span><span class="p">):</span>
+                    <span class="n">s_y_tiled</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="mf">1.0</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_weights</span><span class="p">(</span>
+                        <span class="n">y_nom</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">n_spt_dw</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)))</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">s_y_tiled</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">s_y</span><span class="p">,</span> <span class="n">n_spt_dw</span><span class="p">)</span>              <span class="c1"># (n_spt_dw * n_m_r,)</span>
             <span class="n">W_w</span> <span class="o">=</span> <span class="n">S_w</span> <span class="o">*</span> <span class="p">(</span><span class="n">s_y_tiled</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">/</span> <span class="n">s_theta</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:])</span> <span class="c1"># (n_spt_dw * n_m_r, n_mp)</span>
 
             <span class="n">W_blocks</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">W_w</span><span class="p">)</span>
@@ -7733,6 +7995,9 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt_go</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt_go</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">simulate</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">go_simulate</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">go_simulate</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">simulate</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">go_sensitivities</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">sensitivities</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">sensitivities</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">go_sensitivities</span>
+        <span class="c1"># the nominal predictions belong to the sensitivities: the goal-oriented</span>
+        <span class="c1"># grid has its own, and therefore gets its own measurement weights</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_grid_pred</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_go_grid_pred</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_go_grid_pred</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_grid_pred</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">go_error_cov</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">go_error_cov</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span>
 
         <span class="c1"># Clear the per-grid buffers before re-initialising. The two grids have</span>
@@ -7973,6 +8238,20 @@
                     <span class="s2">&quot;where all_vars has the n_mp parameter Vars listed first.&quot;</span>
                 <span class="p">)</span>
 
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">store_predictions</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;error_variance has rel_sd &gt; 0, so the measurement weights are &quot;</span>
+                <span class="s2">&quot;built from the nominal predictions that eval_sensitivities() &quot;</span>
+                <span class="s2">&quot;records. store_predictions=False discards them; leaving it &quot;</span>
+                <span class="s2">&quot;True is required, and falling back to unweighted would &quot;</span>
+                <span class="s2">&quot;silently change the design.&quot;</span>
+            <span class="p">)</span>
+        <span class="c1"># self.response ACCUMULATES across calls, so remember where this</span>
+        <span class="c1"># call&#39;s blocks start. _par_resp carries the parallel IFT branch&#39;s</span>
+        <span class="c1"># responses, which that branch does not store.</span>
+        <span class="n">_resp_start</span> <span class="o">=</span> <span class="mi">0</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">response</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">response</span><span class="p">)</span>
+        <span class="n">_par_resp</span> <span class="o">=</span> <span class="kc">None</span>
+
         <span class="bp">self</span><span class="o">.</span><span class="n">_sensitivity_analysis_done</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">2</span><span class="p">:</span>
             <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;[Sensitivity Analysis]&#39;</span><span class="o">.</span><span class="n">center</span><span class="p">(</span><span class="mi">100</span><span class="p">,</span> <span class="s2">&quot;-&quot;</span><span class="p">))</span>
@@ -8075,6 +8354,10 @@
                 <span class="k">for</span> <span class="n">tic</span><span class="p">,</span> <span class="n">tvc</span><span class="p">,</span> <span class="n">spt</span> <span class="ow">in</span> <span class="n">candidates</span>
             <span class="p">)</span>
 
+            <span class="c1"># The workers return the nominal responses too (they cannot store</span>
+            <span class="c1"># them: they run in subprocesses). joblib returns results in input</span>
+            <span class="c1"># order, so these line up with the candidates.</span>
+            <span class="n">_par_resp</span> <span class="o">=</span> <span class="p">[</span><span class="n">_r</span> <span class="k">for</span> <span class="n">_r</span><span class="p">,</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">results</span><span class="p">]</span>
             <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="p">(</span><span class="n">temp_resp</span><span class="p">,</span> <span class="n">temp_sens</span><span class="p">)</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">results</span><span class="p">):</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">sensitivities</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="p">:]</span> <span class="o">=</span> <span class="n">temp_sens</span>
                 <span class="n">candidate_sens_times</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>  <span class="c1"># timing not meaningful in parallel</span>
@@ -8205,6 +8488,10 @@
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">2</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_report_freq</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span>
             <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="o">.</span><span class="n">center</span><span class="p">(</span><span class="mi">100</span><span class="p">,</span> <span class="s2">&quot;-&quot;</span><span class="p">))</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_sensitivity_analysis_time</span> <span class="o">+=</span> <span class="n">finish</span> <span class="o">-</span> <span class="n">start</span>
+
+        <span class="c1"># Record the nominal predictions of THIS grid next to the sensitivities</span>
+        <span class="c1"># they belong to: the measurement weights are evaluated from them.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_capture_grid_predictions</span><span class="p">(</span><span class="n">_resp_start</span><span class="p">,</span> <span class="n">_par_resp</span><span class="p">)</span>
 
         <span class="c1"># Unreachable while ragged candidate grids are refused (Open Item 20);</span>
         <span class="c1"># _var_n_sampling_time is only ever set False. Kept deliberately.</span>
@@ -8511,10 +8798,17 @@
         <span class="n">n_c</span><span class="p">,</span> <span class="n">n_spt</span><span class="p">,</span> <span class="n">n_mr</span><span class="p">,</span> <span class="n">n_mp</span> <span class="o">=</span> <span class="n">S</span><span class="o">.</span><span class="n">shape</span>
         <span class="n">Z_ud</span> <span class="o">=</span> <span class="n">S</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">n_c</span> <span class="o">*</span> <span class="n">n_spt</span> <span class="o">*</span> <span class="n">n_mr</span><span class="p">,</span> <span class="n">n_mp</span><span class="p">)</span>
 
-        <span class="n">weighted</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">getattr</span><span class="p">(</span>
-            <span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;_error_cov_defaulted&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
+        <span class="c1"># Prediction-dependent error: the weights are per (candidate, time,</span>
+        <span class="c1"># response), from the SAME array the FIM uses (_grid_error_weights).</span>
+        <span class="n">_Wg</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_grid_error_weights</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span> <span class="k">else</span> <span class="kc">None</span>
+        <span class="n">weighted</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span> <span class="ow">or</span> <span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">getattr</span><span class="p">(</span>
+                <span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;_error_cov_defaulted&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">))</span>
         <span class="n">Z_w</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="k">if</span> <span class="n">weighted</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span><span class="p">:</span>
+            <span class="c1"># row weighting is per-row 1/sigma: simpler than the matrix path</span>
+            <span class="n">Z_w</span> <span class="o">=</span> <span class="p">(</span><span class="n">S</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">_Wg</span><span class="p">)[</span><span class="o">...</span><span class="p">,</span> <span class="kc">None</span><span class="p">])</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">n_c</span> <span class="o">*</span> <span class="n">n_spt</span> <span class="o">*</span> <span class="n">n_mr</span><span class="p">,</span> <span class="n">n_mp</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="n">weighted</span><span class="p">:</span>
             <span class="c1"># row weighting needs Sigma^(-1/2), NOT inv(Sigma); they coincide</span>
             <span class="c1"># only when Sigma is the identity</span>
             <span class="n">C</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
@@ -8606,12 +8900,15 @@
         <span class="c1"># Costs one einsum on an array already in memory: measured at 31 us</span>
         <span class="c1"># against 16.6 s of sensitivity analysis on a 9-parameter model, i.e.</span>
         <span class="c1"># 0.0002% of the cost of getting here.</span>
-        <span class="k">try</span><span class="p">:</span>
-            <span class="n">_efim</span> <span class="o">=</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">))</span>
-                     <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="n">n_mr</span><span class="p">))</span>
-        <span class="k">except</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">LinAlgError</span><span class="p">:</span>
-            <span class="n">_efim</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="n">n_mr</span><span class="p">)</span>
-        <span class="n">abs_info</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;ktrj,rq,ktqj-&gt;j&quot;</span><span class="p">,</span> <span class="n">S_scaled</span><span class="p">,</span> <span class="n">_efim</span><span class="p">,</span> <span class="n">S_scaled</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span><span class="p">:</span>
+            <span class="n">abs_info</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;ktrj,ktr,ktrj-&gt;j&quot;</span><span class="p">,</span> <span class="n">S_scaled</span><span class="p">,</span> <span class="n">_Wg</span><span class="p">,</span> <span class="n">S_scaled</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">_efim</span> <span class="o">=</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">))</span>
+                         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="n">n_mr</span><span class="p">))</span>
+            <span class="k">except</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">LinAlgError</span><span class="p">:</span>
+                <span class="n">_efim</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="n">n_mr</span><span class="p">)</span>
+            <span class="n">abs_info</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;ktrj,rq,ktqj-&gt;j&quot;</span><span class="p">,</span> <span class="n">S_scaled</span><span class="p">,</span> <span class="n">_efim</span><span class="p">,</span> <span class="n">S_scaled</span><span class="p">)</span>
 
         <span class="n">grp_idx</span> <span class="o">=</span> <span class="n">_groups</span><span class="p">(</span><span class="n">C</span><span class="p">,</span> <span class="n">corr_tol</span><span class="p">)</span>
         <span class="n">sweep</span> <span class="o">=</span> <span class="p">[(</span><span class="n">t</span><span class="p">,</span> <span class="n">_groups</span><span class="p">(</span><span class="n">C</span><span class="p">,</span> <span class="n">t</span><span class="p">))</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="p">(</span><span class="mf">0.99</span><span class="p">,</span> <span class="mf">0.98</span><span class="p">,</span> <span class="mf">0.95</span><span class="p">,</span> <span class="mf">0.90</span><span class="p">,</span> <span class="mf">0.80</span><span class="p">)]</span>
@@ -8704,7 +9001,9 @@
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  columns        : raw d(prediction)/d(parameter), no scaling &quot;</span>
               <span class="sa">f</span><span class="s2">&quot;by parameter value&quot;</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">w</span><span class="p">:</span>
-            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  row weighting  : error_cov as supplied — reporting BOTH &quot;</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  row weighting  : &quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;error_variance&#39;</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span><span class="w"> </span><span class="ow">is</span><span class="w"> </span><span class="ow">not</span><span class="w"> </span><span class="kc">None</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="s1">&#39;error_cov&#39;</span><span class="si">}</span><span class="s2">&quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot; as supplied — reporting BOTH &quot;</span>
                   <span class="sa">f</span><span class="s2">&quot;indices&quot;</span><span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  row weighting  : none (error_cov not supplied, or not &quot;</span>
@@ -8815,7 +9114,8 @@
         <span class="n">names</span> <span class="o">=</span> <span class="n">out</span><span class="p">[</span><span class="s2">&quot;corr_names&quot;</span><span class="p">]</span>
         <span class="n">C</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">out</span><span class="p">[</span><span class="s2">&quot;corr_matrix&quot;</span><span class="p">])</span>   <span class="c1"># NOT out[&quot;correlation&quot;], which is a</span>
         <span class="n">p</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">names</span><span class="p">)</span>                       <span class="c1"># DataFrame -&gt; C[i, j] raises KeyError</span>
-        <span class="n">tag</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;weighted by error_cov&quot;</span> <span class="k">if</span> <span class="n">out</span><span class="p">[</span><span class="s2">&quot;weighted&quot;</span><span class="p">]</span>
+        <span class="n">tag</span> <span class="o">=</span> <span class="p">((</span><span class="s2">&quot;weighted by error_variance&quot;</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+                <span class="k">else</span> <span class="s2">&quot;weighted by error_cov&quot;</span><span class="p">)</span> <span class="k">if</span> <span class="n">out</span><span class="p">[</span><span class="s2">&quot;weighted&quot;</span><span class="p">]</span>
                <span class="k">else</span> <span class="s2">&quot;unweighted (error_cov not supplied)&quot;</span><span class="p">)</span>
         <span class="nb">print</span><span class="p">()</span>
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  PARAMETER CORRELATION   (</span><span class="si">{</span><span class="n">tag</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">)</span>
@@ -9004,7 +9304,8 @@
         <span class="n">ax</span><span class="o">.</span><span class="n">set_yticks</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">p</span><span class="p">))</span>
         <span class="n">ax</span><span class="o">.</span><span class="n">set_xticklabels</span><span class="p">(</span><span class="n">names_all</span><span class="p">,</span> <span class="n">rotation</span><span class="o">=</span><span class="mi">45</span><span class="p">,</span> <span class="n">ha</span><span class="o">=</span><span class="s2">&quot;right&quot;</span><span class="p">,</span> <span class="n">fontsize</span><span class="o">=</span><span class="n">tick_fs</span><span class="p">)</span>
         <span class="n">ax</span><span class="o">.</span><span class="n">set_yticklabels</span><span class="p">(</span><span class="n">names_all</span><span class="p">,</span> <span class="n">fontsize</span><span class="o">=</span><span class="n">tick_fs</span><span class="p">)</span>
-        <span class="n">tag</span> <span class="o">=</span> <span class="s2">&quot;weighted by error_cov&quot;</span> <span class="k">if</span> <span class="n">weighted</span> <span class="k">else</span> <span class="s2">&quot;unweighted&quot;</span>
+        <span class="n">tag</span> <span class="o">=</span> <span class="p">((</span><span class="s2">&quot;weighted by error_variance&quot;</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+                <span class="k">else</span> <span class="s2">&quot;weighted by error_cov&quot;</span><span class="p">)</span> <span class="k">if</span> <span class="n">weighted</span> <span class="k">else</span> <span class="s2">&quot;unweighted&quot;</span><span class="p">)</span>
         <span class="c1"># Group membership in the subtitle only when it is unambiguously short.</span>
         <span class="c1">#</span>
         <span class="c1"># Counting CHARACTERS is the wrong test: &quot;$\theta_{10}$&quot; is 13 source</span>
@@ -9346,6 +9647,7 @@
         <span class="p">)</span>
 
         <span class="c1"># --- error FIM ---</span>
+        <span class="n">_Wd</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_grid_error_weights</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span> <span class="k">else</span> <span class="kc">None</span>
         <span class="n">err_fim</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_fim</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_fim</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="p">)</span>
 
         <span class="c1"># --- measurable responses only ---</span>
@@ -9364,7 +9666,8 @@
             <span class="n">A_c</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">n_mp</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_mp</span><span class="p">))</span>
             <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">sens_m</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]):</span>
                 <span class="n">S_t</span> <span class="o">=</span> <span class="n">sens_m</span><span class="p">[</span><span class="n">c</span><span class="p">,</span> <span class="n">t</span><span class="p">]</span>            <span class="c1"># (n_m_r, n_mp)</span>
-                <span class="n">A_c</span> <span class="o">+=</span> <span class="n">S_t</span><span class="o">.</span><span class="n">T</span> <span class="o">@</span> <span class="n">err_fim</span> <span class="o">@</span> <span class="n">S_t</span>  <span class="c1"># (n_mp, n_mp)</span>
+                <span class="n">_e</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">_Wd</span><span class="p">[</span><span class="n">c</span><span class="p">,</span> <span class="n">t</span><span class="p">])</span> <span class="k">if</span> <span class="n">_Wd</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">err_fim</span>
+                <span class="n">A_c</span> <span class="o">+=</span> <span class="n">S_t</span><span class="o">.</span><span class="n">T</span> <span class="o">@</span> <span class="n">_e</span> <span class="o">@</span> <span class="n">S_t</span>  <span class="c1"># (n_mp, n_mp)</span>
             <span class="n">diag_A</span><span class="p">[</span><span class="n">c</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">A_c</span><span class="p">)</span>
 
             <span class="c1"># eigenvalues (symmetric matrix — use eigvalsh for stability)</span>
@@ -9620,6 +9923,17 @@
 <span class="w">        </span><span class="sd">&quot;&quot;&quot; evaluate fim &quot;&quot;&quot;</span>
         <span class="n">start</span> <span class="o">=</span> <span class="n">time</span><span class="p">()</span>
 
+        <span class="c1"># The measurement weight entering each atomic FIM. Constant error: the</span>
+        <span class="c1"># one precomputed error_fim, exactly as before. Prediction-dependent</span>
+        <span class="c1"># error: diag(1/variance) per (candidate, sampling time), from the</span>
+        <span class="c1"># nominal predictions recorded with these sensitivities. This is the</span>
+        <span class="c1"># single site where W enters the FIM.</span>
+        <span class="n">_W</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_grid_error_weights</span><span class="p">()</span>
+              <span class="k">if</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_error_het</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compute_atomics</span><span class="p">)</span> <span class="k">else</span> <span class="kc">None</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">_emat</span><span class="p">(</span><span class="n">c</span><span class="p">,</span> <span class="n">t</span><span class="p">):</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_fim</span> <span class="k">if</span> <span class="n">_W</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">_W</span><span class="p">[</span><span class="n">c</span><span class="p">,</span> <span class="n">t</span><span class="p">])</span>
+
         <span class="c1"># reshape efforts to (n_c, n_spt) for iteration</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_specified_n_spt</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">efforts</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">efforts</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt_comb</span><span class="p">))</span>
@@ -9669,7 +9983,8 @@
                             <span class="n">_atom_fim</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">n_mp</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_mp</span><span class="p">))</span>
                         <span class="k">else</span><span class="p">:</span>
                             <span class="n">_atom_fim</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span>
-                                <span class="n">_s</span><span class="o">.</span><span class="n">T</span> <span class="o">@</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_fim</span> <span class="o">@</span> <span class="n">_s</span> <span class="k">for</span> <span class="n">_s</span> <span class="ow">in</span> <span class="n">_s_comb</span>
+                                <span class="n">_s</span><span class="o">.</span><span class="n">T</span> <span class="o">@</span> <span class="n">_emat</span><span class="p">(</span><span class="n">c</span><span class="p">,</span> <span class="n">_t</span><span class="p">)</span> <span class="o">@</span> <span class="n">_s</span>
+                                <span class="k">for</span> <span class="n">_s</span><span class="p">,</span> <span class="n">_t</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">_s_comb</span><span class="p">,</span> <span class="n">spt</span><span class="p">)</span>
                             <span class="p">)</span>
                         <span class="bp">self</span><span class="o">.</span><span class="n">fim</span> <span class="o">+=</span> <span class="n">e</span> <span class="o">*</span> <span class="n">_atom_fim</span>
                         <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_large_memory_requirement</span><span class="p">:</span>
@@ -9680,7 +9995,7 @@
             <span class="k">else</span><span class="p">:</span>
                 <span class="k">for</span> <span class="n">c</span><span class="p">,</span> <span class="p">(</span><span class="n">eff</span><span class="p">,</span> <span class="n">sen</span><span class="p">)</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="nb">zip</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">efforts</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">sensitivities</span><span class="p">)):</span>
                     <span class="k">for</span> <span class="n">spt</span><span class="p">,</span> <span class="p">(</span><span class="n">e</span><span class="p">,</span> <span class="n">s</span><span class="p">)</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="nb">zip</span><span class="p">(</span><span class="n">eff</span><span class="p">,</span> <span class="n">sen</span><span class="p">)):</span>
-                        <span class="n">add_candidates</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">e</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_fim</span><span class="p">)</span>
+                        <span class="n">add_candidates</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">e</span><span class="p">,</span> <span class="n">_emat</span><span class="p">(</span><span class="n">c</span><span class="p">,</span> <span class="n">spt</span><span class="p">))</span>
             <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_save_atomics</span> <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_bayesian</span><span class="p">:</span>
                 <span class="n">sens_file</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;atomics_</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="si">}</span><span class="s2">_cand&quot;</span>
                 <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dynamic_system</span><span class="p">:</span>
@@ -9823,6 +10138,7 @@
                     <span class="kn">import</span><span class="w"> </span><span class="nn">types</span><span class="o">,</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_np</span>
                     <span class="n">mp</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">mp</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
                     <span class="n">sens_scr</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">empty</span><span class="p">((</span><span class="nb">len</span><span class="p">(</span><span class="n">tic_list_</span><span class="p">),</span> <span class="n">n_spt__</span><span class="p">,</span> <span class="n">n_mr_</span><span class="p">,</span> <span class="n">n_mp__</span><span class="p">))</span>
+                    <span class="n">resp_scr</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">empty</span><span class="p">((</span><span class="nb">len</span><span class="p">(</span><span class="n">tic_list_</span><span class="p">),</span> <span class="n">n_spt__</span><span class="p">,</span> <span class="n">n_mr_</span><span class="p">))</span>
                     <span class="k">for</span> <span class="n">c</span><span class="p">,</span> <span class="n">tic</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">tic_list_</span><span class="p">):</span>
                         <span class="c1"># _eval_sensitivities_pyomo_ift gates the</span>
                         <span class="c1"># sampling_times kwarg on _dynamic_system. That flag was</span>
@@ -9860,16 +10176,20 @@
                             <span class="n">pyomo_output_var_name</span> <span class="o">=</span> <span class="n">out_names_</span><span class="p">,</span>
                             <span class="n">n_m_r</span>                 <span class="o">=</span> <span class="n">n_mr_</span><span class="p">,</span>
                         <span class="p">)</span>
-                        <span class="n">_</span><span class="p">,</span> <span class="n">sens</span> <span class="o">=</span> <span class="n">Designer</span><span class="o">.</span><span class="n">_eval_sensitivities_pyomo_ift</span><span class="p">(</span>
+                        <span class="n">resp_c</span><span class="p">,</span> <span class="n">sens</span> <span class="o">=</span> <span class="n">Designer</span><span class="o">.</span><span class="n">_eval_sensitivities_pyomo_ift</span><span class="p">(</span>
                             <span class="n">fake</span><span class="p">,</span> <span class="n">tic</span><span class="p">,</span> <span class="n">mp</span><span class="p">,</span> <span class="n">store_predictions</span><span class="o">=</span><span class="kc">False</span>
                         <span class="p">)</span>
                         <span class="n">sens_scr</span><span class="p">[</span><span class="n">c</span><span class="p">]</span> <span class="o">=</span> <span class="n">sens</span>
+                        <span class="c1"># nominal responses, for the measurement weights; the</span>
+                        <span class="c1"># worker cannot store them on the designer</span>
+                        <span class="n">resp_scr</span><span class="p">[</span><span class="n">c</span><span class="p">]</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">resp_c</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span>
+                            <span class="n">n_spt__</span><span class="p">,</span> <span class="n">n_mr_</span><span class="p">)</span>
                     <span class="c1"># Apply parameter-value normalization (S_ij *= theta_j)</span>
                     <span class="c1"># This mirrors the _norm_sens_by_params step in eval_sensitivities</span>
                     <span class="c1"># which is bypassed when skip_sens_eval=True.</span>
                     <span class="k">if</span> <span class="n">norm_sens</span><span class="p">:</span>
                         <span class="n">sens_scr</span> <span class="o">*=</span> <span class="n">mp</span><span class="p">[</span><span class="n">_np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">,</span> <span class="n">_np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">,</span> <span class="n">_np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">,</span> <span class="p">:]</span>
-                    <span class="k">return</span> <span class="n">scr</span><span class="p">,</span> <span class="n">sens_scr</span>
+                    <span class="k">return</span> <span class="n">scr</span><span class="p">,</span> <span class="n">sens_scr</span><span class="p">,</span> <span class="n">resp_scr</span>
 
                 <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
                     <span class="nb">print</span><span class="p">(</span>
@@ -9891,14 +10211,17 @@
                     <span class="k">for</span> <span class="n">scr</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_scr</span><span class="p">)</span>
                 <span class="p">)</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">_sensitivity_analysis_time</span> <span class="o">=</span> <span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">_pb_par_start</span>
-                <span class="k">for</span> <span class="n">scr</span><span class="p">,</span> <span class="n">sens_scr</span> <span class="ow">in</span> <span class="n">raw</span><span class="p">:</span>
+                <span class="n">scr_pred</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">empty</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">n_scr</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_c</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_spt</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="p">))</span>
+                <span class="k">for</span> <span class="n">scr</span><span class="p">,</span> <span class="n">sens_scr</span><span class="p">,</span> <span class="n">resp_scr</span> <span class="ow">in</span> <span class="n">raw</span><span class="p">:</span>
                     <span class="n">scr_sens</span><span class="p">[</span><span class="n">scr</span><span class="p">]</span> <span class="o">=</span> <span class="n">sens_scr</span>
+                    <span class="n">scr_pred</span><span class="p">[</span><span class="n">scr</span><span class="p">]</span> <span class="o">=</span> <span class="n">resp_scr</span>
 
                 <span class="c1"># Build per-scenario FIMs from the collected sensitivities</span>
                 <span class="k">for</span> <span class="n">scr</span><span class="p">,</span> <span class="n">mp</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model_parameters</span><span class="p">):</span>
                     <span class="bp">self</span><span class="o">.</span><span class="n">_current_scr</span>     <span class="o">=</span> <span class="n">scr</span>
                     <span class="bp">self</span><span class="o">.</span><span class="n">_current_scr_mp</span>  <span class="o">=</span> <span class="n">mp</span>
                     <span class="bp">self</span><span class="o">.</span><span class="n">sensitivities</span>    <span class="o">=</span> <span class="n">scr_sens</span><span class="p">[</span><span class="n">scr</span><span class="p">]</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_grid_pred</span>       <span class="o">=</span> <span class="n">scr_pred</span><span class="p">[</span><span class="n">scr</span><span class="p">]</span>
                     <span class="bp">self</span><span class="o">.</span><span class="n">atomic_fims</span>      <span class="o">=</span> <span class="kc">None</span>
                     <span class="bp">self</span><span class="o">.</span><span class="n">_eval_fim</span><span class="p">(</span><span class="n">efforts</span><span class="p">,</span> <span class="n">store_predictions</span><span class="p">,</span>
                                    <span class="n">skip_sens_eval</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>

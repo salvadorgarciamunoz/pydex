@@ -77,6 +77,13 @@ Capabilities exercised (in order)
  53.  STATIC model with MULTIPLE responses
  54.  run_estimability — FD and exact IFT vs an ANALYTIC reference
  55.  b_opt_criterion (bracketing-optimal) vs EXHAUSTIVE enumeration
+ 56.  Fixed sampling grid vs a static multi-response reformulation
+ 57.  apportion() for the non-D criteria
+ 58.  Static sampling-times shape, and the state round trip
+ 59.  V-optimal guards
+ 60.  V-optimal FIM path agreement (FD vs IFT), W vs closed form
+ 61.  error_variance — prediction-dependent weights on FD, exact IFT and
+      pseudo-Bayesian paths, against a closed form
 
 Runner behaviour
 ----------------
@@ -5649,6 +5656,192 @@ def test_60_v_optimal_fim_path_agreement():
         "testing nothing"
     ok("the design is non-uniform (the solve did something)")
 
+def test_61_error_variance_weights():
+    """
+    61 — error_variance with rel_sd > 0: prediction-dependent measurement
+    weights on the FD, exact-IFT (sequential AND parallel) and pseudo-Bayesian
+    paths, checked against a closed form.
+
+    WHY THIS SECTION EXISTS
+    -----------------------
+    The measurement weight W = 1 / ((rel_sd * y)**2 + abs_sd**2) is built from
+    the NOMINAL predictions recorded by eval_sensitivities(). The solver-free
+    tests in tests/ cover the FD path against arithmetic, but three paths need
+    Pyomo, the ASL and ipopt and so cannot be there:
+
+      * the parallel exact-IFT branch (n_jobs=-1, which initialize() sets
+        whenever pyomo_model_fn is given, i.e. the DEFAULT exact-IFT
+        configuration). Its workers cannot store predictions on the designer,
+        and before this change nothing recorded them;
+      * the pseudo-Bayesian flat-parallel scenario path, which has its own
+        worker and its own copy of the same gap;
+      * the whole pipeline, design_experiment() through ipopt.
+
+    THE REFERENCE
+    -------------
+    y = A0 * exp(-k t), so with sensitivities normalised by parameter value
+    (pydex's default) s = (-k t y, y) and
+
+        FIM = sum_c e_c * s_c s_c^T / ((rel_sd * y_c)**2 + abs_sd**2)
+
+    written out below with no pydex code. The final assertion is the strongest:
+    the criterion value ipopt reports must equal log det of THAT matrix at the
+    efforts it returns.
+    """
+    section("61 — error_variance: prediction-dependent weights, FD / IFT / pseudo-Bayesian")
+
+    # Not a silent skip: a section that self-skips goes green while testing
+    # nothing, so a missing prerequisite is a failure here.
+    if not _PYOMO_AVAILABLE:
+        raise RuntimeError("section 61 needs Pyomo")
+    from pyomo.contrib.pynumero.asl import AmplInterface
+    if not AmplInterface.available():
+        raise RuntimeError("section 61 needs PyNumero's ASL (exact IFT path)")
+    if not pyo.SolverFactory("ipopt").available(exception_flag=False):
+        raise RuntimeError("section 61 needs ipopt")
+
+    REL, ABS = 0.10, 0.05
+    SPEC = {"A": {"rel_sd": REL, "abs_sd": ABS}}
+    ts   = np.linspace(0.0, 10.0, 6)
+    eff  = np.array([0.30, 0.20, 0.20, 0.10, 0.10, 0.10]).reshape(6, 1)
+
+    def hand_fim(theta, efforts, rel=REL, floor=ABS):
+        k, A0 = theta
+        F = np.zeros((2, 2))
+        for t, e in zip(ts, np.ravel(efforts)):
+            y = A0 * np.exp(-k * t)
+            # d y/d A0 * A0 = y, because y is proportional to A0
+            s = np.array([-k * t * y, y])
+            F += e * np.outer(s, s) / ((rel * y) ** 2 + floor ** 2)
+        return F
+
+    def ift_designer(theta, n_jobs):
+        d = _make_pyomo_designer(theta, n_candidates=6)
+        d.response_names = ["A"]
+        d.error_variance = SPEC
+        d.n_jobs = n_jobs
+        d.initialize(verbose=0)
+        return d
+
+    def rel_err(a, b):
+        a, b = np.asarray(a), np.asarray(b)
+        return float(np.max(np.abs(a - b) / np.abs(b)))
+
+    theta = np.array([0.3, 2.0])
+    H = hand_fim(theta, eff)
+
+    # ── exact IFT, the DEFAULT configuration (parallel) ──────────────────────
+    d_par = ift_designer(theta, -1)
+    assert d_par.n_jobs == -1 and d_par.use_pyomo_ift, (d_par.n_jobs, d_par.use_pyomo_ift)
+    ok("default exact-IFT configuration: n_jobs=-1, use_pyomo_ift=True")
+    F_par = np.asarray(d_par.eval_fim(eff))
+    assert d_par._grid_pred is not None and d_par._grid_pred.shape == (6, 1, 1), \
+        "the parallel IFT branch recorded no nominal predictions"
+    ok(f"parallel IFT recorded the nominal predictions, shape {d_par._grid_pred.shape}")
+    assert d_par.error_cov is None and d_par.error_fim is None
+    ok("prediction-dependent error leaves error_cov / error_fim None")
+
+    e_par = rel_err(F_par, H)
+    assert e_par < 1e-6, f"parallel IFT FIM differs from the closed form: {e_par:.2e}"
+    ok(f"parallel IFT FIM vs closed form: {e_par:.2e}")
+
+    d_seq = ift_designer(theta, 1)
+    F_seq = np.asarray(d_seq.eval_fim(eff))
+    e_ps = rel_err(F_par, F_seq)
+    assert e_ps < 1e-12, f"parallel and sequential IFT disagree: {e_ps:.2e}"
+    ok(f"parallel vs sequential IFT FIM: {e_ps:.2e}")
+
+    # The weighting must matter, or every agreement above is vacuous.
+    flat = hand_fim(theta, eff, rel=0.0)
+    assert rel_err(H, flat) > 1e-2, "the fixture cannot tell relative from constant error"
+    ok(f"the weighting is not a no-op: {rel_err(H, flat):.1%} away from abs_sd alone")
+
+    # ── pseudo-Bayesian, exact IFT: the flat-parallel scenario path ──────────
+    scr = np.array([[0.30, 2.0], [0.40, 1.8], [0.25, 2.3]])
+    for nj in (-1, 1):
+        d = _make_pyomo_designer(scr, n_candidates=6)
+        d.response_names = ["A"]
+        d.error_variance = SPEC
+        d.n_jobs = nj
+        d.initialize(verbose=0)
+        d._pseudo_bayesian_type = 0
+        d.eval_fim(eff)
+        worst = max(rel_err(d.scr_fims[i], hand_fim(scr[i], eff)) for i in range(len(scr)))
+        assert worst < 1e-6, f"n_jobs={nj}: per-scenario FIM off the closed form by {worst:.2e}"
+        ok(f"pseudo-Bayesian IFT n_jobs={nj:>2}: each scenario uses ITS OWN "
+           f"predictions, worst {worst:.2e}")
+
+    # ── the whole pipeline: design_experiment() through ipopt ────────────────
+    def fd_designer(spec):
+        d = Designer()
+        d.simulate               = _simulate_1st_order
+        d.model_parameters       = theta
+        d.model_parameter_names  = ["k", "A0"]
+        d.response_names         = ["A"]
+        d.ti_controls_candidates = ts.reshape(-1, 1)
+        d.error_variance         = spec
+        d.initialize(verbose=0)
+        return d
+
+    solve = dict(solver="ipopt",
+                 solver_options={"linear_solver": LINEAR_SOLVER,
+                                 "tol": 1e-10, "max_iter": 3000})
+    d_het = fd_designer(SPEC)
+    d_het.design_experiment(d_het.d_opt_criterion, write=False, **solve)
+    # capture BEFORE any reporting call: printing a design mutates it (notes)
+    e_het = np.array(d_het.efforts, dtype=float).ravel()
+    crit  = float(d_het._criterion_value)
+    ref   = float(np.linalg.slogdet(hand_fim(theta, e_het))[1])
+    assert abs(crit - ref) / abs(ref) < 1e-6, (crit, ref)
+    ok(f"criterion {crit:.8f} == log det of the closed-form FIM at the returned efforts")
+
+    d_flat = fd_designer({"A": {"abs_sd": ABS}})
+    d_flat.design_experiment(d_flat.d_opt_criterion, write=False, **solve)
+    e_flat = np.array(d_flat.efforts, dtype=float).ravel()
+    assert np.max(np.abs(e_het - e_flat)) > 1e-3, \
+        "relative error did not move the design: the weights are not reaching the solver"
+    ok(f"the design moves under relative error: max |de| = {np.max(np.abs(e_het - e_flat)):.3f}")
+
+    r = d_het.oed_result
+    assert r["error_variance"] == SPEC and r["error_cov"] is None
+    ok("oed_result records the error specification")
+
+    # ── n_spt = k: the combination branch, one weight per sampling TIME ──────
+    TS4, C2 = np.array([0.5, 1.0, 2.0, 4.0]), np.array([1.0, 2.0])
+    TH2 = np.array([0.5, 1.5])
+
+    def _dyn_sim(ti_controls, sampling_times, model_parameters):
+        k, a = model_parameters
+        t = np.asarray(sampling_times, dtype=float)
+        return (a * ti_controls[0] * np.exp(-k * t)).reshape(-1, 1)
+
+    def _atom(c, t):
+        k, a = TH2
+        y = a * c * np.exp(-k * t)
+        s = np.array([-k * t * y, y])
+        return np.outer(s, s) / ((REL * y) ** 2 + ABS ** 2)
+
+    dd = Designer()
+    dd.simulate = _dyn_sim
+    dd.model_parameters = TH2
+    dd.model_parameter_names = ["k", "A0"]
+    dd.response_names = ["A"]
+    dd.ti_controls_candidates = C2.reshape(-1, 1)
+    dd.sampling_times_candidates = np.tile(TS4, (2, 1))
+    dd.error_variance = SPEC
+    dd.initialize(verbose=0)
+    dd.design_experiment(dd.d_opt_criterion, n_spt=2, write=False, **solve)
+    worst, idx = 0.0, 0
+    for c in range(dd.n_c):
+        for comb in dd.spt_candidates_combs[c]:
+            h = sum(_atom(C2[c], TS4[t]) for t in comb)
+            worst = max(worst, rel_err(dd.atomic_fims[idx], h))
+            idx += 1
+    assert idx == 12 and worst < 1e-8, (idx, worst)
+    ok(f"n_spt=2: all {idx} combination atoms use the weight of each of their "
+       f"times, worst {worst:.2e}")
+
+
 if __name__ == "__main__":
     print("\n" + "\u2588"*70)
     print("  pydex full capability test")
@@ -5745,6 +5938,7 @@ if __name__ == "__main__":
     run(test_58_static_sampling_times_shape_and_state_roundtrip)
     run(test_59_v_optimal_guards)
     run(test_60_v_optimal_fim_path_agreement)
+    run(test_61_error_variance_weights)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print_pyomo_noise_summary()

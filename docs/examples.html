@@ -63,6 +63,7 @@
 <li class="toctree-l3"><a class="reference internal" href="#running-them">Running them</a></li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="#measurement-error">Measurement error</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#asl-elimination">ASL elimination</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#jupyter-notebooks">Jupyter notebooks</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#the-simplest-design-problem">The simplest design problem</a></li>
@@ -539,6 +540,21 @@ on these instances is perfect — four independent brute-force cross-checks
 agreeing exactly — but that is empirical evidence about these problems, not
 a proof.</p>
 </section>
+</section>
+<section id="measurement-error">
+<h2>Measurement error<a class="headerlink" href="#measurement-error" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">examples/error_model/</span></code> — the first-order decay designed under a constant and
+under a relative measurement error, using the name-keyed <code class="docutils literal notranslate"><span class="pre">error_variance</span></code>.
+With <code class="docutils literal notranslate"><span class="pre">k</span> <span class="pre">=</span> <span class="pre">0.5</span></code> the constant-error design is <code class="docutils literal notranslate"><span class="pre">{0,</span> <span class="pre">2.0}</span></code>; with <code class="docutils literal notranslate"><span class="pre">rel_sd</span> <span class="pre">=</span>
+<span class="pre">0.05</span></code> the second sampling time moves to 2.8, 4.4 or 7.0 as <code class="docutils literal notranslate"><span class="pre">abs_sd</span></code> falls
+from 0.02 to 0.005 to 0.001.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">relative_error_design.py</span></code></p></li>
+</ul>
+<p>The floor, <code class="docutils literal notranslate"><span class="pre">abs_sd</span></code>, is what bounds how late the design will go, so it is the
+number to get right: it is the instrument’s absolute precision near zero, not
+its limit of quantification. The script ends with a misspelt response name
+being refused, because the keys are matched against <code class="docutils literal notranslate"><span class="pre">response_names</span></code> exactly.</p>
 </section>
 <section id="asl-elimination">
 <h2>ASL elimination<a class="headerlink" href="#asl-elimination" title="Link to this heading"></a></h2>

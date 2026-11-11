@@ -446,6 +446,56 @@ designer.design_experiment(
 )
 ```
 
+### Measurement error
+
+```python
+designer.response_names = ["conc", "temp", "yield"]    # one per MEASURED response
+designer.error_variance = {
+    "conc":  {"rel_sd": 0.05, "abs_sd": 0.5},    # 5% relative, 0.5-unit floor
+    "temp":  {"abs_sd": 0.2},                    # constant standard deviation
+    "yield": 0.01,                               # a bare number is a VARIANCE
+}
+```
+
+The keys are matched **by name** against `response_names`, exactly, so the order
+of the dict is irrelevant and an unknown name or a missing measured response
+raises. That is the point: `error_cov` is a matrix indexed by *position*, and a
+mis-ordered one on a multi-response model silently changes every design.
+`error_cov` still works unchanged; setting both raises.
+
+A measurement of a response predicted at `y` has variance
+
+    variance = (rel_sd * y)**2 + abs_sd**2
+
+(the two-component error model of Rocke & Lorenzato, 1995), and the weight in the
+FIM is its reciprocal, evaluated once per (candidate, sampling time) at the
+*nominal* prediction. This matters because most analytics have substantially
+relative error: under a constant variance a late, small reading carries the same
+weight as an early, large one, and since choosing *when to measure* is what pydex
+is for, that weighting decides the answer. `examples/error_model/` shows the
+second sampling time of a first-order decay moving from 2.0 to as late as 7.0.
+
+Choosing the numbers — both are **one standard deviation**:
+
+- `"±10%"` quoted as a 95% interval is `rel_sd = 0.05`, not 0.10.
+- `abs_sd` is the instrument's absolute precision near zero (baseline, blank
+  variability). It is **not** the limit of quantification: LOQ is conventionally
+  about 10σ, so divide it by ten. It must be > 0, because without a floor a
+  response predicted near zero gets an unbounded weight and the design chases it.
+  pydex warns when one response's weights span more than 1e6 across the grid.
+  The design is sensitive to it, so do not guess.
+
+Limits worth knowing. The entries are diagonal: correlated errors still need
+`error_cov`. pydex computes the weighted-least-squares information matrix, not
+the full Gaussian FIM, which carries an extra term when the variance depends on
+the parameters; it is neglected deliberately (about `2·CV²` of the information:
+0.5% at 5% CV, 2% at 10%). With the exact-IFT path you get exact `∂y/∂θ`
+combined with a weight from a nominal prediction. `eval_sensitivities()` must
+run with `store_predictions=True`, the default, because the predictions are what
+the weights are built from; `go_error_cov` cannot be combined with
+`error_variance`, since the goal-oriented grid has its own predictions and so
+gets its own weights.
+
 ### Sequential design (accounting for prior experiments)
 
 Register what you already know before designing the next round — either a
@@ -653,6 +703,15 @@ already executed audits the data in hand instead. `set_prior_experiments()`
 then hands pydex the completed runs, and the design targets what is still
 loose. Needs an NLP solver only — `solver="pounce"` works with nothing beyond
 pip, and nothing is written to disk.
+
+### `examples/error_model/` — when relative measurement error moves the design
+
+A first-order decay measured with `error_variance`. The same model is designed under a
+constant error and under a relative one, and the second sampling time moves later as
+`abs_sd` shrinks (2.0 → 2.8 → 4.4 → 7.0), which is why `abs_sd` is not a number to
+guess. Ends by showing a misspelt response name refused rather than guessed.
+
+- `relative_error_design.py`
 
 ### `examples/jupyter/` — introductory notebooks
 

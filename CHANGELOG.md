@@ -5,6 +5,84 @@ All notable changes to this fork are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`designer.error_variance`: a name-keyed, per-response measurement error
+  model.** `error_cov` is a matrix indexed by position and never checked
+  against `response_names`, so a mis-ordered covariance on a multi-response
+  model silently changed every design. `error_variance` is keyed by response
+  name, matched exactly, so order cannot be wrong by construction: an unknown
+  name, a missing measured response, `abs_sd <= 0` or setting both
+  `error_variance` and `error_cov` all raise.
+
+  Each entry is a bare number (a variance, as `error_cov`) or
+  `{"abs_sd": ..., "rel_sd": ...}`, both **standard deviations**. A
+  measurement predicted at `y` has variance `(rel_sd * y)**2 + abs_sd**2` (the
+  two-component model of Rocke & Lorenzato, 1995) and the FIM weight is its
+  reciprocal, evaluated once per (candidate, sampling time) at the nominal
+  prediction. With every `rel_sd` zero the result is bit-identical to the
+  equivalent `error_cov`. With any `rel_sd > 0`, `error_cov` and `error_fim`
+  are `None` and the weights are built from predictions at every consumer: the
+  FIM, `set_prior_experiments()` (at the prior conditions' predictions),
+  `_eval_W_matrix()` (at the `dw` predictions), `run_estimability()` and
+  `diagnose_sensitivity()`. This is the weighted-least-squares information
+  matrix, not the full Gaussian FIM; the neglected term is about `2*CV**2`.
+
+  `oed_result` records `error_variance`, `error_cov` and
+  `error_cov_defaulted`. `save_state()` now writes the error specification
+  after the original ten entries; a state saved before this still loads, and
+  an older loader ignores the extras. Until now a saved state never recorded
+  the weighting it was computed under.
+
+  See `examples/error_model/`, and the choice of numbers in the class
+  docstring: `"+/-10%"` quoted as a 95% interval is `rel_sd = 0.05`, and
+  `abs_sd` is the instrument's absolute precision near zero, not the limit of
+  quantification.
+
+### Changed
+
+- `eval_sensitivities()` now records the nominal predictions of the grid it
+  evaluated (`designer._grid_pred`), alongside the sensitivities they belong
+  to. The parallel exact-IFT branch (`n_jobs != 1`, which `initialize()` sets
+  whenever `pyomo_model_fn` is given) and the pseudo-Bayesian flat-parallel
+  scenario path previously discarded the responses their workers returned;
+  they are now kept. `designer.response` is not affected.
+- `_eval_W_matrix()` warns when `error_cov` has off-diagonal terms. It scales
+  rows by `sqrt(diag(error_cov))` only, so the correlations were being ignored
+  silently. The scaling is unchanged; which factor is right for a correlated
+  `error_cov` is a mathematical decision that needs a closed-form reference.
+
+### Known issues
+
+- A strict measured subset (`n_m_r < n_r`) fails in `eval_sensitivities()`
+  with a broadcast error under finite differences, because the sensitivity
+  rows follow the columns `simulate()` returns and are not re-indexed by
+  `measurable_responses`. `response_names[self.measurable_responses[row]]` in
+  the sensitivity plots indexes the measured-subset array with a full-set
+  index for the same reason. Both pre-date `error_variance`, which follows the
+  measured-subset convention and raises a clear error on a width mismatch.
+- A permuted `measurable_responses` is positional in the FIM and in
+  `_eval_W_matrix()` but follows `simulate()` column order in one and the
+  measured order in the other. Not changed here.
+- `designer.response` is populated by the sequential paths but left `None` by
+  the parallel exact-IFT branch and the pseudo-Bayesian flat-parallel path
+  (`n_jobs != 1`, the default whenever `pyomo_model_fn` is set), whose workers
+  cannot store it. Where it IS populated its shape depends on the path: for a
+  single response the sequential IFT blocks are `(n_c, n_spt, 1, 1)` against
+  the finite-difference `(n_c, n_spt, 1)`, so the plotting code's
+  `response[:, :, i]` reads a different shape. Populating `response` on the
+  parallel paths would hand the default IFT user that shape in place of the
+  `simulate_candidates()` fallback, so it was not done here; `error_variance`
+  takes the nominal predictions from the workers' return values instead
+  (`designer._grid_pred`). Fixing the shape and populating `response`
+  everywhere is the clean resolution and a separate change.
+- `designer.response` accumulates across repeated `eval_sensitivities()`
+  calls (a second call appends a second block per candidate). Left as it is
+  to avoid changing anything for existing callers; the new code slices from
+  the start of each call instead of relying on it.
+
 ## [0.8.0] - 2026-09-30
 
 ### Removed
