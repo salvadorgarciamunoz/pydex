@@ -137,7 +137,7 @@ sampling times, schedules and efforts. Also cached on
 <code class="xref py py-attr docutils literal notranslate"><span class="pre">optimal_candidates</span></code>.</p>
 <p>For anything you intend to export or hand over, prefer
 <a class="reference internal" href="api.html#pydex.core.designer.Designer.get_optimal_candidates_table" title="pydex.core.designer.Designer.get_optimal_candidates_table"><code class="xref py py-meth docutils literal notranslate"><span class="pre">get_optimal_candidates_table()</span></code></a>, which
-returns a tidy <a class="reference external" href="https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.html#pandas.DataFrame" title="(in pandas v3.0.6)"><code class="xref py py-class docutils literal notranslate"><span class="pre">pandas.DataFrame</span></code></a> with one row per experiment to run:</p>
+returns a tidy <a class="reference external" href="https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.html#pandas.DataFrame" title="(in pandas v3.1)"><code class="xref py py-class docutils literal notranslate"><span class="pre">pandas.DataFrame</span></code></a> with one row per experiment to run:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">designer</span><span class="o">.</span><span class="n">ti_controls_names</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;x1&quot;</span><span class="p">,</span> <span class="s2">&quot;x2&quot;</span><span class="p">]</span>
 <span class="o">...</span>
 <span class="n">designer</span><span class="o">.</span><span class="n">get_optimal_candidates_table</span><span class="p">()</span>

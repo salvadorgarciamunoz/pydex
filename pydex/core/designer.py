@@ -847,6 +847,20 @@ class Designer:
     :attr:`_RENAMED_ATTRIBUTES`.
 
     Attributes:
+        error_variance (dict or None): Measurement error, keyed BY RESPONSE
+            NAME rather than by position. Keys are matched exactly against
+            ``response_names`` (one name per MEASURED response); an unknown
+            name or a missing measured response raises, and the order of the
+            dict does not matter. Each value is a bare number (a VARIANCE, as
+            in ``error_cov``) or a dict ``{"abs_sd": ..., "rel_sd": ...}``
+            whose entries are STANDARD DEVIATIONS: ``abs_sd`` in the
+            response's own units, required and > 0; ``rel_sd`` dimensionless,
+            >= 0. Resolved by :meth:`initialize` into the equivalent diagonal
+            ``error_cov``, so ``{"P": 0.09}`` and ``np.diag([0.09])`` give
+            identical designs. Setting both ``error_variance`` and
+            ``error_cov`` raises. Diagonal only: correlated errors need
+            ``error_cov``. At present only constant error is supported, and a
+            positive ``rel_sd`` raises ``NotImplementedError``.
         rounding_efficiency (float or None): Set by :meth:`apportion`. The
             criterion value of the rounded design as a fraction of the
             continuous one, for the criteria that have a standard relative
@@ -929,6 +943,12 @@ class Designer:
         self.error_cov = None
         self._error_cov_defaulted = False
         self.error_fim = None
+        # Name-keyed measurement error (see the class docstring). Resolved by
+        # initialize() into a constant error_cov/error_fim; the array it
+        # derived is kept so a second initialize() can tell "error_cov is the
+        # one I derived" from "the user also set error_cov".
+        self.error_variance = None
+        self._error_cov_from_variance = None
 
         """ goal_oriented_ds"""
         self.n_c_go = None
@@ -1770,6 +1790,12 @@ class Designer:
                           "all parameters reachable.")
         # ─────────────────────────────────────────────────────────────────────
 
+        if self.error_variance is not None:
+            # Validates and resolves BY NAME; sets error_cov. Runs before the
+            # identity default below so a name-keyed model is never replaced by
+            # one, and before error_fim is inverted from it.
+            self._resolve_error_variance()
+
         if self.error_cov is None:
             print(
                 f"[WARNING]: because the error_cov is not given, Pydex defaults to the "
@@ -1808,11 +1834,152 @@ class Designer:
             if self._dynamic_controls:
                 print(f"{'Number of time-varying controls':<40}: {self.n_tvc}")
             print(f"{'Covariance of measured responses':<40}: \n {self.error_cov}")
+            if self.error_variance is not None:
+                print(f"{'Error model (error_variance)':<40}: "
+                      f"{self.error_variance}")
             print(f"{'Pyomo IFT sensitivities':<40}: {self.use_pyomo_ift}")
             print(f"{'Parallel workers (n_jobs)':<40}: {self.n_jobs}")
             print("".center(100, "="))
 
         return self._status
+
+    def _resolve_error_variance(self):
+        """Resolve :attr:`error_variance` into a constant ``error_cov``.
+
+        Keys are matched BY NAME, exactly, against :attr:`response_names`
+        (the same rule ``interest_parameters`` follows against
+        ``model_parameter_names``), so the order of the dict is irrelevant and
+        a mis-ordered covariance cannot happen. One entry per MEASURED
+        response: ``response_names`` has ``n_m_r`` entries, one per measured
+        response in the order of the rows of ``error_cov``.
+
+        Each entry is either a bare number (a VARIANCE, as ``error_cov``) or a
+        dict with ``abs_sd`` (required, > 0) and ``rel_sd`` (optional, >= 0),
+        both STANDARD DEVIATIONS. This step supports the constant case only:
+        a positive ``rel_sd`` raises :class:`NotImplementedError` rather than
+        being accepted and ignored, because ignoring it would return a
+        homoscedastic design under a label that claims otherwise.
+
+        Sets ``error_cov`` to ``diag(variances)`` in ``response_names`` order,
+        so every consumer of ``error_cov`` sees exactly what the equivalent
+        hand-written matrix would give.
+
+        Raises:
+            ValueError: Both ``error_variance`` and ``error_cov`` were set; the
+                structure is not a dict of the expected form; a name is
+                unknown or a measured response is missing; ``abs_sd <= 0`` or
+                absent; ``rel_sd < 0``; a value is not a finite number.
+            NotImplementedError: ``rel_sd > 0`` (not yet supported).
+        """
+        spec = self.error_variance
+        if (self.error_cov is not None
+                and not self._error_cov_defaulted
+                and self.error_cov is not self._error_cov_from_variance):
+            raise ValueError(
+                "Both error_variance and error_cov are set. They are two "
+                "ways of stating the same thing: set one. (An error_cov that "
+                "initialize() derived from error_variance on an earlier call "
+                "does not count.)"
+            )
+        if not isinstance(spec, dict):
+            raise ValueError(
+                "error_variance must be a dict keyed by response name, e.g. "
+                "{'conc': {'abs_sd': 0.5}, 'yield': 0.01}; got "
+                f"{type(spec).__name__}."
+            )
+        if self.response_names is None:
+            raise ValueError(
+                "error_variance is keyed by response name but "
+                "designer.response_names is not set."
+            )
+
+        names = [str(n) for n in self.response_names]
+        if len(names) != self.n_m_r:
+            raise ValueError(
+                f"response_names has {len(names)} entries but {self.n_m_r} "
+                f"response(s) are measured. error_variance is keyed by the "
+                f"MEASURED responses only -- one name per measured response, "
+                f"in the order of the rows of error_cov."
+            )
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"response_names {names} contains duplicates, so an "
+                f"error_variance key cannot be matched to one response."
+            )
+        unknown = [k for k in spec if k not in names]
+        if unknown:
+            raise ValueError(
+                f"error_variance: {unknown} not found in response_names "
+                f"{names}. Names must match exactly."
+            )
+        missing = [n for n in names if n not in spec]
+        if missing:
+            raise ValueError(
+                f"error_variance has no entry for measured response(s) "
+                f"{missing}. Give one entry per measured response."
+            )
+
+        def _num(x, what, name):
+            if (isinstance(x, (bool, np.bool_))
+                    or not isinstance(x, (int, float, np.integer, np.floating))
+                    or not np.isfinite(x)):
+                raise ValueError(
+                    f"error_variance['{name}']: {what} must be a finite "
+                    f"number; got {x!r}."
+                )
+            return float(x)
+
+        variances = []
+        for name in names:
+            entry = spec[name]
+            if isinstance(entry, dict):
+                bad = [k for k in entry if k not in ("rel_sd", "abs_sd")]
+                if bad:
+                    raise ValueError(
+                        f"error_variance['{name}']: unknown key(s) {bad}; "
+                        f"the keys are 'rel_sd' and 'abs_sd'."
+                    )
+                if "abs_sd" not in entry:
+                    raise ValueError(
+                        f"error_variance['{name}']: 'abs_sd' is required and "
+                        f"must be > 0. It is the additive error floor, not a "
+                        f"numerical guard: without it a response predicted "
+                        f"near zero gets an unbounded weight."
+                    )
+                abs_sd = _num(entry["abs_sd"], "abs_sd", name)
+                if abs_sd <= 0:
+                    raise ValueError(
+                        f"error_variance['{name}']: abs_sd must be > 0; got "
+                        f"{abs_sd}. (A standard deviation, not a variance.)"
+                    )
+                rel_sd = _num(entry.get("rel_sd", 0.0), "rel_sd", name)
+                if rel_sd < 0:
+                    raise ValueError(
+                        f"error_variance['{name}']: rel_sd must be >= 0; got "
+                        f"{rel_sd}."
+                    )
+                if rel_sd > 0:
+                    raise NotImplementedError(
+                        f"error_variance['{name}']: rel_sd > 0 (a relative, "
+                        f"prediction-dependent error) is not implemented yet. "
+                        f"Only constant error is supported at this stage; "
+                        f"ignoring rel_sd would silently give a homoscedastic "
+                        f"design."
+                    )
+                variances.append(abs_sd ** 2)
+            else:
+                var = _num(entry, "a bare value (a variance)", name)
+                if var <= 0:
+                    raise ValueError(
+                        f"error_variance['{name}']: a bare number is a "
+                        f"variance and must be > 0; got {var}."
+                    )
+                variances.append(var)
+
+        cov = np.diag(variances)
+        self.error_cov = cov
+        self._error_cov_from_variance = cov
+        self._error_cov_defaulted = False
 
     def simulate_candidates(self, store_predictions=True,
                             plot_simulation_times=False):

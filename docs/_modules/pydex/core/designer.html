@@ -5,14 +5,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>pydex.core.designer &mdash; pydex 0.7.6 documentation</title>
+  <title>pydex.core.designer &mdash; pydex 0.8.0 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
 
   
       <script src="../../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="../../../_static/documentation_options.js?v=918ced64"></script>
+      <script src="../../../_static/documentation_options.js?v=486e5634"></script>
       <script src="../../../_static/doctools.js?v=9bcbadda"></script>
       <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../../../_static/js/theme.js"></script>
@@ -42,6 +42,7 @@
               <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../reading_the_design.html">Reading the design</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../examples.html">Examples</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api.html">API Reference</a></li>
 </ul>
@@ -922,6 +923,20 @@
 <span class="sd">    :attr:`_RENAMED_ATTRIBUTES`.</span>
 
 <span class="sd">    Attributes:</span>
+<span class="sd">        error_variance (dict or None): Measurement error, keyed BY RESPONSE</span>
+<span class="sd">            NAME rather than by position. Keys are matched exactly against</span>
+<span class="sd">            ``response_names`` (one name per MEASURED response); an unknown</span>
+<span class="sd">            name or a missing measured response raises, and the order of the</span>
+<span class="sd">            dict does not matter. Each value is a bare number (a VARIANCE, as</span>
+<span class="sd">            in ``error_cov``) or a dict ``{&quot;abs_sd&quot;: ..., &quot;rel_sd&quot;: ...}``</span>
+<span class="sd">            whose entries are STANDARD DEVIATIONS: ``abs_sd`` in the</span>
+<span class="sd">            response&#39;s own units, required and &gt; 0; ``rel_sd`` dimensionless,</span>
+<span class="sd">            &gt;= 0. Resolved by :meth:`initialize` into the equivalent diagonal</span>
+<span class="sd">            ``error_cov``, so ``{&quot;P&quot;: 0.09}`` and ``np.diag([0.09])`` give</span>
+<span class="sd">            identical designs. Setting both ``error_variance`` and</span>
+<span class="sd">            ``error_cov`` raises. Diagonal only: correlated errors need</span>
+<span class="sd">            ``error_cov``. At present only constant error is supported, and a</span>
+<span class="sd">            positive ``rel_sd`` raises ``NotImplementedError``.</span>
 <span class="sd">        rounding_efficiency (float or None): Set by :meth:`apportion`. The</span>
 <span class="sd">            criterion value of the rounded design as a fraction of the</span>
 <span class="sd">            continuous one, for the criteria that have a standard relative</span>
@@ -1006,6 +1021,12 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_defaulted</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">error_fim</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="c1"># Name-keyed measurement error (see the class docstring). Resolved by</span>
+        <span class="c1"># initialize() into a constant error_cov/error_fim; the array it</span>
+        <span class="c1"># derived is kept so a second initialize() can tell &quot;error_cov is the</span>
+        <span class="c1"># one I derived&quot; from &quot;the user also set error_cov&quot;.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_from_variance</span> <span class="o">=</span> <span class="kc">None</span>
 
 <span class="w">        </span><span class="sd">&quot;&quot;&quot; goal_oriented_ds&quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">n_c_go</span> <span class="o">=</span> <span class="kc">None</span>
@@ -1856,6 +1877,12 @@
                           <span class="s2">&quot;all parameters reachable.&quot;</span><span class="p">)</span>
         <span class="c1"># ─────────────────────────────────────────────────────────────────────</span>
 
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="c1"># Validates and resolves BY NAME; sets error_cov. Runs before the</span>
+            <span class="c1"># identity default below so a name-keyed model is never replaced by</span>
+            <span class="c1"># one, and before error_fim is inverted from it.</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_resolve_error_variance</span><span class="p">()</span>
+
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="nb">print</span><span class="p">(</span>
                 <span class="sa">f</span><span class="s2">&quot;[WARNING]: because the error_cov is not given, Pydex defaults to the &quot;</span>
@@ -1894,12 +1921,153 @@
             <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dynamic_controls</span><span class="p">:</span>
                 <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Number of time-varying controls&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_tvc</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Covariance of measured responses&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="se">\n</span><span class="s2"> </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Error model (error_variance)&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: &quot;</span>
+                      <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Pyomo IFT sensitivities&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">use_pyomo_ift</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;Parallel workers (n_jobs)&#39;</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_jobs</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
             <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="o">.</span><span class="n">center</span><span class="p">(</span><span class="mi">100</span><span class="p">,</span> <span class="s2">&quot;=&quot;</span><span class="p">))</span>
 
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_status</span></div>
 
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_resolve_error_variance</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Resolve :attr:`error_variance` into a constant ``error_cov``.</span>
+
+<span class="sd">        Keys are matched BY NAME, exactly, against :attr:`response_names`</span>
+<span class="sd">        (the same rule ``interest_parameters`` follows against</span>
+<span class="sd">        ``model_parameter_names``), so the order of the dict is irrelevant and</span>
+<span class="sd">        a mis-ordered covariance cannot happen. One entry per MEASURED</span>
+<span class="sd">        response: ``response_names`` has ``n_m_r`` entries, one per measured</span>
+<span class="sd">        response in the order of the rows of ``error_cov``.</span>
+
+<span class="sd">        Each entry is either a bare number (a VARIANCE, as ``error_cov``) or a</span>
+<span class="sd">        dict with ``abs_sd`` (required, &gt; 0) and ``rel_sd`` (optional, &gt;= 0),</span>
+<span class="sd">        both STANDARD DEVIATIONS. This step supports the constant case only:</span>
+<span class="sd">        a positive ``rel_sd`` raises :class:`NotImplementedError` rather than</span>
+<span class="sd">        being accepted and ignored, because ignoring it would return a</span>
+<span class="sd">        homoscedastic design under a label that claims otherwise.</span>
+
+<span class="sd">        Sets ``error_cov`` to ``diag(variances)`` in ``response_names`` order,</span>
+<span class="sd">        so every consumer of ``error_cov`` sees exactly what the equivalent</span>
+<span class="sd">        hand-written matrix would give.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            ValueError: Both ``error_variance`` and ``error_cov`` were set; the</span>
+<span class="sd">                structure is not a dict of the expected form; a name is</span>
+<span class="sd">                unknown or a measured response is missing; ``abs_sd &lt;= 0`` or</span>
+<span class="sd">                absent; ``rel_sd &lt; 0``; a value is not a finite number.</span>
+<span class="sd">            NotImplementedError: ``rel_sd &gt; 0`` (not yet supported).</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">spec</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_variance</span>
+        <span class="k">if</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+                <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_defaulted</span>
+                <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_from_variance</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;Both error_variance and error_cov are set. They are two &quot;</span>
+                <span class="s2">&quot;ways of stating the same thing: set one. (An error_cov that &quot;</span>
+                <span class="s2">&quot;initialize() derived from error_variance on an earlier call &quot;</span>
+                <span class="s2">&quot;does not count.)&quot;</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;error_variance must be a dict keyed by response name, e.g. &quot;</span>
+                <span class="s2">&quot;{&#39;conc&#39;: {&#39;abs_sd&#39;: 0.5}, &#39;yield&#39;: 0.01}; got &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">spec</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s2">.&quot;</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">response_names</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;error_variance is keyed by response name but &quot;</span>
+                <span class="s2">&quot;designer.response_names is not set.&quot;</span>
+            <span class="p">)</span>
+
+        <span class="n">names</span> <span class="o">=</span> <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">n</span><span class="p">)</span> <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">response_names</span><span class="p">]</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">names</span><span class="p">)</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;response_names has </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">names</span><span class="p">)</span><span class="si">}</span><span class="s2"> entries but </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="si">}</span><span class="s2"> &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;response(s) are measured. error_variance is keyed by the &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;MEASURED responses only -- one name per measured response, &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;in the order of the rows of error_cov.&quot;</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">names</span><span class="p">))</span> <span class="o">!=</span> <span class="nb">len</span><span class="p">(</span><span class="n">names</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;response_names </span><span class="si">{</span><span class="n">names</span><span class="si">}</span><span class="s2"> contains duplicates, so an &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;error_variance key cannot be matched to one response.&quot;</span>
+            <span class="p">)</span>
+        <span class="n">unknown</span> <span class="o">=</span> <span class="p">[</span><span class="n">k</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">spec</span> <span class="k">if</span> <span class="n">k</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">names</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">unknown</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;error_variance: </span><span class="si">{</span><span class="n">unknown</span><span class="si">}</span><span class="s2"> not found in response_names &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">names</span><span class="si">}</span><span class="s2">. Names must match exactly.&quot;</span>
+            <span class="p">)</span>
+        <span class="n">missing</span> <span class="o">=</span> <span class="p">[</span><span class="n">n</span> <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="n">names</span> <span class="k">if</span> <span class="n">n</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">spec</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">missing</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;error_variance has no entry for measured response(s) &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">missing</span><span class="si">}</span><span class="s2">. Give one entry per measured response.&quot;</span>
+            <span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">_num</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">what</span><span class="p">,</span> <span class="n">name</span><span class="p">):</span>
+            <span class="k">if</span> <span class="p">(</span><span class="nb">isinstance</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="p">(</span><span class="nb">bool</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">bool_</span><span class="p">))</span>
+                    <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="p">(</span><span class="nb">int</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">integer</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">floating</span><span class="p">))</span>
+                    <span class="ow">or</span> <span class="ow">not</span> <span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">x</span><span class="p">)):</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">&quot;error_variance[&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39;]: </span><span class="si">{</span><span class="n">what</span><span class="si">}</span><span class="s2"> must be a finite &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;number; got </span><span class="si">{</span><span class="n">x</span><span class="si">!r}</span><span class="s2">.&quot;</span>
+                <span class="p">)</span>
+            <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+
+        <span class="n">variances</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">names</span><span class="p">:</span>
+            <span class="n">entry</span> <span class="o">=</span> <span class="n">spec</span><span class="p">[</span><span class="n">name</span><span class="p">]</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">entry</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+                <span class="n">bad</span> <span class="o">=</span> <span class="p">[</span><span class="n">k</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">entry</span> <span class="k">if</span> <span class="n">k</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;rel_sd&quot;</span><span class="p">,</span> <span class="s2">&quot;abs_sd&quot;</span><span class="p">)]</span>
+                <span class="k">if</span> <span class="n">bad</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">&quot;error_variance[&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39;]: unknown key(s) </span><span class="si">{</span><span class="n">bad</span><span class="si">}</span><span class="s2">; &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;the keys are &#39;rel_sd&#39; and &#39;abs_sd&#39;.&quot;</span>
+                    <span class="p">)</span>
+                <span class="k">if</span> <span class="s2">&quot;abs_sd&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">entry</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">&quot;error_variance[&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39;]: &#39;abs_sd&#39; is required and &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;must be &gt; 0. It is the additive error floor, not a &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;numerical guard: without it a response predicted &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;near zero gets an unbounded weight.&quot;</span>
+                    <span class="p">)</span>
+                <span class="n">abs_sd</span> <span class="o">=</span> <span class="n">_num</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="s2">&quot;abs_sd&quot;</span><span class="p">],</span> <span class="s2">&quot;abs_sd&quot;</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">abs_sd</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">&quot;error_variance[&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39;]: abs_sd must be &gt; 0; got &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">abs_sd</span><span class="si">}</span><span class="s2">. (A standard deviation, not a variance.)&quot;</span>
+                    <span class="p">)</span>
+                <span class="n">rel_sd</span> <span class="o">=</span> <span class="n">_num</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;rel_sd&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">),</span> <span class="s2">&quot;rel_sd&quot;</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">rel_sd</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">&quot;error_variance[&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39;]: rel_sd must be &gt;= 0; got &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">rel_sd</span><span class="si">}</span><span class="s2">.&quot;</span>
+                    <span class="p">)</span>
+                <span class="k">if</span> <span class="n">rel_sd</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">&quot;error_variance[&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39;]: rel_sd &gt; 0 (a relative, &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;prediction-dependent error) is not implemented yet. &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;Only constant error is supported at this stage; &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;ignoring rel_sd would silently give a homoscedastic &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;design.&quot;</span>
+                    <span class="p">)</span>
+                <span class="n">variances</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">abs_sd</span> <span class="o">**</span> <span class="mi">2</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">var</span> <span class="o">=</span> <span class="n">_num</span><span class="p">(</span><span class="n">entry</span><span class="p">,</span> <span class="s2">&quot;a bare value (a variance)&quot;</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">var</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">&quot;error_variance[&#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39;]: a bare number is a &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;variance and must be &gt; 0; got </span><span class="si">{</span><span class="n">var</span><span class="si">}</span><span class="s2">.&quot;</span>
+                    <span class="p">)</span>
+                <span class="n">variances</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">var</span><span class="p">)</span>
+
+        <span class="n">cov</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">variances</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">error_cov</span> <span class="o">=</span> <span class="n">cov</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_from_variance</span> <span class="o">=</span> <span class="n">cov</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_error_cov_defaulted</span> <span class="o">=</span> <span class="kc">False</span>
 
 <div class="viewcode-block" id="Designer.simulate_candidates">
 <a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.simulate_candidates">[docs]</a>
