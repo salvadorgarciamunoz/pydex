@@ -4,6 +4,7 @@
 
 import os
 import sys
+import tomllib
 
 # -- Path setup --------------------------------------------------------------
 # docs/source/conf.py -> repo root is two levels up.
@@ -38,27 +39,10 @@ def _read_version():
                              "pyproject.toml")
     pyproject = os.path.abspath(pyproject)
     if os.path.isfile(pyproject):
-        try:
-            import tomllib                       # py3.11+
-        except ModuleNotFoundError:
-            tomllib = None
-        if tomllib is not None:
-            with open(pyproject, "rb") as fh:
-                found = tomllib.load(fh).get("project", {}).get("version")
-            if found:
-                return found
-        else:                                    # py3.9/3.10: no tomllib
-            import re
-            with open(pyproject, "r", encoding="utf-8") as fh:
-                src = fh.read()
-            # first `version = "..."` inside the [project] table
-            block = re.split(r"^\[", src, flags=re.M)
-            for chunk in block:
-                if chunk.startswith("project]"):
-                    m = re.search(r'^\s*version\s*=\s*"([^"]+)"', chunk,
-                                  flags=re.M)
-                    if m:
-                        return m.group(1)
+        with open(pyproject, "rb") as fh:
+            found = tomllib.load(fh).get("project", {}).get("version")
+        if found:
+            return found
     try:
         return _pkg_version("pydex")
     except PackageNotFoundError:        # docs built without installing pydex

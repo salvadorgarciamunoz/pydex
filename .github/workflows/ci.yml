@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.11", "3.12"]
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
 
@@ -69,11 +69,8 @@ jobs:
   # to pydex*), are not collected by pytest, and are not run by any job here,
   # so without this a plain syntax error in an example would ship unnoticed.
   #
-  # The FLOOR version matters more than the newest one. Compiling on 3.12 does
-  # NOT catch PEP 701 f-string quote reuse, because 3.12 is where that became
-  # legal — that is exactly the bug that broke this workflow on py3.9 and 3.11
-  # while passing locally. Compiling on the oldest supported Python is what
-  # makes requires-python an enforced claim rather than an aspiration.
+  # Compiling on the oldest supported Python (the floor) is what makes
+  # requires-python an enforced claim rather than an aspiration.
   # ---------------------------------------------------------------------
   syntax:
     name: Byte-compile (py${{ matrix.python-version }})
@@ -82,7 +79,7 @@ jobs:
       fail-fast: false
       matrix:
         # floor first (catches version-gated syntax), newest last
-        python-version: ["3.9", "3.12"]
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
 

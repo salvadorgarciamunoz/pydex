@@ -43,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Minimum Python is now 3.12** (`requires-python = ">=3.12"`; was 3.9). 3.9
+  and 3.10 are end-of-life, 3.11 is past SPEC 0's three-year window, and
+  GitHub's `ubuntu-latest` (26.04) no longer provides a 3.9 build, which had
+  failed both py3.9 CI jobs at `setup-python`. CI runs `install-and-import` and
+  `syntax` on 3.12 and 3.13. The 3.9-era rule against reusing an f-string's
+  delimiter inside its expressions no longer applies (PEP 701). The declared
+  dependency floors (`numpy`, `scipy`, `pandas`, `matplotlib`, `pyomo`) are
+  unchanged and are known to be below what 3.12 requires; they will be
+  corrected separately.
 - `eval_sensitivities()` now records the nominal predictions of the grid it
   evaluated (`designer._grid_pred`), alongside the sensitivities they belong
   to. The parallel exact-IFT branch (`n_jobs != 1`, which `initialize()` sets
