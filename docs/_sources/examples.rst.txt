@@ -459,7 +459,11 @@ With ``k = 0.5`` the constant-error design is ``{0, 2.0}``; with ``rel_sd =
 0.05`` the second sampling time moves to 2.8, 4.4 or 7.0 as ``abs_sd`` falls
 from 0.02 to 0.005 to 0.001.
 
-* ``relative_error_design.py``
+* ``relative_error_ab_reaction.py`` — the teaching version: the A->B
+  reaction of ``case_2_no_ift_no_collocation.py`` designed under four error
+  models, with three figures
+* ``relative_error_design.py`` — the minimal check on a single-response
+  analytic model
 
 The floor, ``abs_sd``, is what bounds how late the design will go, so it is the
 number to get right: it is the instrument's absolute precision near zero, not

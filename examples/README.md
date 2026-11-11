@@ -532,6 +532,25 @@ time moves to 2.8, 4.4 or 7.0 as `abs_sd` falls from 0.02 to 0.005 to 0.001. The
 what bounds how late the design will go, which is why `abs_sd` is the number to get right:
 it is the instrument's absolute precision near zero, not its limit of quantification.
 
+`relative_error_ab_reaction.py` is the teaching version, and the one to read first. It
+takes `examples/ode/case_2_no_ift_no_collocation.py` — the A->B reaction, 25 candidates,
+an 11-point sampling grid — and solves it four times: constant variance as that example
+sets it, a 1.5% RSD with a 0.01 mol/L floor, a mixed model with `CA` relative and `CB`
+constant, and the same relative model with the floor tightened to 0.002.
+
+Two trends come out of it. Measurements move later, because under a relative model the
+absolute standard deviation of `CA` shrinks as `CA` decays, and the floor is what stops
+them going later still. And dilute experiments stop being wasteful: under constant
+variance the whole design sits at `CA0 = 5`, the most concentrated candidate, while the
+relative models reach down to `CA0 = 3` and then `CA0 = 1`. A constant-variance
+assumption biases a design toward high concentration, which is an artefact of the
+weighting rather than a property of the chemistry.
+
+It writes three figures to the working directory: the error bands each model implies
+(with the standard deviation on a log scale underneath), where the design spends its
+effort in the condition space, and the trajectories with a marker at every sampling time
+chosen. Needs scipy and an NLP solver; `solver="pounce"` needs no downloaded binaries.
+
 The last block shows a misspelt response name being refused. The keys are matched against
 `response_names` exactly, so a typo cannot silently assign a variance to the wrong
 response the way a mis-ordered `error_cov` can. Needs ipopt; nothing is written to disk.
