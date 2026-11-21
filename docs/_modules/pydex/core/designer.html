@@ -3560,11 +3560,29 @@
             <span class="c1"># V-optimal: minimise trace(W @ FIM^{-1} @ W.T)</span>
             <span class="c1"># Same lifted form as A-optimal but with W weighting</span>
             <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">W</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-                <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
-                    <span class="s2">&quot;V-optimal criterion requires W matrix. &quot;</span>
-                    <span class="s2">&quot;Assign designer.dw_tic (and designer.dw_spt), or call &quot;</span>
-                    <span class="s2">&quot;find_optimal_operating_point() first.&quot;</span>
-                <span class="p">)</span>
+                <span class="c1"># Build it here rather than refuse. This guard runs BEFORE the</span>
+                <span class="c1"># criterion function is ever called, so the lazy build inside</span>
+                <span class="c1"># _v_opt_criterion is unreachable on this path: without this,</span>
+                <span class="c1"># design_experiment(criterion=v_opt_criterion) raised even</span>
+                <span class="c1"># with dw_tic and dw_spt correctly set, telling the user to do</span>
+                <span class="c1"># what they had just done. design_v_optimal() worked only</span>
+                <span class="c1"># because it builds W itself beforehand.</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_tic</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_spt</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_eval_W_matrix</span><span class="p">()</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">missing</span> <span class="o">=</span> <span class="p">[]</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_tic</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="n">missing</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;designer.dw_tic&quot;</span><span class="p">)</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_spt</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="n">missing</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;designer.dw_spt&quot;</span><span class="p">)</span>
+                    <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                        <span class="s2">&quot;The V-optimal criterion needs the prediction &quot;</span>
+                        <span class="s2">&quot;locations, and &quot;</span> <span class="o">+</span> <span class="s2">&quot; and &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">missing</span><span class="p">)</span> <span class="o">+</span> <span class="s2">&quot; is not &quot;</span>
+                        <span class="s2">&quot;set. Assign them directly, or call &quot;</span>
+                        <span class="s2">&quot;find_optimal_operating_point() for a single &quot;</span>
+                        <span class="s2">&quot;economically optimal point, or &quot;</span>
+                        <span class="s2">&quot;set_prediction_region() to average over a region.&quot;</span>
+                    <span class="p">)</span>
             <span class="n">W</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">W</span><span class="p">)</span>   <span class="c1"># (n_pred, n_mp)</span>
             <span class="n">n_pred</span> <span class="o">=</span> <span class="n">W</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
             <span class="n">m</span><span class="o">.</span><span class="n">PRED</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">RangeSet</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">n_pred</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>

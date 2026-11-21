@@ -5767,6 +5767,21 @@ def test_62_i_optimal_region_design():
         assert "set_prediction_region" in str(err)
     ok("design_i_optimal() refuses without a prediction region")
 
+    # ── the two public routes to a V-optimal solve must agree ────────────
+    # design_experiment(criterion=v_opt_criterion) used to raise here even
+    # with dw_tic and dw_spt set, because the guard in _solve_pyomo runs
+    # before the criterion function is ever called. That is the form the
+    # README documents, so it has to work and has to agree.
+    d_direct = _build()
+    d_direct.set_prediction_region(bounds=[(-1, 1), (-1, 1)])
+    d_direct.design_experiment(criterion=d_direct.v_opt_criterion,
+                               solver="ipopt", solver_options=solver_opts)
+    eff_direct = _np.asarray(d_direct.efforts).flatten()
+    assert _np.allclose(eff_direct, eff_i, atol=1e-6), \
+        "design_experiment(v_opt_criterion) disagrees with design_i_optimal()"
+    ok("design_experiment(criterion=v_opt_criterion) builds W itself and "
+       "gives the same design as design_i_optimal()")
+
 
 def test_61_error_variance_weights():
     """

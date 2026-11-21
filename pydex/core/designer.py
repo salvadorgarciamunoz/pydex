@@ -3454,11 +3454,29 @@ class Designer:
             # V-optimal: minimise trace(W @ FIM^{-1} @ W.T)
             # Same lifted form as A-optimal but with W weighting
             if self.W is None:
-                raise RuntimeError(
-                    "V-optimal criterion requires W matrix. "
-                    "Assign designer.dw_tic (and designer.dw_spt), or call "
-                    "find_optimal_operating_point() first."
-                )
+                # Build it here rather than refuse. This guard runs BEFORE the
+                # criterion function is ever called, so the lazy build inside
+                # _v_opt_criterion is unreachable on this path: without this,
+                # design_experiment(criterion=v_opt_criterion) raised even
+                # with dw_tic and dw_spt correctly set, telling the user to do
+                # what they had just done. design_v_optimal() worked only
+                # because it builds W itself beforehand.
+                if self.dw_tic is not None and self.dw_spt is not None:
+                    self._eval_W_matrix()
+                else:
+                    missing = []
+                    if self.dw_tic is None:
+                        missing.append("designer.dw_tic")
+                    if self.dw_spt is None:
+                        missing.append("designer.dw_spt")
+                    raise RuntimeError(
+                        "The V-optimal criterion needs the prediction "
+                        "locations, and " + " and ".join(missing) + " is not "
+                        "set. Assign them directly, or call "
+                        "find_optimal_operating_point() for a single "
+                        "economically optimal point, or "
+                        "set_prediction_region() to average over a region."
+                    )
             W = np.asarray(self.W)   # (n_pred, n_mp)
             n_pred = W.shape[0]
             m.PRED = pyo.RangeSet(0, n_pred - 1)

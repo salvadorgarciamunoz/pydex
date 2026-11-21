@@ -556,10 +556,9 @@ designer.find_optimal_operating_point(
     n_starts       = 3,
 )
 
-# Stage 2
+# Stage 2 — find_optimal_operating_point() has set designer.dw_tic
 designer.dw_spt = np.array([t_final])
-designer.design_experiment(
-    criterion      = designer.v_opt_criterion,
+designer.design_v_optimal(
     solver         = "ipopt",
     solver_options = {"linear_solver": "ma57"},
 )
