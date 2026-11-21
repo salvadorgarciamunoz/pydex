@@ -1370,6 +1370,9 @@ class Designer:
 
         # W matrix and associated spt for sensitivity evaluation at dw
         self.dw_spt = None                  # shape (n_spt_dw,) — time points for W eval
+        self.dw_weights = None              # shape (r_w * n_spt_dw,) — quadrature
+                                            # weights over prediction locations;
+                                            # None means equal weight (a SUM)
         self.W = None                       # shape (r_w * n_spt_dw * n_m_r, n_mp)
 
     @property
@@ -7392,7 +7395,12 @@ class Designer:
 
             J_V = trace( W @ FIM^{-1} @ W^T )
 
-        measures the total prediction variance at dw.  Minimising J_V over
+        measures the total prediction variance at dw.  If
+        :attr:`dw_weights` is set, each row is scaled by the square root of
+        its (normalised) weight, so the same trace becomes a weighted AVERAGE
+        over prediction locations instead of a total -- which is what makes an
+        I-optimal (average prediction variance over a region) design out of
+        the same machinery.  See :attr:`dw_weights`.  Minimising J_V over
         the effort allocation selects experiments whose sensitivity structure
         aligns with the prediction directions in W.
 
@@ -7566,6 +7574,44 @@ class Designer:
                       f"W block shape = {W_w.shape}")
 
         self.W = np.vstack(W_blocks)   # (r_w * n_spt_dw * n_m_r, n_mp)
+
+        # Optional quadrature weights over PREDICTION LOCATIONS.
+        #
+        # trace(W @ FIM^-1 @ W.T) is a sum over the rows of W, and a row is one
+        # (dw point, time, response) triple. Scaling row i by sqrt(w_i) turns
+        # that sum into sum_i w_i * var_i, so a weight vector normalised to 1
+        # makes the criterion a weighted AVERAGE rather than a total. That is
+        # what turns V-optimality (prediction variance at chosen points) into
+        # I-optimality (average prediction variance over a region).
+        #
+        # One weight per (point, time) pair, NOT per row: responses are the
+        # components of a single observation, so they stay summed -- the total
+        # prediction variance at a location is what gets averaged over the
+        # region. The weights are normalised here, so the user supplies a
+        # quadrature rule and does not have to remember to divide.
+        if self.dw_weights is not None:
+            w = np.asarray(self.dw_weights, dtype=float).reshape(-1)
+            n_loc = r_w * n_spt_dw
+            if w.size != n_loc:
+                raise SyntaxError(
+                    f"dw_weights has {w.size} entries but there are {n_loc} "
+                    f"prediction locations ({r_w} dw_tic row(s) x {n_spt_dw} "
+                    f"dw_spt time(s)). Supply one weight per (point, time) "
+                    f"pair, ordered point-major; responses are not weighted "
+                    f"separately."
+                )
+            if np.any(w < 0):
+                raise SyntaxError("dw_weights must be non-negative.")
+            total = w.sum()
+            if not np.isfinite(total) or total <= 0:
+                raise SyntaxError("dw_weights must be finite and sum to > 0.")
+            w = w / total
+            # a row is (point, time, response), response-fastest
+            self.W = np.sqrt(np.repeat(w, self.n_m_r))[:, None] * self.W
+            if self._verbose >= 2:
+                print(f"[_eval_W_matrix] applied {n_loc} dw_weights "
+                      f"(normalised); the criterion is now a weighted average "
+                      f"over prediction locations")
 
         if self._verbose >= 1:
             print(f"[_eval_W_matrix] W matrix computed: shape = {self.W.shape}")

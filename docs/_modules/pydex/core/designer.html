@@ -5,14 +5,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>pydex.core.designer &mdash; pydex 0.8.0 documentation</title>
+  <title>pydex.core.designer &mdash; pydex 0.9.0 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
 
   
       <script src="../../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="../../../_static/documentation_options.js?v=486e5634"></script>
+      <script src="../../../_static/documentation_options.js?v=39bb1c6d"></script>
       <script src="../../../_static/doctools.js?v=9bcbadda"></script>
       <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../../../_static/js/theme.js"></script>
@@ -1448,6 +1448,9 @@
 
         <span class="c1"># W matrix and associated spt for sensitivity evaluation at dw</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">dw_spt</span> <span class="o">=</span> <span class="kc">None</span>                  <span class="c1"># shape (n_spt_dw,) — time points for W eval</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dw_weights</span> <span class="o">=</span> <span class="kc">None</span>              <span class="c1"># shape (r_w * n_spt_dw,) — quadrature</span>
+                                            <span class="c1"># weights over prediction locations;</span>
+                                            <span class="c1"># None means equal weight (a SUM)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">W</span> <span class="o">=</span> <span class="kc">None</span>                       <span class="c1"># shape (r_w * n_spt_dw * n_m_r, n_mp)</span></div>
 
 
@@ -7627,7 +7630,12 @@
 
 <span class="sd">            J_V = trace( W @ FIM^{-1} @ W^T )</span>
 
-<span class="sd">        measures the total prediction variance at dw.  Minimising J_V over</span>
+<span class="sd">        measures the total prediction variance at dw.  If</span>
+<span class="sd">        :attr:`dw_weights` is set, each row is scaled by the square root of</span>
+<span class="sd">        its (normalised) weight, so the same trace becomes a weighted AVERAGE</span>
+<span class="sd">        over prediction locations instead of a total -- which is what makes an</span>
+<span class="sd">        I-optimal (average prediction variance over a region) design out of</span>
+<span class="sd">        the same machinery.  See :attr:`dw_weights`.  Minimising J_V over</span>
 <span class="sd">        the effort allocation selects experiments whose sensitivity structure</span>
 <span class="sd">        aligns with the prediction directions in W.</span>
 
@@ -7801,6 +7809,44 @@
                       <span class="sa">f</span><span class="s2">&quot;W block shape = </span><span class="si">{</span><span class="n">W_w</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">W</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">vstack</span><span class="p">(</span><span class="n">W_blocks</span><span class="p">)</span>   <span class="c1"># (r_w * n_spt_dw * n_m_r, n_mp)</span>
+
+        <span class="c1"># Optional quadrature weights over PREDICTION LOCATIONS.</span>
+        <span class="c1">#</span>
+        <span class="c1"># trace(W @ FIM^-1 @ W.T) is a sum over the rows of W, and a row is one</span>
+        <span class="c1"># (dw point, time, response) triple. Scaling row i by sqrt(w_i) turns</span>
+        <span class="c1"># that sum into sum_i w_i * var_i, so a weight vector normalised to 1</span>
+        <span class="c1"># makes the criterion a weighted AVERAGE rather than a total. That is</span>
+        <span class="c1"># what turns V-optimality (prediction variance at chosen points) into</span>
+        <span class="c1"># I-optimality (average prediction variance over a region).</span>
+        <span class="c1">#</span>
+        <span class="c1"># One weight per (point, time) pair, NOT per row: responses are the</span>
+        <span class="c1"># components of a single observation, so they stay summed -- the total</span>
+        <span class="c1"># prediction variance at a location is what gets averaged over the</span>
+        <span class="c1"># region. The weights are normalised here, so the user supplies a</span>
+        <span class="c1"># quadrature rule and does not have to remember to divide.</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_weights</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">w</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dw_weights</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">n_loc</span> <span class="o">=</span> <span class="n">r_w</span> <span class="o">*</span> <span class="n">n_spt_dw</span>
+            <span class="k">if</span> <span class="n">w</span><span class="o">.</span><span class="n">size</span> <span class="o">!=</span> <span class="n">n_loc</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">&quot;dw_weights has </span><span class="si">{</span><span class="n">w</span><span class="o">.</span><span class="n">size</span><span class="si">}</span><span class="s2"> entries but there are </span><span class="si">{</span><span class="n">n_loc</span><span class="si">}</span><span class="s2"> &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;prediction locations (</span><span class="si">{</span><span class="n">r_w</span><span class="si">}</span><span class="s2"> dw_tic row(s) x </span><span class="si">{</span><span class="n">n_spt_dw</span><span class="si">}</span><span class="s2"> &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;dw_spt time(s)). Supply one weight per (point, time) &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;pair, ordered point-major; responses are not weighted &quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;separately.&quot;</span>
+                <span class="p">)</span>
+            <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">any</span><span class="p">(</span><span class="n">w</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">):</span>
+                <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span><span class="s2">&quot;dw_weights must be non-negative.&quot;</span><span class="p">)</span>
+            <span class="n">total</span> <span class="o">=</span> <span class="n">w</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">total</span><span class="p">)</span> <span class="ow">or</span> <span class="n">total</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span><span class="s2">&quot;dw_weights must be finite and sum to &gt; 0.&quot;</span><span class="p">)</span>
+            <span class="n">w</span> <span class="o">=</span> <span class="n">w</span> <span class="o">/</span> <span class="n">total</span>
+            <span class="c1"># a row is (point, time, response), response-fastest</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">W</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="n">w</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_m_r</span><span class="p">))[:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">W</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">2</span><span class="p">:</span>
+                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[_eval_W_matrix] applied </span><span class="si">{</span><span class="n">n_loc</span><span class="si">}</span><span class="s2"> dw_weights &quot;</span>
+                      <span class="sa">f</span><span class="s2">&quot;(normalised); the criterion is now a weighted average &quot;</span>
+                      <span class="sa">f</span><span class="s2">&quot;over prediction locations&quot;</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[_eval_W_matrix] W matrix computed: shape = </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">W</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
