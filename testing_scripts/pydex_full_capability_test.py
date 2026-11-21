@@ -5656,6 +5656,118 @@ def test_60_v_optimal_fim_path_agreement():
         "testing nothing"
     ok("the design is non-uniform (the solve did something)")
 
+def test_62_i_optimal_region_design():
+    """
+    62 — I-optimal design: average prediction variance over a region.
+
+    WHY THIS SECTION EXISTS
+    -----------------------
+    tests/test_dw_weights.py and tests/test_prediction_region.py cover the
+    weighting and the region machinery at a FIXED design, with no solver.
+    What they cannot cover is the design itself, which needs an NLP solve:
+
+      * that an I-optimal design differs from a D-optimal one in the way the
+        literature says it must -- more weight at the centre of the region,
+        less at the extremes;
+      * that it genuinely lowers the average prediction variance, and that
+        D-optimality genuinely wins on log det FIM, so the trade is real
+        rather than asserted;
+      * that the whole route works through public API alone.
+
+    The fixture is a full quadratic in two factors on [-1, 1]^2, chosen
+    because the answer is known in advance from response-surface theory. A
+    wrong implementation is visible without reference to any pydex output.
+    """
+    section("62 — I-optimal design: average prediction variance over a region")
+
+    import numpy as _np
+
+    def _sim(ti_controls, model_parameters):
+        x1, x2 = ti_controls
+        basis = _np.array([1.0, x1, x2, x1 * x2, x1 ** 2, x2 ** 2])
+        return _np.array([basis @ model_parameters])
+
+    def _build():
+        d = Designer()
+        d.simulate = _sim
+        d.model_parameters = _np.ones(6)
+        d.ti_controls_candidates = d.enumerate_candidates(
+            bounds=[[-1, 1], [-1, 1]], levels=[5, 5])
+        d.response_names = ["y"]
+        d.ti_controls_names = ["x1", "x2"]
+        d.initialize(verbose=0)
+        return d
+
+    solver_opts = {"linear_solver": LINEAR_SOLVER, "tol": 1e-8,
+                   "max_iter": 3000}
+    CENTRE, CORNER = 12, 0            # indices into the 5x5 candidate grid
+
+    # ── D-optimal, for contrast ──────────────────────────────────────────
+    d_d = _build()
+    d_d.design_experiment(d_d.d_opt_criterion, solver="ipopt",
+                          solver_options=solver_opts)
+    eff_d = _np.asarray(d_d.efforts).flatten()
+
+    # ── I-optimal, through public API only ───────────────────────────────
+    d_i = _build()
+    info = d_i.set_prediction_region(bounds=[(-1, 1), (-1, 1)])
+    ok(f"set_prediction_region: {info['rule']} rule, {info['nodes']} nodes, "
+       f"{info['n_points']} points, converged={info['converged']}")
+    assert info["converged"] is True, "the region did not converge"
+    assert info["nodes"] == 5, f"expected 5 nodes, got {info['nodes']}"
+    ok("the adaptive rule settled at 5 nodes (two successive levels under tol)")
+
+    d_i.design_i_optimal(solver="ipopt", solver_options=solver_opts)
+    eff_i = _np.asarray(d_i.efforts).flatten()
+
+    # ── the qualitative result, known from response-surface theory ───────
+    assert eff_i[CENTRE] > 2.0 * eff_d[CENTRE], (
+        f"I-optimal centre effort {eff_i[CENTRE]:.4f} should far exceed "
+        f"D-optimal's {eff_d[CENTRE]:.4f}")
+    assert eff_i[CORNER] < eff_d[CORNER], (
+        f"I-optimal corner effort {eff_i[CORNER]:.4f} should be below "
+        f"D-optimal's {eff_d[CORNER]:.4f}")
+    ok(f"centre effort {eff_d[CENTRE]*100:.2f}% (D) -> "
+       f"{eff_i[CENTRE]*100:.2f}% (I); corner {eff_d[CORNER]*100:.2f}% -> "
+       f"{eff_i[CORNER]*100:.2f}%")
+
+    # ── recorded reference values ────────────────────────────────────────
+    assert abs(eff_i[CENTRE] - 0.2709) < 5e-4, eff_i[CENTRE]
+    assert abs(eff_i[CORNER] - 0.0911) < 5e-4, eff_i[CORNER]
+    j_i = d_i.i_optimal_result["average_prediction_variance"]
+    assert abs(j_i - 3.586216) < 1e-5, j_i
+    ok(f"reference values hold: centre 0.2709, corner 0.0911, J_I {j_i:.6f}")
+
+    # ── the trade, scored through BOTH criteria ──────────────────────────
+    def _apv(efforts):
+        s = _build()
+        s.set_prediction_region(bounds=[(-1, 1), (-1, 1)], nodes=8)
+        s.eval_fim(_np.asarray(efforts).flatten())
+        W = _np.asarray(s.W)
+        return float(_np.trace(W @ _np.linalg.inv(s.fim) @ W.T))
+
+    def _logdet(efforts):
+        s = _build()
+        s.eval_fim(_np.asarray(efforts).flatten())
+        return float(_np.linalg.slogdet(s.fim)[1])
+
+    apv_d, apv_i = _apv(eff_d), _apv(eff_i)
+    ld_d, ld_i = _logdet(eff_d), _logdet(eff_i)
+    assert apv_i < apv_d, (apv_i, apv_d)
+    assert ld_d > ld_i, (ld_d, ld_i)
+    ok(f"the trade is real: average prediction variance {apv_d:.6f} (D) -> "
+       f"{apv_i:.6f} (I), while log det FIM {ld_d:.6f} (D) > {ld_i:.6f} (I)")
+
+    # ── the guard ────────────────────────────────────────────────────────
+    d_bare = _build()
+    try:
+        d_bare.design_i_optimal(solver="ipopt")
+        raise AssertionError("design_i_optimal() without a region did not raise")
+    except SyntaxError as err:
+        assert "set_prediction_region" in str(err)
+    ok("design_i_optimal() refuses without a prediction region")
+
+
 def test_61_error_variance_weights():
     """
     61 — error_variance with rel_sd > 0: prediction-dependent measurement
@@ -5939,6 +6051,7 @@ if __name__ == "__main__":
     run(test_59_v_optimal_guards)
     run(test_60_v_optimal_fim_path_agreement)
     run(test_61_error_variance_weights)
+    run(test_62_i_optimal_region_design)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print_pyomo_noise_summary()

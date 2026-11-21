@@ -1371,6 +1371,7 @@ class Designer:
         # W matrix and associated spt for sensitivity evaluation at dw
         self.dw_spt = None                  # shape (n_spt_dw,) — time points for W eval
         self._prediction_region_info = None  # what set_prediction_region used
+        self.i_optimal_result = None        # set by design_i_optimal()
         self.dw_weights = None              # shape (r_w * n_spt_dw,) — quadrature
                                             # weights over prediction locations;
                                             # None means equal weight (a SUM)
@@ -7837,6 +7838,100 @@ class Designer:
             print(f"[set_prediction_region] {info['rule']} rule, "
                   f"{info['n_points']} point(s) x {times_str}{conv}")
         return info
+
+    def design_i_optimal(self, n_exp=None, solver="ipopt",
+                         solver_options=None, e0=None, regularize_fim=False,
+                         recompute_W=False, **kwargs):
+        """Design experiments that predict well ACROSS A REGION.
+
+        Where :meth:`design_v_optimal` minimises the prediction variance at
+        operating points you have chosen, this minimises it AVERAGED over a
+        region -- the standard criterion when a model has to be trustworthy
+        anywhere inside an operating envelope, and the usual complement to a
+        D-optimal design, which buys parameter precision rather than
+        prediction accuracy.
+
+        There is no separate I-optimality formula. The criterion is the same
+        ``trace(W @ FIM^-1 @ W.T)``; what makes it an average rather than a
+        total is the quadrature weighting that
+        :meth:`set_prediction_region` installs, so that method must be called
+        first. Calling this one without a region would silently report a SUM
+        labelled as an average, so it refuses instead.
+
+        Args:
+            n_exp (int, optional): number of experiments for a discrete
+                design. None (default) gives continuous efforts.
+            solver (str): Pyomo solver name.
+            solver_options (dict, optional): passed to the solver.
+            e0 (numpy.ndarray, optional): initial effort vector.
+            regularize_fim (bool): add ``_eps * I`` to the FIM.
+            recompute_W (bool): rebuild W even if one is cached.
+
+        Returns:
+            dict: the usual ``oed_result``. Its ``criterion_value`` is the
+            negated Pyomo objective, so the average prediction variance over
+            the region is its magnitude; :attr:`i_optimal_result` reports it
+            with the rule that produced it.
+
+        Raises:
+            SyntaxError: if no prediction region has been set.
+        """
+        if self.dw_weights is None or self.dw_tic is None:
+            raise SyntaxError(
+                "design_i_optimal() needs a prediction region: call "
+                "designer.set_prediction_region(bounds=...) first.\n"
+                "I-optimality is V-optimality with the prediction locations "
+                "weighted by a quadrature rule, so without the weights the "
+                "criterion would be the TOTAL prediction variance over "
+                "whatever points happen to be in dw_tic, not the average "
+                "over a region. If that total is what you want, call "
+                "design_v_optimal() instead."
+            )
+
+        if self._model_parameters_changed:
+            recompute_W = True
+        if self.W is None or recompute_W:
+            self._eval_W_matrix()
+
+        result = self.design_experiment(
+            criterion=self.v_opt_criterion,
+            n_exp=n_exp,
+            solver=solver,
+            solver_options=solver_options,
+            e0=e0,
+            regularize_fim=regularize_fim,
+            **kwargs,
+        )
+
+        region = self._prediction_region_info or {}
+        self.i_optimal_result = {
+            "average_prediction_variance": abs(result["criterion_value"]),
+            "n_locations": int(np.asarray(self.dw_weights).size),
+            "n_points": len(np.atleast_2d(self.dw_tic)),
+            "n_times": len(np.atleast_1d(self.dw_spt)),
+            "rule": region.get("rule"),
+            "nodes": region.get("nodes"),
+            "region_relative_change": region.get("relative_change"),
+            "region_converged": region.get("converged"),
+        }
+
+        if self._verbose >= 1:
+            info = self.i_optimal_result
+            rule = info["rule"] or "user-supplied"
+            conv = ("" if info["region_relative_change"] is None
+                    else f", max|dB|/|B| = {info['region_relative_change']:.2e}")
+            print("")
+            print("I-optimal design: average prediction variance over the "
+                  f"region = {info['average_prediction_variance']:.8g}")
+            print(f"  integrated with the {rule} rule over "
+                  f"{info['n_points']} point(s) x {info['n_times']} time(s) "
+                  f"= {info['n_locations']} location(s){conv}")
+            print("  responses are SUMMED at each location and the total is "
+                  "averaged over the region")
+            print("  this value is not comparable with a D-optimal criterion, "
+                  "nor across different regions")
+
+        return result
 
     def design_v_optimal(self, n_exp=None, solver="ipopt", solver_options=None,
                           e0=None, regularize_fim=False, recompute_W=False, **kwargs):

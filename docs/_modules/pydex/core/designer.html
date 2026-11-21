@@ -1449,6 +1449,7 @@
         <span class="c1"># W matrix and associated spt for sensitivity evaluation at dw</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">dw_spt</span> <span class="o">=</span> <span class="kc">None</span>                  <span class="c1"># shape (n_spt_dw,) — time points for W eval</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_prediction_region_info</span> <span class="o">=</span> <span class="kc">None</span>  <span class="c1"># what set_prediction_region used</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">i_optimal_result</span> <span class="o">=</span> <span class="kc">None</span>        <span class="c1"># set by design_i_optimal()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">dw_weights</span> <span class="o">=</span> <span class="kc">None</span>              <span class="c1"># shape (r_w * n_spt_dw,) — quadrature</span>
                                             <span class="c1"># weights over prediction locations;</span>
                                             <span class="c1"># None means equal weight (a SUM)</span>
@@ -8074,6 +8075,103 @@
             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[set_prediction_region] </span><span class="si">{</span><span class="n">info</span><span class="p">[</span><span class="s1">&#39;rule&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> rule, &quot;</span>
                   <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">info</span><span class="p">[</span><span class="s1">&#39;n_points&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> point(s) x </span><span class="si">{</span><span class="n">times_str</span><span class="si">}{</span><span class="n">conv</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
         <span class="k">return</span> <span class="n">info</span></div>
+
+
+<div class="viewcode-block" id="Designer.design_i_optimal">
+<a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.design_i_optimal">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">design_i_optimal</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_exp</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">solver</span><span class="o">=</span><span class="s2">&quot;ipopt&quot;</span><span class="p">,</span>
+                         <span class="n">solver_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">e0</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">regularize_fim</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+                         <span class="n">recompute_W</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Design experiments that predict well ACROSS A REGION.</span>
+
+<span class="sd">        Where :meth:`design_v_optimal` minimises the prediction variance at</span>
+<span class="sd">        operating points you have chosen, this minimises it AVERAGED over a</span>
+<span class="sd">        region -- the standard criterion when a model has to be trustworthy</span>
+<span class="sd">        anywhere inside an operating envelope, and the usual complement to a</span>
+<span class="sd">        D-optimal design, which buys parameter precision rather than</span>
+<span class="sd">        prediction accuracy.</span>
+
+<span class="sd">        There is no separate I-optimality formula. The criterion is the same</span>
+<span class="sd">        ``trace(W @ FIM^-1 @ W.T)``; what makes it an average rather than a</span>
+<span class="sd">        total is the quadrature weighting that</span>
+<span class="sd">        :meth:`set_prediction_region` installs, so that method must be called</span>
+<span class="sd">        first. Calling this one without a region would silently report a SUM</span>
+<span class="sd">        labelled as an average, so it refuses instead.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            n_exp (int, optional): number of experiments for a discrete</span>
+<span class="sd">                design. None (default) gives continuous efforts.</span>
+<span class="sd">            solver (str): Pyomo solver name.</span>
+<span class="sd">            solver_options (dict, optional): passed to the solver.</span>
+<span class="sd">            e0 (numpy.ndarray, optional): initial effort vector.</span>
+<span class="sd">            regularize_fim (bool): add ``_eps * I`` to the FIM.</span>
+<span class="sd">            recompute_W (bool): rebuild W even if one is cached.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            dict: the usual ``oed_result``. Its ``criterion_value`` is the</span>
+<span class="sd">            negated Pyomo objective, so the average prediction variance over</span>
+<span class="sd">            the region is its magnitude; :attr:`i_optimal_result` reports it</span>
+<span class="sd">            with the rule that produced it.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            SyntaxError: if no prediction region has been set.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_weights</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_tic</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
+                <span class="s2">&quot;design_i_optimal() needs a prediction region: call &quot;</span>
+                <span class="s2">&quot;designer.set_prediction_region(bounds=...) first.</span><span class="se">\n</span><span class="s2">&quot;</span>
+                <span class="s2">&quot;I-optimality is V-optimality with the prediction locations &quot;</span>
+                <span class="s2">&quot;weighted by a quadrature rule, so without the weights the &quot;</span>
+                <span class="s2">&quot;criterion would be the TOTAL prediction variance over &quot;</span>
+                <span class="s2">&quot;whatever points happen to be in dw_tic, not the average &quot;</span>
+                <span class="s2">&quot;over a region. If that total is what you want, call &quot;</span>
+                <span class="s2">&quot;design_v_optimal() instead.&quot;</span>
+            <span class="p">)</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_model_parameters_changed</span><span class="p">:</span>
+            <span class="n">recompute_W</span> <span class="o">=</span> <span class="kc">True</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">W</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">recompute_W</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_eval_W_matrix</span><span class="p">()</span>
+
+        <span class="n">result</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">design_experiment</span><span class="p">(</span>
+            <span class="n">criterion</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">v_opt_criterion</span><span class="p">,</span>
+            <span class="n">n_exp</span><span class="o">=</span><span class="n">n_exp</span><span class="p">,</span>
+            <span class="n">solver</span><span class="o">=</span><span class="n">solver</span><span class="p">,</span>
+            <span class="n">solver_options</span><span class="o">=</span><span class="n">solver_options</span><span class="p">,</span>
+            <span class="n">e0</span><span class="o">=</span><span class="n">e0</span><span class="p">,</span>
+            <span class="n">regularize_fim</span><span class="o">=</span><span class="n">regularize_fim</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="n">region</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_prediction_region_info</span> <span class="ow">or</span> <span class="p">{}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">i_optimal_result</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;average_prediction_variance&quot;</span><span class="p">:</span> <span class="nb">abs</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s2">&quot;criterion_value&quot;</span><span class="p">]),</span>
+            <span class="s2">&quot;n_locations&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dw_weights</span><span class="p">)</span><span class="o">.</span><span class="n">size</span><span class="p">),</span>
+            <span class="s2">&quot;n_points&quot;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">atleast_2d</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dw_tic</span><span class="p">)),</span>
+            <span class="s2">&quot;n_times&quot;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">atleast_1d</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dw_spt</span><span class="p">)),</span>
+            <span class="s2">&quot;rule&quot;</span><span class="p">:</span> <span class="n">region</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;rule&quot;</span><span class="p">),</span>
+            <span class="s2">&quot;nodes&quot;</span><span class="p">:</span> <span class="n">region</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;nodes&quot;</span><span class="p">),</span>
+            <span class="s2">&quot;region_relative_change&quot;</span><span class="p">:</span> <span class="n">region</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;relative_change&quot;</span><span class="p">),</span>
+            <span class="s2">&quot;region_converged&quot;</span><span class="p">:</span> <span class="n">region</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;converged&quot;</span><span class="p">),</span>
+        <span class="p">}</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_verbose</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="n">info</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">i_optimal_result</span>
+            <span class="n">rule</span> <span class="o">=</span> <span class="n">info</span><span class="p">[</span><span class="s2">&quot;rule&quot;</span><span class="p">]</span> <span class="ow">or</span> <span class="s2">&quot;user-supplied&quot;</span>
+            <span class="n">conv</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;&quot;</span> <span class="k">if</span> <span class="n">info</span><span class="p">[</span><span class="s2">&quot;region_relative_change&quot;</span><span class="p">]</span> <span class="ow">is</span> <span class="kc">None</span>
+                    <span class="k">else</span> <span class="sa">f</span><span class="s2">&quot;, max|dB|/|B| = </span><span class="si">{</span><span class="n">info</span><span class="p">[</span><span class="s1">&#39;region_relative_change&#39;</span><span class="p">]</span><span class="si">:</span><span class="s2">.2e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;I-optimal design: average prediction variance over the &quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot;region = </span><span class="si">{</span><span class="n">info</span><span class="p">[</span><span class="s1">&#39;average_prediction_variance&#39;</span><span class="p">]</span><span class="si">:</span><span class="s2">.8g</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  integrated with the </span><span class="si">{</span><span class="n">rule</span><span class="si">}</span><span class="s2"> rule over &quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">info</span><span class="p">[</span><span class="s1">&#39;n_points&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> point(s) x </span><span class="si">{</span><span class="n">info</span><span class="p">[</span><span class="s1">&#39;n_times&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> time(s) &quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot;= </span><span class="si">{</span><span class="n">info</span><span class="p">[</span><span class="s1">&#39;n_locations&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> location(s)</span><span class="si">{</span><span class="n">conv</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;  responses are SUMMED at each location and the total is &quot;</span>
+                  <span class="s2">&quot;averaged over the region&quot;</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;  this value is not comparable with a D-optimal criterion, &quot;</span>
+                  <span class="s2">&quot;nor across different regions&quot;</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">result</span></div>
 
 
 <div class="viewcode-block" id="Designer.design_v_optimal">
