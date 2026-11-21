@@ -1370,6 +1370,7 @@ class Designer:
 
         # W matrix and associated spt for sensitivity evaluation at dw
         self.dw_spt = None                  # shape (n_spt_dw,) — time points for W eval
+        self._prediction_region_info = None  # what set_prediction_region used
         self.dw_weights = None              # shape (r_w * n_spt_dw,) — quadrature
                                             # weights over prediction locations;
                                             # None means equal weight (a SUM)
@@ -7617,6 +7618,225 @@ class Designer:
             print(f"[_eval_W_matrix] W matrix computed: shape = {self.W.shape}")
 
         return self.W
+
+    # ---------------------------------------------------------------------
+    # Prediction region: the machinery behind an I-optimal design
+    # ---------------------------------------------------------------------
+    # Convergence targets for the adaptive quadrature in
+    # set_prediction_region(). Deliberately NOT arguments: "relative change in
+    # the moment matrix" is not a quantity a user can reason about, and anyone
+    # who can would supply an explicit rule through points/weights instead.
+    # 1e-8 is far below anything that moves a design -- the quadratic example
+    # gives an identical answer anywhere from 1e-6 to 1e-12.
+    _REGION_TOL = 1e-8
+    _REGION_MAX_NODES = 12
+
+    @staticmethod
+    def _gauss_region(bounds, nodes):
+        """Tensor-product Gauss-Legendre nodes and normalised weights."""
+        x, w = np.polynomial.legendre.leggauss(nodes)
+        axes = [0.5 * (hi - lo) * x + 0.5 * (hi + lo) for lo, hi in bounds]
+        grids = np.meshgrid(*axes, indexing="ij")
+        pts = np.stack(grids, -1).reshape(-1, len(bounds))
+        wgrids = np.meshgrid(*[w] * len(bounds), indexing="ij")
+        wts = np.prod(np.stack(wgrids, -1).reshape(-1, len(bounds)), axis=1)
+        return pts, wts / wts.sum()
+
+    @staticmethod
+    def _sobol_region(bounds, n_points, seed=0):
+        """A scrambled Sobol sample with equal weights."""
+        from scipy.stats import qmc
+        lo = np.array([b[0] for b in bounds], dtype=float)
+        hi = np.array([b[1] for b in bounds], dtype=float)
+        m = int(np.ceil(np.log2(max(n_points, 2))))
+        sample = qmc.Sobol(d=len(bounds), scramble=True,
+                           seed=seed).random_base2(m)
+        pts = lo + sample * (hi - lo)
+        return pts, np.full(len(pts), 1.0 / len(pts))
+
+    def _check_region_is_covered(self, bounds, allow_extrapolation):
+        """Refuse a prediction region wider than the candidate grid.
+
+        Per control, the candidates must reach at or beyond both ends of the
+        requested region. This is a MARGINAL check, one axis at a time, so it
+        is necessary but not sufficient: candidates lying only along a
+        diagonal span both axes while leaving the corners of the box
+        unvisited. It is a cheap guard against asking the model to predict
+        where nothing was measured, not a convex-hull test.
+        """
+        cand = np.atleast_2d(np.asarray(self.ti_controls_candidates, float))
+        offenders = []
+        for j, (lo, hi) in enumerate(bounds):
+            c_lo, c_hi = cand[:, j].min(), cand[:, j].max()
+            if c_lo > lo or c_hi < hi:
+                name = (self.ti_controls_names[j]
+                        if self.ti_controls_names is not None
+                        else f"Time-invariant Control {j}")
+                offenders.append(
+                    f"  {name}: region [{lo:g}, {hi:g}] is not covered by "
+                    f"candidates spanning [{c_lo:g}, {c_hi:g}]")
+        if not offenders:
+            return
+        detail = "\n".join(offenders)
+        if allow_extrapolation:
+            import warnings as _w
+            _w.warn(
+                "The prediction region extends beyond the candidate grid, so "
+                "the design is being optimised for predictions at conditions "
+                "no candidate visits:\n" + detail,
+                RuntimeWarning, stacklevel=3)
+            return
+        raise SyntaxError(
+            "The prediction region is wider than the candidate grid:\n"
+            + detail
+            + "\nThe candidates are the conditions you have declared you can "
+              "actually run, so a region outside them asks the model to "
+              "predict where nothing will be measured. Narrow the bounds, "
+              "widen the candidate grid, or pass "
+              "allow_extrapolation=True if that is deliberate."
+        )
+
+    def set_prediction_region(self, bounds, times=None, rule="auto",
+                              nodes=None, points=None, weights=None,
+                              allow_extrapolation=False, seed=0):
+        """Define the region an I-optimal design should predict well over.
+
+        Resolves a region into the three attributes the V-optimal machinery
+        already consumes -- :attr:`dw_tic`, :attr:`dw_spt` and
+        :attr:`dw_weights` -- so that ``trace(W @ FIM^-1 @ W.T)`` becomes the
+        AVERAGE prediction variance over the region rather than the total at
+        a handful of chosen points.
+
+        The node count does not have to be guessed. With ``nodes`` left at
+        None the rule is refined until the moment matrix ``B = W.T W`` stops
+        changing, which is a property of the model and the region alone and
+        so can be converged once, before any design is solved. Two successive
+        levels must fall below ``tol``, since a single agreement can be a
+        plateau rather than convergence.
+
+        Args:
+            bounds (list): one ``(lo, hi)`` pair per time-invariant control.
+                Required: the region you want to predict over is a modelling
+                decision and is NOT assumed to be the candidate grid.
+            times (array, optional): prediction times, for a dynamic model.
+                There is no default -- when the predictions matter is yours
+                to decide. Ignored for a static model.
+            rule (str): ``"gauss"`` (tensor Gauss-Legendre), ``"sobol"``, or
+                ``"auto"``, which picks Gauss up to four controls and Sobol
+                above, where the tensor product stops being affordable.
+            nodes (int, optional): nodes per control for Gauss, or the
+                sample size for Sobol. None adapts, as above, which is the
+                normal case -- pass a value only to reproduce a published
+                rule or to pin a test fixture against drift. The convergence
+                target itself is not an argument; see ``_REGION_TOL``.
+            points, weights (array, optional): an explicit rule, bypassing
+                generation. ``weights`` defaults to uniform.
+            allow_extrapolation (bool): downgrade the coverage refusal to a
+                warning. A gate, not a remedy.
+            seed (int): Sobol seed. Fixed by default so a design is
+                reproducible.
+
+        Returns:
+            dict: what was used -- rule, nodes, point count, achieved
+            relative change in B, and whether it converged.
+        """
+        if self.ti_controls_candidates is None:
+            raise SyntaxError(
+                "set_prediction_region() needs ti_controls_candidates; call "
+                "initialize() first.")
+        bounds = [tuple(float(v) for v in b) for b in bounds]
+        if len(bounds) != self.n_tic:
+            raise SyntaxError(
+                f"bounds has {len(bounds)} entries but the model has "
+                f"{self.n_tic} time-invariant control(s).")
+        for lo, hi in bounds:
+            if not np.isfinite([lo, hi]).all() or hi <= lo:
+                raise SyntaxError(f"bounds entry ({lo}, {hi}) is not a valid "
+                                  f"interval.")
+
+        self._check_region_is_covered(bounds, allow_extrapolation)
+
+        if self._dynamic_system:
+            if times is None:
+                raise SyntaxError(
+                    "times is required for a dynamic model: the prediction "
+                    "variance is averaged over whatever time axis you supply, "
+                    "and there is no sensible default. Pass a single time "
+                    "(e.g. end of batch) or a set of them.")
+            dw_spt = np.atleast_1d(np.asarray(times, dtype=float))
+        else:
+            dw_spt = np.array([0.0])        # placeholder; no time axis
+
+        if rule == "auto":
+            rule = "gauss" if self.n_tic <= 4 else "sobol"
+        if rule not in ("gauss", "sobol"):
+            raise SyntaxError(f'rule must be "gauss", "sobol" or "auto", '
+                              f'not {rule!r}.')
+
+        def _apply(pts, wts):
+            self.dw_tic = np.atleast_2d(pts)
+            self.dw_spt = dw_spt
+            self.dw_weights = np.repeat(np.asarray(wts, float), len(dw_spt))
+            self._eval_W_matrix()
+            W = np.asarray(self.W)
+            return W.T @ W
+
+        # an explicit rule: use it, no refinement
+        if points is not None:
+            pts = np.atleast_2d(np.asarray(points, dtype=float))
+            wts = (np.full(len(pts), 1.0 / len(pts)) if weights is None
+                   else np.asarray(weights, dtype=float))
+            _apply(pts, wts)
+            info = dict(rule="explicit", nodes=None, n_points=len(pts),
+                        relative_change=None, converged=None)
+        elif nodes is not None:
+            pts, wts = (self._gauss_region(bounds, int(nodes)) if rule == "gauss"
+                        else self._sobol_region(bounds, int(nodes), seed))
+            _apply(pts, wts)
+            info = dict(rule=rule, nodes=int(nodes), n_points=len(pts),
+                        relative_change=None, converged=None)
+        else:
+            tol = self._REGION_TOL
+            max_nodes = self._REGION_MAX_NODES
+            levels = (range(2, max_nodes + 1) if rule == "gauss"
+                      else [2 ** k for k in range(5, 17)])
+            prev_B, change, below, converged = None, None, 0, False
+            for lvl in levels:
+                pts, wts = (self._gauss_region(bounds, lvl) if rule == "gauss"
+                            else self._sobol_region(bounds, lvl, seed))
+                B = _apply(pts, wts)
+                if prev_B is not None:
+                    scale = np.abs(B).max()
+                    change = (np.abs(B - prev_B).max() / scale if scale > 0
+                              else 0.0)
+                    # two successive levels under tol, because one agreement
+                    # can be a plateau rather than convergence
+                    below = below + 1 if change < tol else 0
+                    if below >= 2:
+                        converged = True
+                        break
+                prev_B = B
+            if not converged:
+                import warnings as _w
+                _w.warn(
+                    f"The prediction region did not converge to tol={tol:g} "
+                    f"within {max_nodes} nodes; the last relative change in "
+                    f"the moment matrix was {change:.3e}. The design is still "
+                    f"computed, on the finest rule tried.",
+                    RuntimeWarning, stacklevel=2)
+            info = dict(rule=rule, nodes=lvl, n_points=len(self.dw_tic),
+                        relative_change=change, converged=converged)
+
+        self._prediction_region_info = info
+        if self._verbose >= 1:
+            times_str = ("static model, no time axis"
+                         if not self._dynamic_system
+                         else f"{len(dw_spt)} prediction time(s)")
+            conv = ("" if info["relative_change"] is None
+                    else f", max|dB|/|B| = {info['relative_change']:.2e}")
+            print(f"[set_prediction_region] {info['rule']} rule, "
+                  f"{info['n_points']} point(s) x {times_str}{conv}")
+        return info
 
     def design_v_optimal(self, n_exp=None, solver="ipopt", solver_options=None,
                           e0=None, regularize_fim=False, recompute_W=False, **kwargs):

@@ -118,6 +118,7 @@
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.eg_opt_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.eg_opt_criterion()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.ei_opt_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.ei_opt_criterion()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.v_opt_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.v_opt_criterion()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.set_prediction_region"><code class="docutils literal notranslate"><span class="pre">Designer.set_prediction_region()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.design_v_optimal"><code class="docutils literal notranslate"><span class="pre">Designer.design_v_optimal()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.vdi_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.vdi_criterion()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.eval_pim_for_v_opt"><code class="docutils literal notranslate"><span class="pre">Designer.eval_pim_for_v_opt()</span></code></a></li>
@@ -2186,6 +2187,58 @@ experimental candidates in the usual way.</p>
 <p>FIM inversion uses np.linalg.inv with a fallback to the Moore-Penrose
 pseudoinverse when the FIM is singular. Tikhonov regularization is also
 applied when regularize_fim=True is passed to design_experiment().</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="pydex.core.designer.Designer.set_prediction_region">
+<span class="sig-name descname"><span class="pre">set_prediction_region</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">bounds</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">times</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rule</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'auto'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nodes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">points</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weights</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">allow_extrapolation</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seed</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.set_prediction_region"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.set_prediction_region" title="Link to this definition"></a></dt>
+<dd><p>Define the region an I-optimal design should predict well over.</p>
+<p>Resolves a region into the three attributes the V-optimal machinery
+already consumes – <a class="reference internal" href="#pydex.core.designer.Designer.dw_tic" title="pydex.core.designer.Designer.dw_tic"><code class="xref py py-attr docutils literal notranslate"><span class="pre">dw_tic</span></code></a>, <code class="xref py py-attr docutils literal notranslate"><span class="pre">dw_spt</span></code> and
+<code class="xref py py-attr docutils literal notranslate"><span class="pre">dw_weights</span></code> – so that <code class="docutils literal notranslate"><span class="pre">trace(W</span> <span class="pre">&#64;</span> <span class="pre">FIM^-1</span> <span class="pre">&#64;</span> <span class="pre">W.T)</span></code> becomes the
+AVERAGE prediction variance over the region rather than the total at
+a handful of chosen points.</p>
+<p>The node count does not have to be guessed. With <code class="docutils literal notranslate"><span class="pre">nodes</span></code> left at
+None the rule is refined until the moment matrix <code class="docutils literal notranslate"><span class="pre">B</span> <span class="pre">=</span> <span class="pre">W.T</span> <span class="pre">W</span></code> stops
+changing, which is a property of the model and the region alone and
+so can be converged once, before any design is solved. Two successive
+levels must fall below <code class="docutils literal notranslate"><span class="pre">tol</span></code>, since a single agreement can be a
+plateau rather than convergence.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>bounds</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>) – one <code class="docutils literal notranslate"><span class="pre">(lo,</span> <span class="pre">hi)</span></code> pair per time-invariant control.
+Required: the region you want to predict over is a modelling
+decision and is NOT assumed to be the candidate grid.</p></li>
+<li><p><strong>times</strong> (<em>array</em><em>, </em><em>optional</em>) – prediction times, for a dynamic model.
+There is no default – when the predictions matter is yours
+to decide. Ignored for a static model.</p></li>
+<li><p><strong>rule</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a>) – <code class="docutils literal notranslate"><span class="pre">&quot;gauss&quot;</span></code> (tensor Gauss-Legendre), <code class="docutils literal notranslate"><span class="pre">&quot;sobol&quot;</span></code>, or
+<code class="docutils literal notranslate"><span class="pre">&quot;auto&quot;</span></code>, which picks Gauss up to four controls and Sobol
+above, where the tensor product stops being affordable.</p></li>
+<li><p><strong>nodes</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a><em>, </em><em>optional</em>) – nodes per control for Gauss, or the
+sample size for Sobol. None adapts, as above, which is the
+normal case – pass a value only to reproduce a published
+rule or to pin a test fixture against drift. The convergence
+target itself is not an argument; see <code class="docutils literal notranslate"><span class="pre">_REGION_TOL</span></code>.</p></li>
+<li><p><strong>points</strong> (<em>array</em><em>, </em><em>optional</em>) – an explicit rule, bypassing
+generation. <code class="docutils literal notranslate"><span class="pre">weights</span></code> defaults to uniform.</p></li>
+<li><p><strong>weights</strong> (<em>array</em><em>, </em><em>optional</em>) – an explicit rule, bypassing
+generation. <code class="docutils literal notranslate"><span class="pre">weights</span></code> defaults to uniform.</p></li>
+<li><p><strong>allow_extrapolation</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a>) – downgrade the coverage refusal to a
+warning. A gate, not a remedy.</p></li>
+<li><p><strong>seed</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>) – Sobol seed. Fixed by default so a design is
+reproducible.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>what was used – rule, nodes, point count, achieved
+relative change in B, and whether it converged.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.15)">dict</a></p>
+</dd>
+</dl>
 </dd></dl>
 
 <dl class="py method">
