@@ -67,6 +67,11 @@ different scales -- criterion values are not comparable across criteria, and
 an I-optimal value is not comparable across regions either, since changing
 the bounds changes what is being averaged. Compare DESIGNS.
 
+It also writes one figure, ``quadratic_surface_efforts.png``, putting the two
+designs side by side on the factor space: the candidate grid in grey, the
+supported points as circles with area proportional to effort. The D panel has
+its weight at the corners; the I panel has it in the middle.
+
 Run
 ---
     python quadratic_surface.py
@@ -76,6 +81,7 @@ downloaded binaries; ``solver="ipopt"`` works equally well.
 """
 
 import numpy as np
+from matplotlib import pyplot as plt
 
 from pydex.core.designer import Designer
 
@@ -167,3 +173,59 @@ print(f"\n  I lowers the average prediction variance by "
 print(f"  D wins on log det FIM by {logdet_d - logdet_i:.4f}")
 print("\n  Different questions, different answers. "
       "Compare designs, not criterion values.")
+
+
+# ---------------------------------------------------------------------------
+# The same two designs, side by side on the factor space
+#
+# Position is the experimental condition, marker area is the effort. Written
+# out twice rather than looped, so each panel can be read on its own.
+# ---------------------------------------------------------------------------
+candidates = designer.ti_controls_candidates
+
+fig, (ax_d, ax_i) = plt.subplots(1, 2, figsize=(10, 4.8),
+                                 sharex=True, sharey=True)
+
+# D-optimal panel
+ax_d.scatter(candidates[:, 0], candidates[:, 1], s=18, c="0.85",
+             edgecolors="none", zorder=1)
+supported_d = efforts_d.flatten() > 1e-3
+ax_d.scatter(candidates[supported_d, 0], candidates[supported_d, 1],
+             s=efforts_d.flatten()[supported_d] * 4000,
+             c="tab:orange", alpha=0.55, edgecolors="k", linewidths=0.7,
+             zorder=2)
+for i in np.argwhere(supported_d).ravel():
+    ax_d.annotate(f"{efforts_d.flatten()[i] * 100:.1f}%",
+                  (candidates[i, 0], candidates[i, 1]),
+                  ha="center", va="center", fontsize=7.5, zorder=3)
+ax_d.set_title("D-optimal — precise PARAMETERS", fontsize=10)
+
+# I-optimal panel
+ax_i.scatter(candidates[:, 0], candidates[:, 1], s=18, c="0.85",
+             edgecolors="none", zorder=1)
+supported_i = efforts_i.flatten() > 1e-3
+ax_i.scatter(candidates[supported_i, 0], candidates[supported_i, 1],
+             s=efforts_i.flatten()[supported_i] * 4000,
+             c="tab:blue", alpha=0.55, edgecolors="k", linewidths=0.7,
+             zorder=2)
+for i in np.argwhere(supported_i).ravel():
+    ax_i.annotate(f"{efforts_i.flatten()[i] * 100:.1f}%",
+                  (candidates[i, 0], candidates[i, 1]),
+                  ha="center", va="center", fontsize=7.5, zorder=3)
+ax_i.set_title("I-optimal — precise PREDICTIONS over the region", fontsize=10)
+
+for ax in (ax_d, ax_i):
+    ax.set_xlabel("$x_1$")
+    ax.set_xlim(-1.4, 1.4)
+    ax.set_ylim(-1.4, 1.4)
+    ax.set_aspect("equal")
+    ax.grid(alpha=0.25, linewidth=0.5)
+ax_d.set_ylabel("$x_2$")
+
+fig.suptitle("The same nine support points, weighted differently\n"
+             "grey = candidates with no effort, marker area = effort",
+             fontsize=11)
+fig.tight_layout()
+fig.savefig("quadratic_surface_efforts.png", dpi=150)
+print("\n  Wrote quadratic_surface_efforts.png to the working directory.")
+plt.show()

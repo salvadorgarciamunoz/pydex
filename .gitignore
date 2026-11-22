@@ -149,6 +149,8 @@ docs/_build/
 examples/b_optimal/*.png
 # Figures written by the error-model example (working directory)
 examples/error_model/*.png
+# Figure written by the I-optimal example (working directory)
+examples/i_optimal/*.png
 
 # PyBuilder
 target/
