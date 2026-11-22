@@ -121,6 +121,7 @@
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.set_prediction_region"><code class="docutils literal notranslate"><span class="pre">Designer.set_prediction_region()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.design_i_optimal"><code class="docutils literal notranslate"><span class="pre">Designer.design_i_optimal()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.design_v_optimal"><code class="docutils literal notranslate"><span class="pre">Designer.design_v_optimal()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.i_opt_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.i_opt_criterion()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.vdi_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.vdi_criterion()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.eval_pim_for_v_opt"><code class="docutils literal notranslate"><span class="pre">Designer.eval_pim_for_v_opt()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pydex.core.designer.Designer.u_opt_criterion"><code class="docutils literal notranslate"><span class="pre">Designer.u_opt_criterion()</span></code></a></li>
@@ -2303,6 +2304,41 @@ variance at the optimal operating point <code class="docutils literal notranslat
 <li><p><strong>recompute_W</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a>) – Force recomputation of W even if already cached.</p></li>
 <li><p><strong>**kwargs</strong> – Forwarded to <code class="docutils literal notranslate"><span class="pre">design_experiment()</span></code>.</p></li>
 </ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="pydex.core.designer.Designer.i_opt_criterion">
+<span class="sig-name descname"><span class="pre">i_opt_criterion</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">efforts</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/pydex/core/designer.html#Designer.i_opt_criterion"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#pydex.core.designer.Designer.i_opt_criterion" title="Link to this definition"></a></dt>
+<dd><p>I-optimality: the AVERAGE prediction variance over a region.</p>
+<p>Identical to <a class="reference internal" href="#pydex.core.designer.Designer.v_opt_criterion" title="pydex.core.designer.Designer.v_opt_criterion"><code class="xref py py-meth docutils literal notranslate"><span class="pre">v_opt_criterion()</span></code></a> – deliberately, because
+I-optimality is not a different formula. Both evaluate
+<code class="docutils literal notranslate"><span class="pre">trace(W</span> <span class="pre">&#64;</span> <span class="pre">FIM^-1</span> <span class="pre">&#64;</span> <span class="pre">W.T)</span></code>; what makes the result an average rather
+than a total is the quadrature weighting that
+<a class="reference internal" href="#pydex.core.designer.Designer.set_prediction_region" title="pydex.core.designer.Designer.set_prediction_region"><code class="xref py py-meth docutils literal notranslate"><span class="pre">set_prediction_region()</span></code></a> installs on the prediction locations.</p>
+<p>This name exists so that every criterion is passed to
+<a class="reference internal" href="#pydex.core.designer.Designer.design_experiment" title="pydex.core.designer.Designer.design_experiment"><code class="xref py py-meth docutils literal notranslate"><span class="pre">design_experiment()</span></code></a> the same way:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">designer</span><span class="o">.</span><span class="n">design_experiment</span><span class="p">(</span><span class="n">designer</span><span class="o">.</span><span class="n">d_opt_criterion</span><span class="p">,</span> <span class="n">solver</span><span class="o">=...</span><span class="p">)</span>
+
+<span class="n">designer</span><span class="o">.</span><span class="n">set_prediction_region</span><span class="p">(</span><span class="n">bounds</span><span class="o">=</span><span class="p">[(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">)])</span>
+<span class="n">designer</span><span class="o">.</span><span class="n">design_experiment</span><span class="p">(</span><span class="n">designer</span><span class="o">.</span><span class="n">i_opt_criterion</span><span class="p">,</span> <span class="n">solver</span><span class="o">=...</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>and so that a reader of either line can see which question is being
+asked. <a class="reference internal" href="#pydex.core.designer.Designer.design_i_optimal" title="pydex.core.designer.Designer.design_i_optimal"><code class="xref py py-meth docutils literal notranslate"><span class="pre">design_i_optimal()</span></code></a> is the same thing with the reporting
+attached.</p>
+<p>Passing this without a prediction region raises, rather than
+reporting a sum as though it were an average.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>efforts</strong> (<a class="reference external" href="https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html#numpy.ndarray" title="(in NumPy v2.5)"><em>numpy.ndarray</em></a>) – experimental effort vector.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>the criterion value, to be MINIMISED.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.15)">float</a></p>
 </dd>
 </dl>
 </dd></dl>

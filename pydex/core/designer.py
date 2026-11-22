@@ -2967,7 +2967,19 @@ class Designer:
         is_d   = 'd_opt'  in crit_name and 'pb' not in crit_name and not is_ds
         is_a   = 'a_opt'  in crit_name and 'pb' not in crit_name
         is_e   = 'e_opt'  in crit_name and 'pb' not in crit_name
-        is_v   = 'v_opt'  in crit_name
+        # I-optimal shares V-optimality's formula entirely: the weighting
+        # installed by set_prediction_region() is what turns the sum into an
+        # average. So is_i implies is_v, and the only separate handling is the
+        # guard below that refuses an unweighted region.
+        #
+        # Matched on the EXACT name, never as a substring. 'i_opt' appears
+        # inside ai_opt_criterion, di_opt_criterion, ei_opt_criterion and
+        # their private and pseudo-Bayesian variants -- ten names in all,
+        # enumerated rather than assumed -- so a substring test would misroute
+        # every one of them into this branch.
+        is_i   = crit_name.lstrip('_') in ('i_opt_criterion',
+                                           'pb_i_opt_criterion')
+        is_v   = 'v_opt'  in crit_name or is_i
         is_b   = 'b_opt'  in crit_name   # Bracketing-optimal (Chen et al. 2018)
         is_pb  = self._pseudo_bayesian   # set by design_experiment() before we get here
 
@@ -3451,6 +3463,17 @@ class Designer:
             m.obj = pyo.Objective(expr=-m.gamma, sense=pyo.minimize)
 
         elif is_v:
+            if is_i and self.dw_weights is None:
+                raise SyntaxError(
+                    "i_opt_criterion needs a prediction region: call "
+                    "designer.set_prediction_region(bounds=...) first.\n"
+                    "I-optimality is V-optimality with the prediction "
+                    "locations weighted by a quadrature rule, so without the "
+                    "weights the criterion would be the TOTAL prediction "
+                    "variance over whatever points are in dw_tic, not the "
+                    "average over a region. If that total is what you want, "
+                    "pass v_opt_criterion instead."
+                )
             # V-optimal: minimise trace(W @ FIM^{-1} @ W.T)
             # Same lifted form as A-optimal but with W weighting
             if self.W is None:
@@ -4592,6 +4615,12 @@ class Designer:
                     f"used to be swallowed silently, which turned a typo into "
                     f"a silently different design."
                 )
+
+        # A criterion may be given as a string ("D-optimal") or as a
+        # callable. Resolve it here, before anything downstream looks at
+        # criterion.__name__ -- the dispatch in _solve_pyomo routes by name,
+        # so it must receive the bound method either way.
+        criterion = self._resolve_criterion(criterion)
 
         self._regularize_fim = regularize_fim
         # Clear the latched det/pseudo-det decision for dg/di/vdi so each design
@@ -7348,6 +7377,7 @@ class Designer:
         pseudoinverse when the FIM is singular. Tikhonov regularization is also
         applied when regularize_fim=True is passed to design_experiment().
         """
+        self._refuse_prediction_criterion_under_scenarios("v_opt_criterion")
         return self._v_opt_criterion(efforts)
 
     def _v_opt_criterion(self, efforts):
@@ -7773,6 +7803,9 @@ class Designer:
                 raise SyntaxError(f"bounds entry ({lo}, {hi}) is not a valid "
                                   f"interval.")
 
+        self._refuse_prediction_criterion_under_scenarios(
+            "set_prediction_region(), and the I-optimal design it is for,")
+
         self._check_region_is_covered(bounds, allow_extrapolation)
 
         if self._dynamic_system:
@@ -7912,7 +7945,7 @@ class Designer:
             self._eval_W_matrix()
 
         result = self.design_experiment(
-            criterion=self.v_opt_criterion,
+            criterion=self.i_opt_criterion,
             n_exp=n_exp,
             solver=solver,
             solver_options=solver_options,
@@ -8005,6 +8038,127 @@ class Designer:
         )
 
     # goal-oriented for design space
+    # Criterion names accepted as strings by design_experiment(). The values
+    # are attribute names on the Designer; the keys are the normalised form of
+    # whatever the user typed (see _normalise_criterion_name).
+    #
+    # CVaR is deliberately absent. It is not a design_experiment() criterion:
+    # solve_cvar_problem() is its entry point and refuses anything without
+    # "cvar" in the name, so listing it here would advertise a route that does
+    # not exist.
+    _CRITERION_NAMES = {
+        "d": "d_opt_criterion",
+        "ds": "ds_opt_criterion",
+        "a": "a_opt_criterion",
+        "e": "e_opt_criterion",
+        "v": "v_opt_criterion",
+        "i": "i_opt_criterion",
+        "b": "b_opt_criterion",
+    }
+
+    @staticmethod
+    def _normalise_criterion_name(text):
+        """Reduce a user-typed criterion name to its key in _CRITERION_NAMES.
+
+        Case, hyphens, underscores and spaces are ignored, a trailing
+        "criterion" is dropped, and "optimal" and "opt" are treated as the
+        same word. So all of these mean D-optimality::
+
+            "D-optimal"  "d_optimal"  "D opt"  "d_opt_criterion"  "D"
+        """
+        key = str(text).strip().lower()
+        for ch in ("-", "_", " "):
+            key = key.replace(ch, "")
+        for suffix in ("criterion", "optimal", "opt"):
+            if key.endswith(suffix):
+                key = key[: -len(suffix)]
+        return key
+
+    def _resolve_criterion(self, criterion):
+        """Accept a criterion as a string OR as a callable.
+
+        Strings are the ordinary route. Callables are kept because the suite,
+        the examples and user code all pass bound methods, and because a user
+        may supply a criterion function of their own -- a string-only API
+        would take that away.
+        """
+        if callable(criterion):
+            return criterion
+        if not isinstance(criterion, str):
+            raise SyntaxError(
+                f"criterion must be a string such as \"D-optimal\", or a "
+                f"callable, not {type(criterion).__name__}."
+            )
+        key = self._normalise_criterion_name(criterion)
+        if key not in self._CRITERION_NAMES:
+            valid = ", ".join(f'"{k.upper() if len(k) == 1 else k.capitalize()}'
+                              f'-optimal"' for k in self._CRITERION_NAMES)
+            extra = ""
+            if "cvar" in key:
+                extra = ("\nCVaR designs are not solved through "
+                         "design_experiment(); use solve_cvar_problem("
+                         "criterion, beta, ...) instead.")
+            raise SyntaxError(
+                f"Unknown criterion {criterion!r}. Valid names are: {valid}."
+                f"{extra}\nA criterion callable, e.g. "
+                f"designer.d_opt_criterion, is also accepted."
+            )
+        return getattr(self, self._CRITERION_NAMES[key])
+
+    def _refuse_prediction_criterion_under_scenarios(self, what):
+        """Prediction criteria have no pseudo-Bayesian form. Say so clearly.
+
+        Without this the failure is a matmul shape mismatch raised from deep
+        inside numpy, which tells the user nothing. Matches the exception type
+        vdi_criterion already uses for the same situation.
+        """
+        if not self._pseudo_bayesian:
+            return
+        raise NotImplementedError(
+            f"{what} has no pseudo-Bayesian form, but model_parameters is "
+            f"2-D, so pydex is running a pseudo-Bayesian design.\n"
+            "A prediction criterion depends on the nominal parameters twice "
+            "over -- through the FIM and through the prediction "
+            "sensitivities -- and averaging the information, which is what "
+            "pseudo_bayesian_type=0 does, has no clean meaning when the "
+            "prediction sensitivities themselves move with the parameters.\n"
+            "Give model_parameters as a 1-D array to design at a single "
+            "nominal, or use a calibration criterion (D, Ds, A or E), which "
+            "do have pseudo-Bayesian forms."
+        )
+
+    def i_opt_criterion(self, efforts):
+        """I-optimality: the AVERAGE prediction variance over a region.
+
+        Identical to :meth:`v_opt_criterion` -- deliberately, because
+        I-optimality is not a different formula. Both evaluate
+        ``trace(W @ FIM^-1 @ W.T)``; what makes the result an average rather
+        than a total is the quadrature weighting that
+        :meth:`set_prediction_region` installs on the prediction locations.
+
+        This name exists so that every criterion is passed to
+        :meth:`design_experiment` the same way::
+
+            designer.design_experiment(designer.d_opt_criterion, solver=...)
+
+            designer.set_prediction_region(bounds=[(-1, 1), (-1, 1)])
+            designer.design_experiment(designer.i_opt_criterion, solver=...)
+
+        and so that a reader of either line can see which question is being
+        asked. :meth:`design_i_optimal` is the same thing with the reporting
+        attached.
+
+        Passing this without a prediction region raises, rather than
+        reporting a sum as though it were an average.
+
+        Args:
+            efforts (numpy.ndarray): experimental effort vector.
+
+        Returns:
+            float: the criterion value, to be MINIMISED.
+        """
+        return self.v_opt_criterion(efforts)
+
     def vdi_criterion(self, efforts):
         """vdi-optimality: summed log-determinant of PVAR over the GOAL-ORIENTED
         grid.

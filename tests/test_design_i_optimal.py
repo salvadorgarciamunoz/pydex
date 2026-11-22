@@ -98,11 +98,16 @@ def test_the_method_exists_and_is_public():
     assert callable(getattr(Designer, "design_i_optimal", None))
 
 
-def test_there_is_no_i_opt_criterion():
-    """I-optimality has no formula of its own, and the API should not imply one.
+def test_i_opt_criterion_is_an_alias_not_a_second_formula():
+    """I-optimality has no formula of its own, and must not grow one.
 
-    It is V-optimality with weighted locations. A separate criterion would be
-    a second copy of one formula, which the project's one-formula-per-criterion
-    contract exists to prevent.
+    ``i_opt_criterion`` exists so that every criterion is passed to
+    design_experiment() the same way, but it forwards to v_opt_criterion
+    rather than reimplementing it. Two implementations of one formula are
+    what the one-formula-per-criterion contract exists to prevent; two names
+    for one implementation cannot drift.
     """
-    assert not hasattr(Designer, "i_opt_criterion")
+    d = _designer()
+    d.set_prediction_region(bounds=[(-1, 1), (-1, 1)], nodes=3)
+    efforts = np.full(25, 1.0 / 25)
+    assert d.i_opt_criterion(efforts) == d.v_opt_criterion(efforts)

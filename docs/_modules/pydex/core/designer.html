@@ -3073,7 +3073,19 @@
         <span class="n">is_d</span>   <span class="o">=</span> <span class="s1">&#39;d_opt&#39;</span>  <span class="ow">in</span> <span class="n">crit_name</span> <span class="ow">and</span> <span class="s1">&#39;pb&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">crit_name</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">is_ds</span>
         <span class="n">is_a</span>   <span class="o">=</span> <span class="s1">&#39;a_opt&#39;</span>  <span class="ow">in</span> <span class="n">crit_name</span> <span class="ow">and</span> <span class="s1">&#39;pb&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">crit_name</span>
         <span class="n">is_e</span>   <span class="o">=</span> <span class="s1">&#39;e_opt&#39;</span>  <span class="ow">in</span> <span class="n">crit_name</span> <span class="ow">and</span> <span class="s1">&#39;pb&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">crit_name</span>
-        <span class="n">is_v</span>   <span class="o">=</span> <span class="s1">&#39;v_opt&#39;</span>  <span class="ow">in</span> <span class="n">crit_name</span>
+        <span class="c1"># I-optimal shares V-optimality&#39;s formula entirely: the weighting</span>
+        <span class="c1"># installed by set_prediction_region() is what turns the sum into an</span>
+        <span class="c1"># average. So is_i implies is_v, and the only separate handling is the</span>
+        <span class="c1"># guard below that refuses an unweighted region.</span>
+        <span class="c1">#</span>
+        <span class="c1"># Matched on the EXACT name, never as a substring. &#39;i_opt&#39; appears</span>
+        <span class="c1"># inside ai_opt_criterion, di_opt_criterion, ei_opt_criterion and</span>
+        <span class="c1"># their private and pseudo-Bayesian variants -- ten names in all,</span>
+        <span class="c1"># enumerated rather than assumed -- so a substring test would misroute</span>
+        <span class="c1"># every one of them into this branch.</span>
+        <span class="n">is_i</span>   <span class="o">=</span> <span class="n">crit_name</span><span class="o">.</span><span class="n">lstrip</span><span class="p">(</span><span class="s1">&#39;_&#39;</span><span class="p">)</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;i_opt_criterion&#39;</span><span class="p">,</span>
+                                           <span class="s1">&#39;pb_i_opt_criterion&#39;</span><span class="p">)</span>
+        <span class="n">is_v</span>   <span class="o">=</span> <span class="s1">&#39;v_opt&#39;</span>  <span class="ow">in</span> <span class="n">crit_name</span> <span class="ow">or</span> <span class="n">is_i</span>
         <span class="n">is_b</span>   <span class="o">=</span> <span class="s1">&#39;b_opt&#39;</span>  <span class="ow">in</span> <span class="n">crit_name</span>   <span class="c1"># Bracketing-optimal (Chen et al. 2018)</span>
         <span class="n">is_pb</span>  <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_bayesian</span>   <span class="c1"># set by design_experiment() before we get here</span>
 
@@ -3557,6 +3569,17 @@
             <span class="n">m</span><span class="o">.</span><span class="n">obj</span> <span class="o">=</span> <span class="n">pyo</span><span class="o">.</span><span class="n">Objective</span><span class="p">(</span><span class="n">expr</span><span class="o">=-</span><span class="n">m</span><span class="o">.</span><span class="n">gamma</span><span class="p">,</span> <span class="n">sense</span><span class="o">=</span><span class="n">pyo</span><span class="o">.</span><span class="n">minimize</span><span class="p">)</span>
 
         <span class="k">elif</span> <span class="n">is_v</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">is_i</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">dw_weights</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
+                    <span class="s2">&quot;i_opt_criterion needs a prediction region: call &quot;</span>
+                    <span class="s2">&quot;designer.set_prediction_region(bounds=...) first.</span><span class="se">\n</span><span class="s2">&quot;</span>
+                    <span class="s2">&quot;I-optimality is V-optimality with the prediction &quot;</span>
+                    <span class="s2">&quot;locations weighted by a quadrature rule, so without the &quot;</span>
+                    <span class="s2">&quot;weights the criterion would be the TOTAL prediction &quot;</span>
+                    <span class="s2">&quot;variance over whatever points are in dw_tic, not the &quot;</span>
+                    <span class="s2">&quot;average over a region. If that total is what you want, &quot;</span>
+                    <span class="s2">&quot;pass v_opt_criterion instead.&quot;</span>
+                <span class="p">)</span>
             <span class="c1"># V-optimal: minimise trace(W @ FIM^{-1} @ W.T)</span>
             <span class="c1"># Same lifted form as A-optimal but with W weighting</span>
             <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">W</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
@@ -4706,6 +4729,12 @@
                     <span class="sa">f</span><span class="s2">&quot;used to be swallowed silently, which turned a typo into &quot;</span>
                     <span class="sa">f</span><span class="s2">&quot;a silently different design.&quot;</span>
                 <span class="p">)</span>
+
+        <span class="c1"># A criterion may be given as a string (&quot;D-optimal&quot;) or as a</span>
+        <span class="c1"># callable. Resolve it here, before anything downstream looks at</span>
+        <span class="c1"># criterion.__name__ -- the dispatch in _solve_pyomo routes by name,</span>
+        <span class="c1"># so it must receive the bound method either way.</span>
+        <span class="n">criterion</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_resolve_criterion</span><span class="p">(</span><span class="n">criterion</span><span class="p">)</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">_regularize_fim</span> <span class="o">=</span> <span class="n">regularize_fim</span>
         <span class="c1"># Clear the latched det/pseudo-det decision for dg/di/vdi so each design</span>
@@ -7582,6 +7611,7 @@
 <span class="sd">        pseudoinverse when the FIM is singular. Tikhonov regularization is also</span>
 <span class="sd">        applied when regularize_fim=True is passed to design_experiment().</span>
 <span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_refuse_prediction_criterion_under_scenarios</span><span class="p">(</span><span class="s2">&quot;v_opt_criterion&quot;</span><span class="p">)</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_v_opt_criterion</span><span class="p">(</span><span class="n">efforts</span><span class="p">)</span></div>
 
 
@@ -8010,6 +8040,9 @@
                 <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;bounds entry (</span><span class="si">{</span><span class="n">lo</span><span class="si">}</span><span class="s2">, </span><span class="si">{</span><span class="n">hi</span><span class="si">}</span><span class="s2">) is not a valid &quot;</span>
                                   <span class="sa">f</span><span class="s2">&quot;interval.&quot;</span><span class="p">)</span>
 
+        <span class="bp">self</span><span class="o">.</span><span class="n">_refuse_prediction_criterion_under_scenarios</span><span class="p">(</span>
+            <span class="s2">&quot;set_prediction_region(), and the I-optimal design it is for,&quot;</span><span class="p">)</span>
+
         <span class="bp">self</span><span class="o">.</span><span class="n">_check_region_is_covered</span><span class="p">(</span><span class="n">bounds</span><span class="p">,</span> <span class="n">allow_extrapolation</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dynamic_system</span><span class="p">:</span>
@@ -8152,7 +8185,7 @@
             <span class="bp">self</span><span class="o">.</span><span class="n">_eval_W_matrix</span><span class="p">()</span>
 
         <span class="n">result</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">design_experiment</span><span class="p">(</span>
-            <span class="n">criterion</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">v_opt_criterion</span><span class="p">,</span>
+            <span class="n">criterion</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">i_opt_criterion</span><span class="p">,</span>
             <span class="n">n_exp</span><span class="o">=</span><span class="n">n_exp</span><span class="p">,</span>
             <span class="n">solver</span><span class="o">=</span><span class="n">solver</span><span class="p">,</span>
             <span class="n">solver_options</span><span class="o">=</span><span class="n">solver_options</span><span class="p">,</span>
@@ -8249,6 +8282,130 @@
 
 
     <span class="c1"># goal-oriented for design space</span>
+    <span class="c1"># Criterion names accepted as strings by design_experiment(). The values</span>
+    <span class="c1"># are attribute names on the Designer; the keys are the normalised form of</span>
+    <span class="c1"># whatever the user typed (see _normalise_criterion_name).</span>
+    <span class="c1">#</span>
+    <span class="c1"># CVaR is deliberately absent. It is not a design_experiment() criterion:</span>
+    <span class="c1"># solve_cvar_problem() is its entry point and refuses anything without</span>
+    <span class="c1"># &quot;cvar&quot; in the name, so listing it here would advertise a route that does</span>
+    <span class="c1"># not exist.</span>
+    <span class="n">_CRITERION_NAMES</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">&quot;d&quot;</span><span class="p">:</span> <span class="s2">&quot;d_opt_criterion&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;ds&quot;</span><span class="p">:</span> <span class="s2">&quot;ds_opt_criterion&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;a&quot;</span><span class="p">:</span> <span class="s2">&quot;a_opt_criterion&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;e&quot;</span><span class="p">:</span> <span class="s2">&quot;e_opt_criterion&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;v&quot;</span><span class="p">:</span> <span class="s2">&quot;v_opt_criterion&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;i&quot;</span><span class="p">:</span> <span class="s2">&quot;i_opt_criterion&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;b&quot;</span><span class="p">:</span> <span class="s2">&quot;b_opt_criterion&quot;</span><span class="p">,</span>
+    <span class="p">}</span>
+
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_normalise_criterion_name</span><span class="p">(</span><span class="n">text</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Reduce a user-typed criterion name to its key in _CRITERION_NAMES.</span>
+
+<span class="sd">        Case, hyphens, underscores and spaces are ignored, a trailing</span>
+<span class="sd">        &quot;criterion&quot; is dropped, and &quot;optimal&quot; and &quot;opt&quot; are treated as the</span>
+<span class="sd">        same word. So all of these mean D-optimality::</span>
+
+<span class="sd">            &quot;D-optimal&quot;  &quot;d_optimal&quot;  &quot;D opt&quot;  &quot;d_opt_criterion&quot;  &quot;D&quot;</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">text</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">ch</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;-&quot;</span><span class="p">,</span> <span class="s2">&quot;_&quot;</span><span class="p">,</span> <span class="s2">&quot; &quot;</span><span class="p">):</span>
+            <span class="n">key</span> <span class="o">=</span> <span class="n">key</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="n">ch</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">suffix</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;criterion&quot;</span><span class="p">,</span> <span class="s2">&quot;optimal&quot;</span><span class="p">,</span> <span class="s2">&quot;opt&quot;</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">key</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="n">suffix</span><span class="p">):</span>
+                <span class="n">key</span> <span class="o">=</span> <span class="n">key</span><span class="p">[:</span> <span class="o">-</span><span class="nb">len</span><span class="p">(</span><span class="n">suffix</span><span class="p">)]</span>
+        <span class="k">return</span> <span class="n">key</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_resolve_criterion</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">criterion</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Accept a criterion as a string OR as a callable.</span>
+
+<span class="sd">        Strings are the ordinary route. Callables are kept because the suite,</span>
+<span class="sd">        the examples and user code all pass bound methods, and because a user</span>
+<span class="sd">        may supply a criterion function of their own -- a string-only API</span>
+<span class="sd">        would take that away.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="nb">callable</span><span class="p">(</span><span class="n">criterion</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">criterion</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">criterion</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;criterion must be a string such as </span><span class="se">\&quot;</span><span class="s2">D-optimal</span><span class="se">\&quot;</span><span class="s2">, or a &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;callable, not </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">criterion</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s2">.&quot;</span>
+            <span class="p">)</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_normalise_criterion_name</span><span class="p">(</span><span class="n">criterion</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_CRITERION_NAMES</span><span class="p">:</span>
+            <span class="n">valid</span> <span class="o">=</span> <span class="s2">&quot;, &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;&quot;</span><span class="si">{</span><span class="n">k</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="n">k</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="n">k</span><span class="o">.</span><span class="n">capitalize</span><span class="p">()</span><span class="si">}</span><span class="s1">&#39;</span>
+                              <span class="sa">f</span><span class="s1">&#39;-optimal&quot;&#39;</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_CRITERION_NAMES</span><span class="p">)</span>
+            <span class="n">extra</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+            <span class="k">if</span> <span class="s2">&quot;cvar&quot;</span> <span class="ow">in</span> <span class="n">key</span><span class="p">:</span>
+                <span class="n">extra</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">CVaR designs are not solved through &quot;</span>
+                         <span class="s2">&quot;design_experiment(); use solve_cvar_problem(&quot;</span>
+                         <span class="s2">&quot;criterion, beta, ...) instead.&quot;</span><span class="p">)</span>
+            <span class="k">raise</span> <span class="ne">SyntaxError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;Unknown criterion </span><span class="si">{</span><span class="n">criterion</span><span class="si">!r}</span><span class="s2">. Valid names are: </span><span class="si">{</span><span class="n">valid</span><span class="si">}</span><span class="s2">.&quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">extra</span><span class="si">}</span><span class="se">\n</span><span class="s2">A criterion callable, e.g. &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;designer.d_opt_criterion, is also accepted.&quot;</span>
+            <span class="p">)</span>
+        <span class="k">return</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_CRITERION_NAMES</span><span class="p">[</span><span class="n">key</span><span class="p">])</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_refuse_prediction_criterion_under_scenarios</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">what</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Prediction criteria have no pseudo-Bayesian form. Say so clearly.</span>
+
+<span class="sd">        Without this the failure is a matmul shape mismatch raised from deep</span>
+<span class="sd">        inside numpy, which tells the user nothing. Matches the exception type</span>
+<span class="sd">        vdi_criterion already uses for the same situation.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pseudo_bayesian</span><span class="p">:</span>
+            <span class="k">return</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">what</span><span class="si">}</span><span class="s2"> has no pseudo-Bayesian form, but model_parameters is &quot;</span>
+            <span class="sa">f</span><span class="s2">&quot;2-D, so pydex is running a pseudo-Bayesian design.</span><span class="se">\n</span><span class="s2">&quot;</span>
+            <span class="s2">&quot;A prediction criterion depends on the nominal parameters twice &quot;</span>
+            <span class="s2">&quot;over -- through the FIM and through the prediction &quot;</span>
+            <span class="s2">&quot;sensitivities -- and averaging the information, which is what &quot;</span>
+            <span class="s2">&quot;pseudo_bayesian_type=0 does, has no clean meaning when the &quot;</span>
+            <span class="s2">&quot;prediction sensitivities themselves move with the parameters.</span><span class="se">\n</span><span class="s2">&quot;</span>
+            <span class="s2">&quot;Give model_parameters as a 1-D array to design at a single &quot;</span>
+            <span class="s2">&quot;nominal, or use a calibration criterion (D, Ds, A or E), which &quot;</span>
+            <span class="s2">&quot;do have pseudo-Bayesian forms.&quot;</span>
+        <span class="p">)</span>
+
+<div class="viewcode-block" id="Designer.i_opt_criterion">
+<a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.i_opt_criterion">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">i_opt_criterion</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">efforts</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;I-optimality: the AVERAGE prediction variance over a region.</span>
+
+<span class="sd">        Identical to :meth:`v_opt_criterion` -- deliberately, because</span>
+<span class="sd">        I-optimality is not a different formula. Both evaluate</span>
+<span class="sd">        ``trace(W @ FIM^-1 @ W.T)``; what makes the result an average rather</span>
+<span class="sd">        than a total is the quadrature weighting that</span>
+<span class="sd">        :meth:`set_prediction_region` installs on the prediction locations.</span>
+
+<span class="sd">        This name exists so that every criterion is passed to</span>
+<span class="sd">        :meth:`design_experiment` the same way::</span>
+
+<span class="sd">            designer.design_experiment(designer.d_opt_criterion, solver=...)</span>
+
+<span class="sd">            designer.set_prediction_region(bounds=[(-1, 1), (-1, 1)])</span>
+<span class="sd">            designer.design_experiment(designer.i_opt_criterion, solver=...)</span>
+
+<span class="sd">        and so that a reader of either line can see which question is being</span>
+<span class="sd">        asked. :meth:`design_i_optimal` is the same thing with the reporting</span>
+<span class="sd">        attached.</span>
+
+<span class="sd">        Passing this without a prediction region raises, rather than</span>
+<span class="sd">        reporting a sum as though it were an average.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            efforts (numpy.ndarray): experimental effort vector.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            float: the criterion value, to be MINIMISED.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">v_opt_criterion</span><span class="p">(</span><span class="n">efforts</span><span class="p">)</span></div>
+
+
 <div class="viewcode-block" id="Designer.vdi_criterion">
 <a class="viewcode-back" href="../../../api.html#pydex.core.designer.Designer.vdi_criterion">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">vdi_criterion</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">efforts</span><span class="p">):</span>
